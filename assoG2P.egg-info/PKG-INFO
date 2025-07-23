@@ -1,0 +1,224 @@
+Metadata-Version: 2.2
+Name: assoG2P
+Version: 1.0.0
+Summary: Genome-wide association analysis toolkit
+Author: chenrf
+Author-email: 12024128035@stu.ynu.edu.cn
+Classifier: Programming Language :: Python :: 3
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Requires-Dist: numpy<2.2,>=1.20
+Requires-Dist: pandas>=1.3
+Requires-Dist: scikit-learn>=1.0
+Requires-Dist: matplotlib>=3.5
+Requires-Dist: numba>=0.57
+Requires-Dist: lightgbm>=3.3
+Requires-Dist: xgboost>=1.6
+Requires-Dist: catboost>=1.0
+Requires-Dist: shap>=0.40
+Requires-Dist: plotly>=5.0
+Requires-Dist: kaleido>=0.2
+Requires-Dist: seaborn>=0.11
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
+# assoG2P Genomic Analysis Tool
+
+##  Table of Contents
+- [ Feature Overview](#Feature-Overview)
+- [ Installation Guide](#Installation-Guide)
+- [ Quick Start](#Quick-Start)
+- [ Detailed Usage](#Detailed-Usage)
+  - [1. Data Preprocessing](#1Data-Preprocessing)
+  - [2. Model Training](#2Model-Training)
+  - [3. Result Visualization](#3Result-Visualization)
+- [ Sample Data](#Sample-Data)
+- [ FAQ](#FAQ)
+- [ Developer Guide](#Developer-Guide)
+
+---
+
+## Feature Overview ##
+**End-to-end genomic analysis toolkit** with three core modules
+
+```text
+1. Data Preprocessing: VCF genotype data → structured analysis-ready data  
+2. Model Training: 6 machine learning algorithms for feature importance calculation  
+3. Result Visualization: Chromosome-level visual analysis  
+```
+---
+
+## Installation Guide ##
+Download the assog2p-1.0.0-py3-none-any.whl package and run the following command on Linux:
+```pip install assog2p-1.0.0-py3-none-any.whl```
+The following message indicates successful installation：
+```bash
+Installing collected packages : assog2p
+Successfully installed assog2p-1.0.0
+```
+After installation, ```association``` is registered as a command-line tool in the current environment.
+Run ```association -h ```to view usage help.
+
+---
+
+## Quick Start ##
+**Complete Workflow Example**
+```bash
+# Data preprocessing
+association preprocess -g genotype.vcf -p phenotype.txt -o ml.txt
+
+#  Model training (using LightGBM as an example)  
+association train -i ml.txt -m LightGBM -o importance.csv
+
+# Feature importance visualization  
+association visualize -i importance.csv -o result.png -t scatter
+```
+
+## Detailed Usage ##
+###  1. Data Preprocessing ###
+**Input File Requirements:**
+```markdown
++ Genotype file in standard VCF format  
++ Phenotype file in .txt format (sample_ID, phenotype)  
+```
+**Common Parameters:**
+```bash
+association preprocess   
+  -g <input.vcf> \          # Path to input VCF file  
+  -p <phenotype.txt> \      # Path to phenotype file  
+  -o <output.txt> \         # Output file path  
+```
+
+**phenotype file example if it's a binary task** :
+
+|:---|:---|
+|1-1|0|
+|1-2|0|
+|1-3|1|
+|2-1|1|
+
+phenotype file example **if it's a regression task**:
+
+|:---|:---|
+|1-1|9.5|
+|1-2|7.4|
+|1-3|10.8|
+|2-1|12.5|
+
+output.txt example:
+
+|sample|snp1|snp2|...|snp10000|...|snp...|phenotype|
+|:---|:---|:---|:---|:---|:---|:---|:---|
+|1-1|1|0|...|2|...|...|0|
+|1-2|0|1|...|2|...|...|0|
+|1-3|1|1|...|2|...|...|1|
+|2-1|0|2|...|1|...|...|1|
+
+**_If a SNP is None, it is encoded as -1**_
+
+
+### 2.  Model Training ###
+
+**Supported Algorithms:**
+```text
+LightGBM    - High-performance gradient boosting  
+RandomForest - Random Forest  
+XGBoost     - Extreme Gradient Boosting  
+SVM         - Support Vector Machine  
+CatBoost    - Categorical feature optimization  
+Logistic    - Logistic Regression  
+```
+
+**Typical Usage:**
+```bash
+association train   
+  -i input.txt \            # Preprocessed data  
+  -m RandomForest \         # Selected algorithm  
+  -o importance.csv \       # Feature importance output  
+```
+
+-i input.txt **The format is the same as the output file format of the previous step**
+
+-o importance.csv example:
+
+|Feature|Importance|
+|:---|:---|
+|snp1|0.45|
+|snp2|0.21|
+|snp...|...|
+|snp...|...|
+
+
+### 3. Result Visualization ###
+
+**Chart Type Comparison:**
+|Type Parameter|Use Case|
+|:---|:---|
+|scatter|Genome-wide distribution|
+|bar|Chromosome summary|
+|line|Trend analysis|
+|hist|Value distribution|
+
+**Interactive Mode Example:**
+```bash
+association visualize   
+  -i data.csv \             # Model training output  
+  -o plot.html \            # Output HTML file  
+  -t scatter \              # Chart type  
+  --interactive             # Enable interactive mode  
+```
+
+---
+
+## Sample Data ##
+
+**Test Dataset:**
+```bash
+
+```
+**File Description:**
+```text
+
+```
+
+---
+
+## FAQ ##
+
+**Installation Error: ```ERROR: Failed to build installable wheels for some pyproject.toml based projects (lightgbm)```**
+
+```bash
+# First install a precompiled version  
+pip install --prefer-binary lightgbm  
+
+# Then retry installation  
+pip install assog2p-1.0.0-py3-none-any.whl  
+```
+
+**How to Generate a PDF Report?**
+
+```bash
+association visualize -i results.csv -o report.pdf -t bar --dpi 300
+```
+
+---
+
+## Developer Guide ##
+
+**Code Structure**
+```text
+assoG2P/  
+├── bin/                # Core modules  
+│   ├── preprocess.py   # Data preprocessing  
+│   ├── modeltraining.py # Model training  
+│   └── visualization.py # Visualization  
+├── main.py             # Main entry  
+└── setup.py            # Package configuration  
+```

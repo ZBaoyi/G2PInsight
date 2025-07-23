@@ -1,0 +1,2 @@
+[console_scripts]
+association = assoG2P.main:main
