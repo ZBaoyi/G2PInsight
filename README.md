@@ -169,16 +169,18 @@ Sample2	2	0	...	0.78
 
 **phenotype file example if it's a binary task** :
 
-|:---|:---|
+
 |1-1|0|
+|:---|:---|
 |1-2|0|
 |1-3|1|
 |2-1|1|
 
 phenotype file example **if it's a regression task**:
 
-|:---|:---|
+
 |1-1|9.5|
+|:---|:---|
 |1-2|7.4|
 |1-3|10.8|
 |2-1|12.5|
@@ -313,13 +315,13 @@ association visualize -i region.csv -o chr1.png -t line --chromosome 1 --title "
 #### 获取数据
 ```bash
 # 基因型数据（VCF格式，~380MB）
-wget https://ricevarmap.ncpgr.cn/media/Genotypes/Imputated_genotypes/rice4k_geno_add_del.vcf.gz
+wget 
 
 # 表型数据（CSV格式，~2KB）
-wget https://ricevarmap.ncpgr.cn/media/Phenos/phenos.csv
+wget 
 
 # 解压VCF文件
-gunzip rice4k_geno_add_del.vcf.gz
+gunzip 
 ```
 
 #### 文件说明
@@ -350,15 +352,6 @@ association visualize -i rice_importance.csv -o manhattan.html -t scatter --inte
 ```bash
 # 解决方案：安装预编译版本
 pip install --prefer-binary lightgbm
-```
-
-**Q: Windows下执行tools.sh提示权限不足**
-```powershell
-# 解决方案：以管理员模式运行PowerShell
-Start-Process powershell -Verb RunAs
-cd C:\Users\86183\Desktop\project
-chmod +x tools.sh
-./tools.sh
 ```
 
 #### 2. 运行时错误
@@ -408,7 +401,7 @@ association visualize -i results.csv -o report.pdf -t bar --dpi 300
 ### Development Environment Setup
 ```bash
 # 克隆仓库
-git clone https://github.com/yourusername/assoG2P.git
+git clone https://github.com/chenrf/assoG2P.git
 cd assoG2P
 
 # 创建开发环境
