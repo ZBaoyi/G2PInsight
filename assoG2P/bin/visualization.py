@@ -2,6 +2,7 @@ import argparse
 import logging
 import os
 import sys
+import warnings
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -15,17 +16,29 @@ from scipy import stats
 import plotly.express as px
 from importlib.metadata import version
 import kaleido
+from plotly.io import write_image
+
+# 忽略警告信息
+warnings.filterwarnings('ignore')
+
+# 导入字体设置工具
+try:
+    from assoG2P.bin.font_utils import setup_matplotlib_font, setup_plotly_font
+    setup_matplotlib_font()
+    PLOTLY_FONT = setup_plotly_font()
+except ImportError:
+    PLOTLY_FONT = {'family': 'Arial', 'size': 12}
+
 logger = logging.getLogger(__name__)
 
 class EnhancedGenomeVisualizer:
     """
     增强型基因组数据可视化工具
     功能：
-    - 支持静态/交互式可视化
+    - 支持静态/交互式散点图可视化
     - 自动染色体位置标注
     - 动态点大小调整
     - 自动计算显著性阈值
-    - 多图表类型支持
     """
 
     def __init__(
@@ -54,20 +67,35 @@ class EnhancedGenomeVisualizer:
         # 初始化关键属性
         self.df = None
         self.threshold = None
+        self.effect_col = None  # 正负效应列（三列格式的第三列）
+        
+        # 统一的颜色定义（静态图和交互式图保持一致）
+        self.colors = {
+            'Positive': '#2980b9',  # 蓝色
+            'Negative': '#c0392b'   # 红色
+        }
         
         try:
             self._initialize_data()
-            logger.info(f"成功加载 {len(self.df)} 个数据点")
-            logger.debug(f"数据列信息: {self.df.columns.tolist()}")
-            logger.debug(f"数值列统计: {self.df[self.value_col].describe()}")
         except Exception as e:
-            logger.error(f"数据初始化失败: {str(e)}", exc_info=True)
+            logger.error(f"数据初始化失败: {str(e)}")
             raise
 
     def _initialize_data(self):
         """数据加载和预处理"""
         self.df = self._load_and_process()
         self.threshold = self._calculate_threshold()
+        # 打印基础数据信息
+        try:
+            logger.info(
+                f"📥 Visualization data loaded: file={self.input_file}, "
+                f"rows={len(self.df)}, feature_col={self.feature_col}, "
+                f"value_col={self.value_col}, effect_col={self.effect_col or 'None'}"
+            )
+            logger.info(f"Significance threshold (abs value, 99th percentile): {self.threshold:.4g}")
+        except Exception:
+            # 日志输出失败不影响后续绘图
+            pass
 
     def _detect_feature_column(self, columns: List[str]) -> str:
         """自动检测特征列"""
@@ -76,38 +104,143 @@ class EnhancedGenomeVisualizer:
                 return col
         return columns[0]
 
-    def _detect_value_column(self, columns: List[str]) -> str:
-        """自动检测数值列"""
-        sample_df = pd.read_csv(self.input_file, nrows=100)
+    def _detect_separator(self, file_path: Path) -> str:
+        """自动检测文件分隔符"""
+        with open(file_path, 'r', encoding='utf-8') as f:
+            first_line = f.readline().strip()
+            # 检测tab分隔符
+            if '\t' in first_line:
+                return '\t'
+            # 检测逗号分隔符
+            elif ',' in first_line:
+                return ','
+            # 默认使用tab（因为我们的文件都是tab分隔）
+            else:
+                return '\t'
+    
+    def _detect_columns(self, columns: List[str], sep: str = '\t') -> Tuple[str, str, Optional[str]]:
+        """
+        自动检测列：适应三列格式（特征名、绝对值、正负效应）
+        返回：(特征列, 绝对值列, 效应列)
+        
+        优先识别标准的feature_importance文件格式：
+        - feature: 特征名列
+        - importance_abs: 重要性绝对值列
+        - effect: 正负效应列（1或-1）
+        """
+        sample_df = pd.read_csv(self.input_file, nrows=100, sep=sep)
+        
+        # 优先检查是否为标准的feature_importance格式
+        if len(columns) >= 3:
+            # 检查列名是否匹配标准格式
+            feature_col = None
+            abs_col = None
+            effect_col = None
+            
+            for col in columns:
+                col_lower = col.lower()
+                if col_lower == 'feature':
+                    feature_col = col
+                elif col_lower in ['importance_abs', 'importance']:
+                    abs_col = col
+                elif col_lower == 'effect':
+                    effect_col = col
+            
+            # 如果找到了所有标准列名，直接返回
+            if feature_col and abs_col and effect_col:
+                return feature_col, abs_col, effect_col
+        
+        # 如果文件正好有三列，按顺序分配
+        if len(columns) == 3:
+            feature_col = columns[0]
+            abs_col = columns[1]
+            effect_col = columns[2]
+            return feature_col, abs_col, effect_col
+        
+        # 否则，尝试智能检测
+        # 检测特征列（通常包含染色体_位置格式或名为feature）
+        feature_col = None
         for col in columns:
-            if col != self.feature_col and pd.api.types.is_numeric_dtype(sample_df[col]):
-                return col
-        return columns[1] if len(columns) > 1 else columns[0]
+            if 'feature' in col.lower():
+                feature_col = col
+                break
+        if feature_col is None:
+            # 检查第一列是否包含染色体_位置格式
+            first_col_sample = sample_df[columns[0]].dropna().head(10)
+            if first_col_sample.str.contains(r'^\d+_\d+$', na=False).any():
+                feature_col = columns[0]
+            else:
+                feature_col = columns[0]  # 默认使用第一列
+        
+        # 检测绝对值列（通常包含abs或importance）
+        abs_col = None
+        for col in columns:
+            if col != feature_col:
+                if ('abs' in col.lower() or 'importance' in col.lower()) and pd.api.types.is_numeric_dtype(sample_df[col]):
+                    abs_col = col
+                    break
+        if abs_col is None:
+            # 如果没找到，使用第二列（假设是三列格式）
+            abs_col = columns[1] if len(columns) > 1 else columns[0]
+        
+        # 检测效应列（通常包含effect，值为1或-1）
+        effect_col = None
+        for col in columns:
+            if col != feature_col and col != abs_col:
+                if 'effect' in col.lower() and pd.api.types.is_numeric_dtype(sample_df[col]):
+                    # 检查值是否为1或-1
+                    unique_vals = sample_df[col].dropna().unique()
+                    if len(unique_vals) <= 2 and all(v in [1, -1, 1.0, -1.0] for v in unique_vals):
+                        effect_col = col
+                        break
+        if effect_col is None and len(columns) >= 3:
+            # 如果没找到，使用第三列（假设是三列格式）
+            effect_col = columns[2]
+        
+        return feature_col, abs_col, effect_col
 
     def _load_and_process(self) -> pd.DataFrame:
         """数据加载和处理流程"""
         if not self.input_file.exists():
             raise FileNotFoundError(f"输入文件不存在: {self.input_file}")
 
-        # 列检测
-        sample_df = pd.read_csv(self.input_file, nrows=100)
-        if self.feature_col is None:
-            self.feature_col = self._detect_feature_column(sample_df.columns)
-        if self.value_col is None:
-            self.value_col = self._detect_value_column(sample_df.columns)
+        # 自动检测分隔符
+        sep = self._detect_separator(self.input_file)
+        tab_char = '\t'  # 避免在f-string中使用反斜杠
+        sep_name = 'Tab' if sep == tab_char else 'Comma'
 
+        # 列检测（适应三列格式）
+        sample_df = pd.read_csv(self.input_file, nrows=100, sep=sep)
+        feature_col, abs_col, effect_col = self._detect_columns(sample_df.columns, sep=sep)
+        
+        if self.feature_col is None:
+            self.feature_col = feature_col
+        if self.value_col is None:
+            self.value_col = abs_col
+        
+        # 保存effect_col供后续使用
+        self.effect_col = effect_col
+        
+        # 确定要加载的列
+        cols_to_load = [self.feature_col, self.value_col]
+        if effect_col:
+            cols_to_load.append(effect_col)
+        
         # 完整加载
+        dtype_dict = {self.feature_col: 'string', self.value_col: 'float32'}
+        if effect_col:
+            dtype_dict[effect_col] = 'int32'
+        
         df = pd.read_csv(
             self.input_file,
-            usecols=[self.feature_col, self.value_col],
-            dtype={self.feature_col: 'string', self.value_col: 'float32'}
+            sep=sep,
+            usecols=cols_to_load,
+            dtype=dtype_dict
         )
 
         # 数据校验
         if len(df) == 0:
             raise ValueError("输入文件为空")
-        logger.debug(f"原始数据形状: {df.shape}, 列: {df.columns.tolist()}")
-        logger.debug(f"数值列统计摘要: {df[self.value_col].describe()}")
         
         # 检查数值列是否包含有效值
         if df[self.value_col].isna().sum() > 0:
@@ -122,9 +255,12 @@ class EnhancedGenomeVisualizer:
             logger.warning(f"数值列 {self.value_col} 取值范围过小，可能影响可视化效果")
         
         if len(df) > self.max_points and self.auto_sample:
+            before_n = len(df)
             df = df.sample(self.max_points, random_state=42)
-            logger.info(f"数据抽样至 {self.max_points} 个点")
-            logger.debug(f"抽样后数据形状: {df.shape}")
+            logger.info(
+                f"Auto-sampling enabled: down-sampled from {before_n} to {len(df)} points "
+                f"(max_points={self.max_points})"
+            )
 
         # 基因组位置解析
         chrom_pos = df[self.feature_col].str.extract(r'^(?P<chrom>\d+)_(?P<pos>\d+)$')
@@ -135,14 +271,29 @@ class EnhancedGenomeVisualizer:
                 f"无效样本示例: {invalid_samples}"
             )
 
-        # 数据增强
-        df = df.assign(
-            chrom_num=chrom_pos['chrom'].astype('uint8'),
-            position=chrom_pos['pos'].astype('uint32'),
-            chrom_label="Chr" + chrom_pos['chrom'],
-            value_sign=np.where(df[self.value_col] >= 0, 'Positive', 'Negative'),
-            value_abs=df[self.value_col].abs()
-        ).sort_values(['chrom_num', 'position'])
+        # 数据增强（适应三列格式：特征名、绝对值、正负效应）
+        # 如果存在effect列，使用它来确定正负效应；否则从绝对值列推断
+        if self.effect_col and self.effect_col in df.columns:
+            # 使用effect列（1或-1）确定正负效应
+            # 第二列已经是绝对值，需要与effect列相乘得到带正负的值用于绘图
+            df = df.assign(
+                chrom_num=chrom_pos['chrom'].astype('uint8'),
+                position=chrom_pos['pos'].astype('uint32'),
+                chrom_label="Chr" + chrom_pos['chrom'],
+                value_sign=np.where(df[self.effect_col] >= 0, 'Positive', 'Negative'),
+                value_abs=df[self.value_col],  # 第二列已经是绝对值，不需要再计算
+                value_signed=df[self.value_col] * df[self.effect_col]  # 用于绘图：绝对值 * 效应方向
+            ).sort_values(['chrom_num', 'position'])
+        else:
+            # 兼容旧格式：从数值列推断（如果数值可能为负）
+            df = df.assign(
+                chrom_num=chrom_pos['chrom'].astype('uint8'),
+                position=chrom_pos['pos'].astype('uint32'),
+                chrom_label="Chr" + chrom_pos['chrom'],
+                value_sign=np.where(df[self.value_col] >= 0, 'Positive', 'Negative'),
+                value_abs=df[self.value_col].abs(),
+                value_signed=df[self.value_col]  # 旧格式中value_col已经包含正负
+            ).sort_values(['chrom_num', 'position'])
 
         # 计算基因组坐标
         df['x_pos'] = self._calculate_genomic_positions(df)
@@ -161,477 +312,247 @@ class EnhancedGenomeVisualizer:
     def _dynamic_style(self) -> Tuple[float, float]:
         """动态调整点样式"""
         n = len(self.df)
-        size = max(1, 50 / (1 + np.log10(n + 1)))
+        # 增大基础大小系数，从50改为70使点更大
+        size = max(2, 200 / (1 + np.log10(n + 1)))
         alpha = min(0.9, 0.7 / (1 + n / 5e4))
         return size, alpha
 
-    def plot(
+    def plot_static_scatter(
         self,
         output_file: str,
-        plot_type: str = "scatter",
-        interactive: bool = False,
-        dpi: int = 150,
+        dpi: int = 300,
         **kwargs
     ) -> None:
         """
-        主绘图方法
+        绘制静态散点图
         参数:
             output_file: 输出文件路径
-            plot_type: 图表类型(scatter/bar/line/hist)
-            interactive: 是否使用交互模式
-            dpi: 图像分辨率(静态图)
+            dpi: 图像分辨率
         """
-        plot_types = ["scatter", "bar", "line", "hist"]
-        if plot_type not in plot_types:
-            raise ValueError(f"不支持的图表类型: {plot_type} (可选: {plot_types})")
-
-        # 绘图前综合调试摘要
-        logger.debug(
-            "===== 绘图参数调试摘要 =====\n"\
-            f"图表类型: {plot_type}, 交互模式: {interactive}\n"\
-            f"输入文件: {self.input_file}, 输出文件: {output_file}\n"\
-            f"特征列: {self.feature_col}, 数值列: {self.value_col}\n"\
-            f"数据点数量: {len(self.df)}, 染色体数量: {self.df['chrom_num'].nunique()}\n"\
-            f"数值范围: [{self.df[self.value_col].min():.4f}, {self.df[self.value_col].max():.4f}]\n"\
-            f"显著性阈值: {self.threshold:.4f}\n"\
-            "=============================="
+        # 绘图前打印基本信息
+        logger.info(
+            f"Drawing static scatter: input={self.input_file}, "
+            f"output={output_file}, rows={len(self.df)}, "
+            f"feature_col={self.feature_col}, value_col={self.value_col}"
         )
-        
         try:
-            if interactive:
-                self._plot_interactive(output_file, plot_type, **kwargs)
-            else:
-                self._plot_static(output_file, plot_type, dpi,** kwargs)
-            logger.info(f"图表成功保存到 {output_file}")
+            self._plot_static_scatter(output_file, dpi, **kwargs)
         except Exception as e:
-            logger.error(f"绘图失败: {str(e)}", exc_info=True)
-            logger.error(f"绘图参数: 类型={plot_type}, 交互={interactive}, 输出={output_file}")
+            logger.error(f"静态散点图绘制失败: {str(e)}")
             raise
 
-    def _plot_static(
+    def _plot_static_scatter(
         self,
         output_file: str,
-        plot_type: str,
         dpi: int,
         **kwargs
     ) -> None:
-        """静态图绘制"""
+        """静态散点图绘制"""
         sns.set(style="whitegrid")
         fig, ax = plt.subplots(figsize=(18, 8), dpi=dpi)
         
-        # 颜色定义
-        colors = {'Positive': '#2980b9', 'Negative': '#c0392b'}
-        
-        if plot_type == "scatter":
-            self._plot_scatter_static(ax, colors)
-        elif plot_type == "bar":
-            self._plot_bar_static(ax, colors)
-        elif plot_type == "line":
-            self._plot_line_static(ax, colors)
-        elif plot_type == "hist":
-            self._plot_hist_static(ax, colors)
-
-        if plot_type == 'scatter':
-            self._add_threshold_lines(ax)
-        self._format_axes(ax, plot_type)
+        self._plot_scatter_static(ax, self.colors)
+        self._format_axes(ax)
         self._save_figure(fig, output_file, dpi)
 
+    def plot_interactive_scatter(
+        self,
+        output_file: str,
+        **kwargs
+    ) -> None:
+        """
+        绘制交互式散点图
+        参数:
+            output_file: 输出文件路径
+        """
+        # 绘图前打印基本信息
+        logger.info(
+            f"Drawing interactive scatter: input={self.input_file}, "
+            f"output={output_file}, rows={len(self.df)}, "
+            f"feature_col={self.feature_col}, value_col={self.value_col}"
+        )
+        try:
+            self._plot_interactive_scatter(output_file, **kwargs)
+        except Exception as e:
+            logger.error(f"交互式散点图绘制失败: {str(e)}")
+            raise
+
+    def _plot_interactive_scatter(
+        self,
+        output_file: str,
+        **kwargs
+    ) -> None:
+        """交互式散点图绘制"""
+        fig = self._create_interactive_scatter()
+        
+        output_path = Path(output_file)
+        if output_path.suffix == '.html':
+            fig.write_html(output_path, include_plotlyjs='cdn')
+        else:
+            try:
+                write_image(fig, output_path, scale=2, engine='kaleido')
+            except Exception as e:
+                logger.error(f"图像写入失败，尝试使用orca引擎...", exc_info=True)
+                try:
+                    write_image(fig, output_path, scale=2, engine='orca')
+                except Exception as e2:
+                    logger.error(f"图像保存失败: {str(e2)}")
+                    raise
+
     def _plot_scatter_static(self, ax: Axes, colors: Dict[str, str]):
-        """静态散点图"""
+        """静态散点图绘制实现"""
         size, alpha = self._dynamic_style()
         
         for sign, color in colors.items():
             subset = self.df[self.df['value_sign'] == sign]
+            x_values = subset['x_pos'].values.flatten()
+            # 使用value_signed列（包含正负的值）用于绘图
+            y_values = subset['value_signed'].values.flatten()
+            
+            # 绘制散点
             ax.scatter(
-                x=subset['x_pos'].values.flatten(),
-                y=subset[self.value_col].values.flatten(),
+                x=x_values,
+                y=y_values,
                 c=color,
                 s=size,
                 alpha=alpha,
                 edgecolors='none',
                 label=sign
             )
-
-    def _plot_bar_static(self, ax: Axes, colors: Dict[str, str]):
-        """静态柱状图"""
-        chrom_stats = self.df.groupby('chrom_label', as_index=False).agg(
-            mean_value=(self.value_col, 'mean'),
-            mean_abs=('value_abs', 'mean'),
-            median_x=('x_pos', 'median')  # 添加中位数位置
-        )
-        # 按染色体编号排序
-        chrom_stats = chrom_stats.sort_values(
-            by='chrom_label',
-            key=lambda x: x.str.extract('(\d+)', expand=False).astype(int)
-        )
-        # 确保数据为1维数组
-        chrom_stats['mean_abs'] = chrom_stats['mean_abs'].values.flatten()
-        chrom_stats['mean_value'] = chrom_stats['mean_value'].values.flatten()
-        chrom_stats['median_x'] = chrom_stats['median_x'].values.flatten()
+            
+            # 添加从每个点到Y=0的垂直线
+            for x, y in zip(x_values, y_values):
+                ax.plot([x, x], [0, y], color=color, linestyle='-', alpha=0.3, linewidth=2)
         
-        # 计算相邻染色体位置的最小间距
-        sorted_x = chrom_stats['median_x']
-        min_spacing = sorted_x.diff().dropna().min() if len(sorted_x) > 1 else 1
-        # 使用最小间距的80%作为柱子宽度
-        dynamic_width = min_spacing * 0.8
-        
-        # 创建颜色列表
-        colors_list = [colors['Positive'] if val >= 0 else colors['Negative'] for val in chrom_stats['mean_value']]
-        
-        # 绘制柱状图
-        ax.bar(
-            x=chrom_stats['median_x'],
-            height=chrom_stats['mean_abs'],
-            color=colors_list,
-            edgecolor='black',
-            width=dynamic_width
-        )
-        
-        # 调试颜色分配和宽度计算
-        for _, row in chrom_stats.iterrows():
-            logger.debug(f"染色体 {row['chrom_label']} 均值: {row['mean_value']}, 颜色: {colors['Positive'] if row['mean_value'] >= 0 else colors['Negative']}")
-        logger.debug(f"动态宽度计算: 最小间距={min_spacing}, 宽度={dynamic_width}")
-
-    def _plot_line_static(self, ax: Axes, colors: Dict[str, str]):
-        """静态折线图"""
-        stats = self.df.groupby('chrom_label').agg(
-              mean=('value_abs', 'mean'),
-              std=('value_abs', 'std')
-          ).sort_values(
-              by='chrom_label',
-              key=lambda x: x.str.extract('(\d+)', expand=False).astype(int)
-          )
-        logger.debug(f"折线图统计数据形状: {stats.shape}")
-        logger.debug(f"折线图统计数据类型: {stats.dtypes}")
-        logger.debug(f"前5行统计数据: {stats.head().to_dict()}")
-        # 按染色体编号排序
-        stats = stats.reindex(sorted(stats.index, key=lambda x: int(x.replace('Chr', ''))))
-        
-        x = np.arange(len(stats))
-        # Flatten arrays to ensure 1-dimensional input
-        mean_values = stats['mean'].values.flatten()
-        std_values = stats['std'].values.flatten()
-        
-        # 验证数据维度
-        logger.debug(f"静态折线图x形状: {x.shape}, y形状: {mean_values.shape}")
-        if x.ndim != 1 or mean_values.ndim != 1 or std_values.ndim != 1:
-            logger.error(f"静态折线图数据维度错误: x={x.ndim}D, y={mean_values.ndim}D, std={std_values.ndim}D")
-            raise ValueError("折线图数据必须是1维数组")
-        
-        try:
-            ax.plot(x, mean_values, color=colors['Positive'], marker='o')
-            ax.fill_between(
-                x,
-                mean_values - std_values,
-                mean_values + std_values,
-                color=colors['Positive'],
-                alpha=0.2
-            )
-            logger.debug(f"静态折线图绘制成功，数据点数量: {len(x)}")
-        except Exception as e:
-            logger.error(f"静态折线图绘制失败: {str(e)}", exc_info=True)
-            raise
-        ax.set_xticks(x)
-        ax.set_xticklabels(stats.index)
-
-    def _plot_hist_static(self, ax: Axes, colors: Dict[str, str]):
-        """静态直方图"""
-        bins = min(50, int(len(self.df) ** 0.5))  # 自适应bin数量
-        pos = self.df[self.df['value_sign'] == 'Positive'][self.value_col].values.flatten()
-        neg = self.df[self.df['value_sign'] == 'Negative'][self.value_col].values.flatten()
-        
-        ax.hist(
-            [pos, neg],
-            bins=bins,
-            color=[colors['Positive'], colors['Negative']],
-            stacked=True,
-            label=['Positive', 'Negative']
-        )
-
-    def _plot_interactive(
-        self,
-        output_file: str,
-        plot_type: str,
-        **kwargs
-    ) -> None:
-        """交互式绘图"""
-
-        if plot_type == "scatter":
-            fig = self._create_interactive_scatter()
-        elif plot_type == "bar":
-            fig = self._create_interactive_bar()
-        elif plot_type == "line":
-            fig = self._create_interactive_line()
-        elif plot_type == "hist":
-            fig = self._create_interactive_hist()
-        else:
-            raise ValueError(f"交互模式暂不支持 {plot_type} 图表类型")
-
-        output_path = Path(output_file)
-        if output_path.suffix == '.html':
-            fig.write_html(output_path, include_plotlyjs='cdn')
-            logger.debug(f"成功写入交互式HTML图表: {output_path}")
-        else:
-            try:
-                write_image(fig, output_path, scale=2, engine='kaleido')
-                logger.debug(f"成功写入静态图像: {output_path}")
-            except Exception as e:
-                logger.error(f"图像写入失败，尝试使用orca引擎...", exc_info=True)
-                try:
-                    write_image(fig, output_path, scale=2, engine='orca')
-                    logger.debug(f"成功使用orca引擎写入静态图像: {output_path}")
-                except Exception as e2:
-                    logger.error(f"使用orca引擎写入图像也失败: {str(e2)}", exc_info=True)
-                    raise
-
-    def _create_interactive_line(self):
-        """交互式折线图"""
-        stats = self.df.groupby('chrom_label').agg(
-            mean=('value_abs', 'mean'),
-            std=('value_abs', 'std')
-        ).reset_index()
-        logger.debug(f"交互式折线图统计数据形状: {stats.shape}")
-        logger.debug(f"交互式统计数据列: {stats.columns.tolist()}")
-        logger.debug(f"交互式统计数据前5行: {stats.head().to_dict()}")
-        # 确保数据为1维数组
-        stats['mean'] = stats['mean'].values.flatten()
-        stats['std'] = stats['std'].values.flatten()
-        # 按染色体编号排序
-        stats = stats.sort_values(
-            by='chrom_label',
-            key=lambda x: x.str.extract('(\d+)', expand=False).astype(int)
-        )
-        
-        # 验证数据维度
-        logger.debug(f"交互式折线图x形状: {stats['chrom_label'].shape}, y形状: {stats['mean'].shape}")
-        if stats['chrom_label'].ndim != 1 or stats['mean'].ndim != 1 or stats['std'].ndim != 1:
-            logger.error(f"交互式折线图数据维度错误: x={stats['chrom_label'].ndim}D, y={stats['mean'].ndim}D, std={stats['std'].ndim}D")
-            raise ValueError("折线图数据必须是1维数组")
-        
-        try:
-            fig = px.line(
-                stats,
-                x='chrom_label',
-                y='mean',
-                error_y='std',
-                markers=True,
-                title=f'染色体区域{self.value_col}绝对值平均值',
-                labels={'mean': f'{self.value_col}绝对值平均值', 'chrom_label': '染色体'}
-            )
-            logger.debug(f"交互式折线图创建成功，数据点数量: {len(stats)}")
-        except Exception as e:
-            logger.error(f"交互式折线图创建失败: {str(e)}", exc_info=True)
-            raise
-        
-        fig.update_traces(line=dict(color='#3498db'))
-        fig.update_layout(
-            plot_bgcolor='white',
-            xaxis=dict(showgrid=True, gridcolor='lightgray'),
-            yaxis=dict(showgrid=True, gridcolor='lightgray')
-        )
-        
-        return fig
-
-    def _create_interactive_hist(self):
-        """交互式直方图"""
-        pos = self.df[self.df['value_sign'] == 'Positive'][self.value_col].values.flatten()
-        neg = self.df[self.df['value_sign'] == 'Negative'][self.value_col].values.flatten()
-        
-        logger.debug(f"直方图数据: 正样本={len(pos)}, 负样本={len(neg)}")
-        if len(pos) == 0 and len(neg) == 0:
-            raise ValueError("没有可绘制的数据点，请检查输入数据")
-        
-        # 根据数据存在情况创建直方图轨迹
-        if len(pos) > 0:
-            fig = px.histogram(
-                x=pos,
-                color_discrete_sequence=['#3498db'],
-                name='Positive',
-                title=f'{self.value_col} 分布直方图',
-                labels={"x": self.value_col, "count": "频率"}
-            )
-        else:
-            fig = px.histogram(
-                x=neg,
-                color_discrete_sequence=['#e74c3c'],
-                name='Negative',
-                title=f'{self.value_col} 分布直方图',
-                labels={"x": self.value_col, "count": "频率"}
-            )
-        
-        # 添加另一组数据（如果存在）
-        if len(pos) > 0 and len(neg) > 0:
-            fig.add_histogram(
-                x=neg,
-                color_discrete_sequence=['#e74c3c'],
-                name='Negative'
-            )
-        elif len(neg) > 0 and len(pos) == 0:
-            pass  # 已在初始fig中创建
-        elif len(pos) > 0 and len(neg) == 0:
-            pass  # 已在初始fig中创建
-        
-        fig.update_layout(
-            barmode='overlay',
-            plot_bgcolor='white',
-            xaxis=dict(showgrid=True, gridcolor='lightgray'),
-            yaxis=dict(showgrid=True, gridcolor='lightgray'),
-            legend=dict(
-                title='效应方向',
-                itemsizing='constant',
-                traceorder='normal'
-            )
-        )
-        
-        fig.update_traces(opacity=0.75)
-        return fig
+        # 确保显示图例
+        ax.legend(title='Effect Direction', loc='upper right')
 
     def _create_interactive_scatter(self):
-        """交互式散点图"""
+        """交互式散点图创建"""
         size, alpha = self._dynamic_style()
         
+        # 创建散点图（使用统一的颜色定义，仅绘制点本身，交互式查看细节）
         fig = px.scatter(
             self.df,
             x=self.df['x_pos'].values.flatten(),
-            y=self.df[self.value_col].values.flatten(),
+            y=self.df['value_signed'].values.flatten(),  # 使用value_signed列（包含正负的值）
             color='value_sign',
-            color_discrete_map={
-                'Positive': '#3498db',
-                'Negative': '#e74c3c'
-            },
+            color_discrete_map=self.colors,  # 使用统一的颜色定义
             hover_data={
                 'chrom_label': True,
                 'position': True,
-                self.value_col: ':.3f',
+                'value_signed': ':.3f',
+                'value_abs': ':.3f',
                 'x_pos': False
             },
             size_max=size,
             opacity=alpha,
             width=1200,
-            height=500,
-            title=f"Genome-Wide Association (Top 1% threshold: ±{self.threshold:.2f})"
+            height=600,
+            title="Genome-Wide Association Scatter Plot"  # 与静态图标题一致
         )
+
+        # 确保显示图例
+        fig.update_layout(showlegend=True)
         
-        self._format_interactive_layout(fig, 'scatter')
+        # 应用与静态图一致的格式化
+        self._format_interactive_layout(fig)
         return fig
 
-    def _create_interactive_bar(self):
-        """交互式柱状图"""
-        chrom_stats = self.df.groupby('chrom_label', as_index=False).agg(
-            mean_value=(self.value_col, 'mean'),
-            mean_abs=('value_abs', 'mean')
-        )
+    def _format_interactive_layout(self, fig):
+        """格式化交互图表布局（与静态图保持一致）"""
+        # 计算染色体刻度位置（与静态图一致）
+        chrom_ticks = self.df.groupby('chrom_label')['x_pos'].median()
         
-        # Flatten arrays to ensure 1-dimensional input
-        chrom_stats['mean_abs'] = chrom_stats['mean_abs'].values.flatten()
-        chrom_stats['mean_value'] = chrom_stats['mean_value'].values.flatten()
+        # 计算Y轴范围：围绕0对称，便于上下居中观察正负效应
+        y_min = self.df['value_signed'].min()
+        y_max = self.df['value_signed'].max()
+        y_max_abs = max(abs(y_min), abs(y_max))
+        # 稍微加一点padding，避免点贴边
+        padding = 0.1 * y_max_abs if y_max_abs > 0 else 1.0
+        y_min_adjusted = - (y_max_abs + padding)
+        y_max_adjusted = (y_max_abs + padding)
         
-        fig = px.bar(
-            chrom_stats,
-            x='chrom_label',
-            y='mean_abs',
-            color=np.where(chrom_stats['mean_value'] >= 0, 'Positive', 'Negative'),
-            color_discrete_map={
-                'Positive': '#3498db',
-                'Negative': '#e74c3c'
+        # 更新布局（与静态图格式保持一致）并应用字体设置
+        fig.update_layout(
+            font=PLOTLY_FONT,
+            xaxis=dict(
+                showgrid=False,
+                title="Genomic Position",
+                tickmode='array',
+                tickvals=chrom_ticks.values.tolist(),
+                ticktext=chrom_ticks.index.tolist(),
+                tickangle=-45
+            ),
+            yaxis=dict(
+                showgrid=False,
+                title="Feature Importance",
+                range=[y_min_adjusted, y_max_adjusted]  # 与静态图Y轴范围一致
+            ),
+            title={
+                'text': "Genome-Wide Association Scatter Plot",
+                'x': 0.5,
+                'xanchor': 'center',
+                'font': {'size': 16, 'family': PLOTLY_FONT.get('family', 'Arial')}
             },
-            hover_data={
-                'mean_value': ':.3f',
-                'mean_abs': ':.3f'
-            },
-            width=1200,
-            height=500,
-            title=f"Chromosome-wise Mean Values (Threshold: ±{self.threshold:.2f})"
-        )
-        
-        self._format_interactive_layout(fig, 'bar')
-        return fig
-
-    def _format_interactive_layout(self, fig, plot_type: str):
-        """格式化交互图表布局"""
-        if plot_type in ['scatter', 'bar', 'hist']:
-            fig.update_layout(
-                xaxis_title=self.value_col if plot_type == 'hist' else "Chromosome",
-                yaxis_title="Frequency" if plot_type == 'hist' else ("Value" if plot_type == 'scatter' else "Mean Absolute Value"),
-                hovermode="x unified",
-                showlegend=True
+            legend=dict(
+                title="Effect Direction",
+                orientation="v",
+                yanchor="top",
+                y=1,
+                xanchor="right",
+                x=1
             )
-            
-            # 添加阈值线
-            if plot_type == 'scatter':
-                fig.add_hline(
-                    y=self.threshold,
-                    line_dash="dot",
-                    line_color="grey",
-                    annotation_text=f"Top 1%: {self.threshold:.2f}"
-                )
-                fig.add_hline(
-                    y=-self.threshold,
-                    line_dash="dot",
-                    line_color="grey"
-                )
-
-    def _add_threshold_lines(self, ax: Axes):
-        """添加阈值线"""
-        ax.axhline(self.threshold, color='#2c3e50', linestyle='--', alpha=0.7, linewidth=1)
-        ax.axhline(-self.threshold, color='#2c3e50', linestyle='--', alpha=0.7, linewidth=1)
-        ax.text(
-            0.01, 0.95,
-            f"Top 1% Threshold: ±{self.threshold:.2f}",
-            transform=ax.transAxes,
-            ha='left',
-            va='top',
-            bbox=dict(facecolor='white', alpha=0.8)
         )
+        
+        # 添加染色体分隔线（与静态图一致）
+        for chrom, group in self.df.groupby('chrom_label'):
+            x_sep = group['x_pos'].min() - 0.5
+            fig.add_shape(
+                type="line",
+                x0=x_sep,
+                y0=y_min_adjusted,
+                x1=x_sep,
+                y1=y_max_adjusted,
+                line=dict(
+                    color='gray',
+                    width=1,
+                    dash='dot'
+                ),
+                layer='below'
+            )
 
-    def _format_axes(self, ax: Axes, plot_type: str):
+    def _format_axes(self, ax: Axes):
         """格式化坐标轴"""
         # 染色体刻度
-        if plot_type in ['scatter', 'bar']:
-            chrom_ticks = self.df.groupby('chrom_label')['x_pos'].median()
-            ax.set_xticks(chrom_ticks.values)
-            ax.set_xticklabels(chrom_ticks.index, rotation=45, ha='right')
-            ax.set_xlabel("Genomic Position")
-            
-            # 染色体分隔线
-            for chrom, group in self.df.groupby('chrom_label'):
-                ax.axvline(group['x_pos'].min() - 0.5, color='gray', linestyle=':', alpha=0.3)
+        chrom_ticks = self.df.groupby('chrom_label')['x_pos'].median()
+        ax.set_xticks(chrom_ticks.values)
+        ax.set_xticklabels(chrom_ticks.index, rotation=45, ha='right', fontsize=16)
+        ax.set_xlabel("Genomic Position", fontsize=16)
+        
+        # 染色体分隔线
+        for chrom, group in self.df.groupby('chrom_label'):
+            ax.axvline(group['x_pos'].min() - 0.5, color='gray', linestyle=':', alpha=0.3)
 
         # 标签和标题
-        ylabel = {
-            'scatter': 'Association Value',
-            'bar': 'Mean Absolute Value',
-            'line': 'Value ± SD',
-            'hist': 'Frequency'
-        }.get(plot_type, 'Value')
-        
-        ax.set_ylabel(ylabel)
+        ax.set_ylabel('Feature Importance', fontsize=16)
         ax.set_title(
-            f"{plot_type.capitalize()} Plot "
-            f"(Total {len(self.df):,} variants, {self.df['chrom_num'].nunique()} chromosomes)",
-            pad=20
+            "Genome-Wide Association Scatter Plot",
+            pad=20,
+            fontsize=16
         )
-        # 动态调整Y轴范围以增强可视性
-        if plot_type == 'bar':
-            # 柱状图从0开始并添加适当边距
-            y_max = ax.get_ylim()[1]
-            padding = max(0.1 * y_max, 0.1)  # 10% padding或最小0.1
-            ax.set_ylim(0, y_max + padding)
-        else:
-            y_min, y_max = ax.get_ylim()
-            y_range = y_max - y_min
-            # 扩展Y轴范围10%并确保包含原点
-            ax.set_ylim(min(y_min - 0.1*y_range, 0), max(y_max + 0.1*y_range, 0))
-        ax.grid(True, axis='y', linestyle='--', alpha=0.4)
-        # 增大字体大小提高可读性
-        ax.tick_params(axis='both', which='major', labelsize=10)
-        ax.xaxis.label.set_size(12)
-        ax.yaxis.label.set_size(12)
-        ax.title.set_size(14)
         
-        # 图例
-        if plot_type in ['scatter', 'hist']:
-            ax.legend(title='Effect Direction', loc='upper right')
+        # 设置y轴刻度字体大小
+        ax.tick_params(axis='y', labelsize=16)
+        
+        # 动态调整Y轴范围以增强可视性
+        y_min, y_max = ax.get_ylim()
+        y_range = y_max - y_min
+        # 扩展Y轴范围10%并确保包含原点
+        ax.set_ylim(min(y_min - 0.1*y_range, 0), max(y_max + 0.1*y_range, 0))
+        
+        # 散点图不显示网格线
+        ax.grid(False)
 
     def _save_figure(self, fig, output_path: str, dpi: int):
         """保存图像"""
@@ -640,7 +561,6 @@ class EnhancedGenomeVisualizer:
         if not path.parent.exists():
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                logger.debug(f"创建输出目录: {path.parent}")
             except PermissionError:
                 raise PermissionError(f"没有权限创建目录: {path.parent}")
             except Exception as e:
@@ -655,30 +575,34 @@ class EnhancedGenomeVisualizer:
                 raise PermissionError(f"目录不可写: {path.parent}")
         
         try:
-            logger.debug(f"尝试保存静态图像: {path}, DPI: {dpi}")
             fig.savefig(
                 path,
                 dpi=dpi,
                 bbox_inches='tight',
                 facecolor='white',
             )
-            logger.debug(f"静态图像保存成功，文件大小: {os.path.getsize(path)} bytes")
         except Exception as e:
             logger.error(f"保存失败: {str(e)}")
             raise
 
 def run_visualization(
     input_file: str,
-    output_file: str,
+    output_prefix: str,
     feature_col: Optional[str] = None,
     value_col: Optional[str] = None,
-    plot_type: str = "scatter",
-    interactive: bool = False,
     dpi: int = 300,
+    static_only: bool = False,
+    interactive_only: bool = False,
     **kwargs
 ) -> int:
     """
     可视化入口函数
+    
+    支持三种模式：
+    1) 默认（不传 static_only/interactive_only）：同时生成静态和交互式散点图
+    2) static_only=True：只生成静态散点图
+    3) interactive_only=True：只生成交互式散点图
+    
     返回:
         0: 成功
         1: 常规错误
@@ -692,29 +616,48 @@ def run_visualization(
             feature_col=feature_col,
             value_col=value_col
         )
-        
-        visualizer.plot(
-            output_file=output_file,
-            plot_type=plot_type,
-            interactive=interactive,
-            dpi=dpi,
-            **kwargs
-        )
-        logger.info("可视化任务成功完成")
+
+        # 根据参数决定生成哪种图
+        generate_static = True
+        generate_interactive = True
+        if static_only and not interactive_only:
+            generate_interactive = False
+        elif interactive_only and not static_only:
+            generate_static = False
+
+        static_output = None
+        interactive_output = None
+
+        if generate_static:
+            static_output = f"{output_prefix}_static.png"
+            visualizer.plot_static_scatter(
+                output_file=static_output,
+                dpi=dpi,
+                **kwargs
+            )
+
+        if generate_interactive:
+            interactive_output = f"{output_prefix}_interactive.html"
+            visualizer.plot_interactive_scatter(
+                output_file=interactive_output,
+                **kwargs
+            )
+
+        logger.info(f"可视化完成")
         return 0
-        
-    except FileNotFoundError as e:
-            logger.error(f"文件错误: 无法找到输入文件 '{input_file}'\n请检查文件路径是否正确")
-            return 2
+
+    except FileNotFoundError:
+        logger.error(f"文件错误: 无法找到输入文件 '{input_file}'\n请检查文件路径是否正确")
+        return 2
     except ValueError as e:
-            logger.error(f"数据格式错误: {str(e)}\n输入文件: {input_file}\n特征列: {feature_col}, 数值列: {value_col}")
-            return 3
+        logger.error(f"数据格式错误: {str(e)}\n输入文件: {input_file}\n特征列: {feature_col}, 数值列: {value_col}")
+        return 3
     except ImportError as e:
-            logger.error(f"依赖错误: {str(e)}\n请运行 'pip install plotly kaleido' 安装必要依赖")
-            return 4
+        logger.error(f"依赖错误: {str(e)}\n请运行 'pip install plotly kaleido' 安装必要依赖")
+        return 4
     except Exception as e:
-            logger.error(f"可视化失败: {str(e)}")
-            return 1
+        logger.error(f"可视化失败: {str(e)}")
+        return 1
 
 if __name__ == "__main__":
     logging.basicConfig(
@@ -723,17 +666,17 @@ if __name__ == "__main__":
     )
     
     parser = argparse.ArgumentParser(
-        description="基因组数据可视化工具",
+        description="基因组数据散点图可视化工具",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument("-i", "--input", required=True, help="输入文件路径")
-    parser.add_argument("-o", "--output", required=True, help="输出文件路径")
+    parser.add_argument("-o", "--output", required=True, help="输出文件前缀")
     parser.add_argument("--feature-col", help="特征列名")
     parser.add_argument("--value-col", help="数值列名")
-    parser.add_argument("-t", "--type", default="scatter", 
-                       choices=["scatter", "bar", "line", "hist"], help="图表类型")
-    parser.add_argument("--interactive", action="store_true", help="交互模式")
-    parser.add_argument("--dpi", type=int, default=300, help="图像分辨率(静态图)")
+    parser.add_argument("--dpi", type=int, default=300, help="静态图像分辨率")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--static-only", action="store_true", help="仅生成静态散点图（PNG）")
+    group.add_argument("--interactive-only", action="store_true", help="仅生成交互式散点图（HTML）")
     
     args = parser.parse_args()
     sys.exit(run_visualization(**vars(args)))

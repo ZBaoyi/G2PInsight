@@ -22,6 +22,7 @@ TOOLS=(
     "bedtools"      # 基因组算术
     "blast"         # 序列比对
     "bowtie2"       # 短序列比对
+    "plink2"
 )
 
 CONDA_PATH="${HOME}/bioconda"   # 安装目录
@@ -45,7 +46,6 @@ show_header() {
     echo -e "==============================================\n${NC}"
 }
 
-
 check_deps() {
     local missing=()
     for cmd in wget curl unzip; do
@@ -56,22 +56,8 @@ check_deps() {
 
     if [ ${#missing[@]} -gt 0 ]; then
         echo -e "${RED}缺少依赖: ${missing[*]}${NC}"
-        echo -e "${YELLOW}尝试自动安装依赖...(需要sudo权限)${NC}"
-        
-        if command -v apt-get &>/dev/null; then
-            sudo apt-get update && sudo apt-get install -y ${missing[@]} || {
-                echo -e "${RED}依赖安装失败，请手动安装后重试${NC}"
-                exit 1
-            }
-        elif command -v yum &>/dev/null; then
-            sudo yum install -y ${missing[@]} || {
-                echo -e "${RED}依赖安装失败，请手动安装后重试${NC}"
-                exit 1
-            }
-        else
-            echo -e "${RED}无法自动安装依赖，请手动安装: ${missing[*]}${NC}"
-            exit 1
-        fi
+        echo -e "${YELLOW}请手动安装以下依赖后重试: ${missing[*]}${NC}"
+        exit 1
     fi
 }
 
@@ -83,10 +69,13 @@ install_miniconda() {
     echo -e "${YELLOW}>>> 正在安装Miniconda到 ${CONDA_PATH}${NC}"
     mkdir -p "$(dirname "${CONDA_PATH}")"
     
-    if command -v wget &>/dev/null; then
-        wget --show-progress -qO "$temp_file" "$install_url"
-    else
+    if command -v curl &>/dev/null; then
         curl -# -L "$install_url" -o "$temp_file"
+    elif command -v wget &>/dev/null; then
+        wget -qO "$temp_file" "$install_url"
+    else
+        echo -e "${RED}错误: 系统中未找到wget或curl工具${NC}"
+        exit 1
     fi
 
     bash /tmp/miniconda.sh -b -p "${CONDA_PATH}" && rm /tmp/miniconda.sh || {
@@ -100,7 +89,7 @@ install_miniconda() {
     conda init &>/dev/null
 }
 
-setup_channels() {
+setup_conda_channels() {
     echo -e "${YELLOW}>>> 配置清华镜像源${NC}"
     conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main
     conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/free
@@ -110,17 +99,58 @@ setup_channels() {
     conda clean -i -y
 }
 
+prompt_for_env_name() {
+    read -p "${YELLOW}请输入新的环境名称: ${NC}" new_name
+    if [ -z "$new_name" ]; then
+        echo -e "${RED}环境名称不能为空!${NC}"
+        prompt_for_env_name
+    elif conda env list | grep -q "$new_name"; then
+        echo -e "${RED}环境 $new_name 已存在!${NC}"
+        prompt_for_env_name
+    else
+        ENV_NAME="$new_name"
+    fi
+}
+
+check_environment_tools() {
+    local missing=()
+    source "${CONDA_PATH}/bin/activate" "${ENV_NAME}"
+    
+    for tool in "${TOOLS[@]}"; do
+        if ! conda list -n "${ENV_NAME}" "$tool" &>/dev/null; then
+            missing+=($tool)
+        fi
+    done
+    
+    conda deactivate
+    
+    if [ ${#missing[@]} -eq 0 ]; then
+        return 0  # 工具完整
+    else
+        return 1  # 工具有缺失
+    fi
+}
+
 create_env() {
-    if conda env list | grep -q "${ENV_NAME}"; then
-        echo -e "${YELLOW}>>> 环境 ${ENV_NAME} 已存在，跳过创建${NC}"
+    if ! conda env list | grep -q "${ENV_NAME}"; then
+        echo -e "${YELLOW}>>> 创建新环境: ${ENV_NAME}${NC}"
+        conda create -y -n "${ENV_NAME}" || {
+            echo -e "${RED}环境创建失败!${NC}"
+            exit 1
+        }
         return
     fi
 
-    echo -e "${YELLOW}>>> 创建隔离环境: ${ENV_NAME}${NC}"
-    conda create -y -n "${ENV_NAME}" || {
-        echo -e "${RED}环境创建失败!${NC}"
-        exit 1
-    }
+    echo -e "${YELLOW}>>> 环境 ${ENV_NAME} 已存在${NC}"
+    if check_environment_tools; then
+        echo -e "${GREEN}>>> 环境中工具已完整${NC}"
+        return
+    else
+        echo -e "${RED}>>> 环境中工具不完整${NC}"
+        echo -e "${YELLOW}>>> 需要创建新环境${NC}"
+        prompt_for_env_name
+        create_env
+    fi
 }
 
 install_tools() {
@@ -142,9 +172,10 @@ install_tools() {
     source "${CONDA_PATH}/bin/activate" "${ENV_NAME}"
     
     for tool in "${TOOLS[@]}"; do
-        # 跳过已安装工具
-        if [[ "${installed[@]}" =~ "${tool}" ]]; then
-            echo -e "${BLUE}▸ ${tool} 已安装，跳过...${NC}"
+        # 检查工具是否已安装 (使用 conda list)
+        if conda list -n "${ENV_NAME}" "${tool}" &>/dev/null; then
+            echo -e "${BLUE}▸ ${tool} 已安装，跳过更新...${NC}"
+            installed+=("$tool")
             continue
         fi
         
@@ -213,7 +244,7 @@ main() {
     export PATH="${CONDA_PATH}/bin:$PATH"
     eval "$("${CONDA_PATH}/bin/conda" shell.bash hook)"
     
-    setup_channels
+    setup_conda_channels
     create_env
     install_tools
     

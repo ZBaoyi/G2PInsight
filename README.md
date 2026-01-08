@@ -8,6 +8,12 @@
   - [1. Data Preprocessing](#1-data-preprocessing)
   - [2. Model Training](#2-model-training)
   - [3. Result Visualization](#3-result-visualization)
+- [Output Files](#output-files)
+  - [1. Preprocess Output](#1-preprocess-output)
+  - [2. Train Output](#2-train-output)
+  - [3. Train-all Output](#3-train-all-output)
+  - [4. Predict Output](#4-predict-output)
+  - [5. Visualize Output](#5-visualize-output)
 - [Sample Data](#sample-data)
 - [FAQ](#faq)
 - [Developer Guide](#developer-guide)
@@ -33,17 +39,21 @@
 - **核心特性**：
   - 自动区分分类/回归任务
   - 内置5折交叉验证
-  - 超参数自动优化
+  - 超参数自动优化（RandomizedSearchCV）
   - 特征重要性计算与排序
+  - GWAS特征筛选（基于GEMMA）
+  - LD过滤（基于PLINK）
+  - 综合特征筛选（GWAS + LD）
 
 ### 3. Result Visualization
-- **功能**：生成 publication 级别的基因组数据可视化图表
-- **图表类型**：曼哈顿图、QQ图、特征重要性条形图、染色体分布散点图
+- **功能**：生成 publication 级别的全基因组特征重要性散点图
+- **图表类型**：全基因组特征重要性散点图（Manhattan-style scatter plot）
 - **核心特性**：
-  - 静态（PNG/SVG）和交互式（HTML）输出
+  - 静态（PNG）和交互式（HTML）输出
   - 自动计算显著性阈值
   - 染色体位置自动标注
-  - 支持批量图表生成与比较
+  - 正负效应颜色区分
+  - 支持自动列名检测
 ---
 
 ## Installation Guide ##
@@ -72,14 +82,12 @@ chmod +x tools.sh
     "bowtie2"       # 短序列比对
 ```
 
-进入该环境:
-```conda activate bioenv```
-
-然后进行基因型数据的筛选、过滤、质量控制：
+进入该环境：
 ```bash
-plink 
-
+conda activate bioenv
 ```
+
+然后可以使用PLINK等工具进行基因型数据的筛选、过滤、质量控制。
 ### Alternative Installation (Source Code)
 如果whl包不可用，可以从源码安装：
 ```bash
@@ -96,17 +104,20 @@ association --version
 ```
 
 ### 常见安装问题
-- 权限问题：Linux/macOS添加`sudo`前缀
-```pip install assog2p-1.0.0-py3-none-any.whl```
-The following message indicates successful installation：
+**Q: 安装时出现权限问题**
+```bash
+# Linux/macOS添加sudo前缀
+sudo pip install assog2p-1.0.0-py3-none-any.whl
+```
 
+**Q: 如何验证安装成功？**
+安装成功后，会显示以下信息：
 ```bash
 Installing collected packages : assog2p
 Successfully installed assog2p-1.0.0
 ```
 
-After installation, ```association``` is registered as a command-line tool in the current environment.
-Run ```association -h ```to view usage help.
+安装完成后，`association` 命令会在当前环境中注册。运行 `association -h` 查看使用帮助。
 
 ---
 
@@ -114,14 +125,26 @@ Run ```association -h ```to view usage help.
 **Complete Workflow Example**
 
 ```bash
-# Data preprocessing
-association preprocess -g genotype.vcf -p phenotype.txt -o ml.txt
+# Step 1: Data preprocessing (输出到目录，会生成train_data.txt)
+association preprocess -g genotype.vcf -p phenotype.txt -o preprocessed/
 
-#  Model training (using LightGBM as an example)  
-association train -i ml.txt -m LightGBM -o importance.csv
+# Step 2: Model training (使用preprocess输出目录下的train_data.txt)
+association train -i preprocessed/train_data.txt -m LightGBM -f 1 -o results/
 
-# Feature importance visualization  
-association visualize -i importance.csv -o result.png -t scatter
+# Step 3: Feature importance visualization
+association visualize -i results/LightGBM/feature_importance.txt -o result
+```
+
+**Advanced Example with GWAS and LD Filtering**:
+```bash
+# Preprocessing (输出到目录，会生成train_data.txt和train_data_metadata.json)
+association preprocess -g genotype.vcf -p phenotype.txt -o preprocessed/
+
+# Model training with GWAS and LD filtering (mode 4)
+# 可以使用train_data.txt或train_data_metadata.json作为输入
+association train -i preprocessed/train_data.txt -m LightGBM -f 4 -o results/ \
+  --gwas_genotype ./data/filtered_plink --gwas_pvalue 0.01 \
+  --ld_window_kb 50 --ld_window_r2 0.2
 ```
 
 ## Detailed Usage ##
@@ -142,10 +165,9 @@ association preprocess \
   -g <input.vcf> \
   -p <phenotype.txt> \
   -o <output.txt> \
-  [--filter-missing <threshold>] \
-  [--impute-method <mean/median>] \
-  [--max-samples <number>] \
-  [--threads <number>]
+  [--threads <number>] \
+  [--pheno-col <column_name>] \
+  [--serial]
 ```
 
 **参数说明**：
@@ -154,10 +176,9 @@ association preprocess \
 | `-g` | 必需 | - | 输入VCF文件路径 |
 | `-p` | 必需 | - | 表型数据文件路径 |
 | `-o` | 必需 | - | 输出文件路径 |
-| `--filter-missing` | 可选 | 0.1 | 样本缺失率阈值（>此值将被过滤） |
-| `--impute-method` | 可选 | mean | 缺失值填充方法（mean/median） |
-| `--max-samples` | 可选 | 500000 | 最大样本量（超过将随机抽样） |
-| `--threads` | 可选 | 4 | 并行处理线程数 |
+| `--threads` | 可选 | 自动 | 并行进程数上限（可选参数，默认自动根据染色体数和CPU核心数智能分配，约每个进程处理2条染色体） |
+| `--pheno-col` | 可选 | - | 自定义表型列名（当表型文件表头不是'phenotype'时使用） |
+| `--serial` | 可选 | False | 强制使用串行模式（完全禁用多进程，逐染色体处理，适用于内存受限环境） |
 
 **输出文件格式**：
 首行为表头，包含样本ID、所有SNP名称和表型列：
@@ -167,34 +188,34 @@ Sample1	0	1	...	0.56
 Sample2	2	0	...	0.78
 ```
 
-**phenotype file example if it's a binary task** :
+**表型文件示例**：
 
+*二分类任务（binary classification）*：
+```
+1-1    0
+1-2    0
+1-3    1
+2-1    1
+```
 
-|1-1|0|
-|:---|:---|
-|1-2|0|
-|1-3|1|
-|2-1|1|
+*回归任务（regression）*：
+```
+1-1    9.5
+1-2    7.4
+1-3    10.8
+2-1    12.5
+```
 
-phenotype file example **if it's a regression task**:
+**输出文件示例（output.txt）**：
 
+| sample | snp1 | snp2 | ... | snp10000 | ... | snp... | phenotype |
+|:-------|:-----|:-----|:-----|:---------|:-----|:-------|:----------|
+| 1-1    | 1    | 0    | ... | 2        | ... | ...    | 0         |
+| 1-2    | 0    | 1    | ... | 2        | ... | ...    | 0         |
+| 1-3    | 1    | 1    | ... | 2        | ... | ...    | 1         |
+| 2-1    | 0    | 2    | ... | 1        | ... | ...    | 1         |
 
-|1-1|9.5|
-|:---|:---|
-|1-2|7.4|
-|1-3|10.8|
-|2-1|12.5|
-
-output.txt example:
-
-|sample|snp1|snp2|...|snp10000|...|snp...|phenotype|
-|:---|:---|:---|:---|:---|:---|:---|:---|
-|1-1|1|0|...|2|...|...|0|
-|1-2|0|1|...|2|...|...|0|
-|1-3|1|1|...|2|...|...|1|
-|2-1|0|2|...|1|...|...|1|
-
-**_If a SNP is None, it is encoded as -1**_
+**注意**：如果SNP值为缺失（None），则编码为 `-1`。
 
 
 ### 2. Model Training ###
@@ -206,105 +227,354 @@ output.txt example:
 | LightGBM | 分类/回归 | 高效快速，低内存 | 大规模数据集 |
 | RandomForest | 分类/回归 | 鲁棒性强，不易过拟合 | 特征重要性评估 |
 | XGBoost | 分类/回归 | 高精度，支持自定义损失函数 | 竞赛级模型 |
-| SVM | 分类 | 小样本表现好 | 高维特征空间 |
+| SVM | 分类/回归 | 小样本表现好 | 高维特征空间 |
 | CatBoost | 分类/回归 | 自动处理类别特征 | 含分类变量数据 |
-| Logistic | 分类 | 简单解释性强 | 基线模型对比 |
+| Logistic | 分类/回归 | 简单解释性强 | 基线模型对比 |
+
+**特征筛选模式**：
+| 模式 | 说明 | 适用场景 |
+|------|------|----------|
+| 1 | 空白对照（不使用GWAS和LD） | 基线对比，使用全部特征 |
+| 2 | GWAS筛选（仅使用GWAS） | 基于GWAS显著性筛选SNP |
+| 3 | LD过滤（仅使用LD） | 基于连锁不平衡过滤SNP |
+| 4 | GWAS和LD综合过滤 | 先GWAS筛选，再对显著SNP进行LD过滤 |
 
 **完整参数列表**：
 ```bash
 association train \
   -i <input.txt> \
   -m <algorithm> \
-  -o <output.csv> \
-  [--task-type <classification/regression>] \
-  [--cv-folds <number>] \
-  [--hyperopt <iterations>] \
-  [--test-size <ratio>] \
-  [--random-state <seed>]
+  -f <feature_selection_mode> \
+  -o <output_dir> \
+  [--task_type <classification/regression>] \
+  [--n_folds <number>] \
+  [--random_state <seed>] \
+  [--gwas_genotype <plink_prefix>] \
+  [--gwas_pvalue <threshold>] \
+  [--ld_window_kb <size>] \
+  [--ld_window <variants>] \
+  [--ld_window_r2 <threshold>] \
+  [--ld_threads <number>]
 ```
 
 **参数说明**：
 | 参数 | 类型 | 默认值 | 描述 |
 |------|------|--------|------|
-| `-i` | 必需 | - | 预处理后的输入文件 |
+| `-i` | 必需 | - | 预处理后的训练数据文件（如：preprocess输出目录/train_data.txt）或元数据文件（*_metadata.json） |
 | `-m` | 必需 | - | 算法名称（见上表） |
-| `-o` | 必需 | - | 特征重要性输出文件 |
-| `--task-type` | 可选 | auto | 任务类型（自动检测） |
-| `--cv-folds` | 可选 | 5 | 交叉验证折数 |
-| `--hyperopt` | 可选 | 20 | 超参数优化迭代次数 |
-| `--test-size` | 可选 | 0.2 | 测试集比例 |
-| `--random-state` | 可选 | 42 | 随机种子（重现结果） |
+| `-f` | 必需 | - | 特征筛选模式（1/2/3/4） |
+| `-o` | 必需 | - | 输出目录 |
+| `--task_type` | 可选 | auto | 任务类型（自动检测或从元数据读取） |
+| `--n_folds` | 可选 | 5 | 交叉验证折数 |
+| `--random_state` | 可选 | 42 | 随机种子（重现结果） |
+| `--gwas_genotype` | 可选 | - | GWAS基因型文件前缀（模式2或4需要） |
+| `--gwas_pvalue` | 可选 | 0.01 | GWAS P值阈值（模式2或4使用） |
+| `--ld_window_kb` | 可选 | 50 | LD窗口大小（KB，模式3或4使用） |
+| `--ld_window` | 可选 | 5 | LD窗口变体数（模式3或4使用） |
+| `--ld_window_r2` | 可选 | 0.2 | LD r²阈值（模式3或4使用） |
+| `--ld_threads` | 可选 | 8 | LD过滤线程数（模式3或4使用） |
 
--i input.txt **The format is the same as the output file format of the previous step**
+**输入文件格式**：
+- `-i` 参数支持两种输入：
+  1. 预处理后的训练数据文件（`.txt`格式）：通常位于preprocess输出目录下，文件名为`train_data.txt`（如果preprocess输出指定为目录）或用户指定的文件名
+  2. 元数据文件（`*_metadata.json`格式）：包含预处理信息的JSON文件，通常与训练数据文件在同一目录
 
--o importance.csv example:
+**输出文件结构**：
+训练完成后，在输出目录下会生成以下文件：
+```
+output_dir/
+├── {model_type}/              # 模型专属目录
+│   ├── {model_type}_model.pkl # 训练好的模型文件
+│   ├── metrics.json            # 评估指标
+│   ├── selected_snps.txt      # 筛选的SNP列表
+│   ├── feature_importance.txt # 特征重要性（完整列表）
+│   ├── top_features.txt       # Top 100特征
+│   ├── cv_results.json        # 交叉验证结果
+│   ├── performance_curves.png  # 性能曲线图（分类任务）
+│   ├── probability_distribution.png # 概率分布图（分类任务）
+│   └── cv_training_curves.png # 交叉验证训练曲线
+└── model_comparison_report.json # 全模型训练对比报告（train-all模式）
+```
 
-|Feature|Importance|
-|:---|:---|
-|snp1|0.45|
-|snp2|0.21|
-|snp...|...|
-|snp...|...|
+**注意**：
+- GWAS和LD分析过程中生成的临时文件（如`output/`目录下的GWAS结果文件）会在模块完成后自动删除
+- 所有重要的结果（如筛选的SNP列表、特征重要性等）都已保存在模型目录中，无需保留临时文件
+
+**使用示例**：
+```bash
+# 单模型训练（空白对照，使用全部特征）
+# 假设preprocess输出目录为preprocessed/，会生成train_data.txt
+association train -i preprocessed/train_data.txt -m LightGBM -f 1 -o results/
+
+# 单模型训练（GWAS筛选）
+association train -i preprocessed/train_data.txt -m RandomForest -f 2 -o results/ \
+  --gwas_genotype ./data/filtered_plink --gwas_pvalue 0.01
+
+# 单模型训练（GWAS和LD综合筛选）
+association train -i preprocessed/train_data.txt -m XGBoost -f 4 -o results/ \
+  --gwas_genotype ./data/filtered_plink --gwas_pvalue 0.01 \
+  --ld_window_kb 50 --ld_window_r2 0.2
+
+# 全模型训练（训练所有支持的模型）
+association train-all -i preprocessed/train_data.txt -f 1 -o results/
+
+# 也可以使用元数据文件作为输入（推荐，会自动读取相关信息）
+association train -i preprocessed/train_data_metadata.json -m LightGBM -f 4 -o results/
+```
 
 
 ### 3. Result Visualization ###
-**功能**：生成高质量基因组数据可视化图表，支持 publication 级图片输出
+**功能**：生成高质量全基因组特征重要性散点图，支持 publication 级图片输出
 
-**图表类型与应用场景**：
-| 参数类型 | 图表名称 | 适用场景 | 输出格式 |
-|----------|----------|----------|----------|
-| scatter | 曼哈顿图 | 全基因组关联分析结果 | PNG/SVG/HTML |
-| bar | 染色体汇总图 | 染色体水平特征比较 | PNG/SVG |
-| line | 趋势图 | 基因组区域信号变化 | PNG/SVG |
-| hist | 分布图 | 特征值分布统计 | PNG/SVG |
-| manhattan | 增强曼哈顿图 | 显著SNP标记显示 | HTML (交互式) |
+**图表类型**：
+- **散点图（Scatter Plot）**：全基因组特征重要性分布图，类似曼哈顿图风格
+  - 显示所有特征在基因组上的位置和重要性值
+  - 自动按染色体分组显示
+  - 正负效应用不同颜色区分（蓝色=正效应，红色=负效应）
 
 **完整参数列表**：
 ```bash
 association visualize \
-  -i <input.csv> \
-  -o <output.[png/svg/html]> \
-  -t <chart_type> \
-  [--title <plot_title>] \
-  [--threshold <p_value>] \
-  [--interactive] \
+  -i <input.txt> \
+  -o <output_prefix> \
+  [--feature-col <column_name>] \
+  [--value-col <column_name>] \
   [--dpi <resolution>] \
-  [--color-map <palette>] \
-  [--chromosome <number>]
+  [--static-only] \
+  [--interactive-only]
 ```
 
 **参数说明**：
 | 参数 | 类型 | 默认值 | 描述 |
 |------|------|--------|------|
-| `-i` | 必需 | - | 输入文件（模型输出的CSV） |
-| `-o` | 必需 | - | 输出文件路径（格式自动识别） |
-| `-t` | 必需 | - | 图表类型（scatter/bar/line/hist/manhattan） |
-| `--title` | 可选 | "Association Results" | 图表标题 |
-| `--threshold` | 可选 | 0.05 | 显著性阈值（点标记为红色） |
-| `--interactive` | 可选 | False | 启用交互式HTML图表 |
-| `--dpi` | 可选 | 300 | 图像分辨率（仅静态图） |
-| `--color-map` | 可选 | "viridis" | 颜色方案（matplotlib兼容） |
-| `--chromosome` | 可选 | 全部 | 指定染色体（如1/3/X） |
+| `-i` | 必需 | - | 输入文件（特征重要性文件，如feature_importance.txt） |
+| `-o` | 必需 | - | 输出文件前缀（会自动添加_static.png和_interactive.html） |
+| `--feature-col` | 可选 | auto | 特征列名（默认自动检测，支持'feature'列或第一列） |
+| `--value-col` | 可选 | auto | 重要性值列名（默认自动检测，支持'importance_abs'或'importance'列） |
+| `--dpi` | 可选 | 300 | 静态图像分辨率（仅PNG格式） |
+| `--static-only` | 可选 | False | 仅生成静态PNG图 |
+| `--interactive-only` | 可选 | False | 仅生成交互式HTML图 |
+| `--shap-col` | 可选 | - | （已弃用）使用--value-col代替 |
+
+**输入文件格式**：
+支持三列格式的特征重要性文件：
+- 列1：特征名（格式：染色体_位置，如`1_123456`）
+- 列2：重要性绝对值（importance_abs或importance）
+- 列3：正负效应（effect，值为1或-1）
+
+也支持两列格式（特征名和重要性值，从数值推断正负）。
 
 **交互式图表功能**：
-- 悬停显示详细SNP信息（ID、位置、P值）
+- 鼠标悬停显示详细信息（染色体、位置、重要性值）
 - 缩放和平移操作
-- 点击下载高分辨率图像
-- 特征筛选和高亮功能
+- 自动计算并显示显著性阈值（99百分位数）
 
 **使用示例**：
 ```bash
-# 基础曼哈顿图
-association visualize -i importance.csv -o manhattan.png -t scatter --dpi 300
+# 生成静态和交互式图表（默认）
+association visualize -i feature_importance.txt -o plot
 
-# 交互式全基因组视图
-association visualize -i results.csv -o interactive.html -t manhattan --interactive --threshold 0.01
+# 仅生成静态PNG图
+association visualize -i feature_importance.txt -o plot --static-only
 
-# 染色体1特定区域可视化
-association visualize -i region.csv -o chr1.png -t line --chromosome 1 --title "Chromosome 1 Analysis"
+# 仅生成交互式HTML图
+association visualize -i feature_importance.txt -o plot --interactive-only
+
+# 指定高分辨率输出
+association visualize -i feature_importance.txt -o plot --dpi 600
 ```
 
 
+
+---
+
+## Output Files ##
+
+本节详细说明每个步骤输出的文件及其用途。
+
+### 1. Preprocess Output ###
+
+**命令**：`association preprocess`
+
+**输出文件列表**：
+
+| 文件名 | 格式 | 说明 |
+|--------|------|------|
+| `{output_prefix}.txt` 或 `{output_prefix}.txt.gz` | 文本/压缩文本 | 预处理后的训练数据文件，包含样本ID、所有SNP特征和表型列 |
+| `{output_prefix}_metadata.json` | JSON | 元数据文件，包含预处理信息（基因型格式、样本数、染色体列表、PLINK前缀等） |
+| `phenotype_distribution_pie.png` | PNG | 表型分布饼图（仅分类任务，当类别数≤10时生成） |
+| `phenotype_distribution_histogram.png` | PNG | 表型分布直方图（仅回归任务生成） |
+
+**文件位置**：
+- 主输出文件：用户指定的输出路径
+- 元数据文件：与主输出文件同目录
+- 图表文件：输出目录下（如果适用）
+
+**示例**：
+```bash
+association preprocess -g genotype.vcf -p phenotype.csv -o preprocessed_data
+```
+输出：
+- `preprocessed_data.txt` - 训练数据
+- `preprocessed_data_metadata.json` - 元数据
+- `phenotype_distribution_*.png` - 表型分布图
+
+---
+
+### 2. Train Output ###
+
+**命令**：`association train`
+
+**输出文件结构**：
+```
+{output_dir}/
+└── {model_type}/                    # 模型专属目录（如 LightGBM/）
+    ├── {model_type}_model.pkl      # 训练好的模型文件（用于预测）
+    ├── metrics.json                 # 评估指标（准确率、AUC、R²等）
+    ├── cv_results.json              # 交叉验证结果（每折的详细指标）
+    ├── selected_snps.txt           # 筛选的SNP列表（GWAS/LD筛选后的特征）
+    ├── feature_importance.txt       # 特征重要性完整列表（三列：feature, importance_abs, effect）
+    ├── top_features.txt             # Top 100特征列表（仅特征名）
+    ├── cv_training_curves.png      # 交叉验证训练过程曲线
+    ├── performance_curves.png       # 性能评估曲线（ROC曲线/回归散点图）
+    └── probability_distribution.png # 概率分布图（仅分类任务）
+```
+
+**文件说明**：
+
+| 文件名 | 格式 | 内容说明 |
+|--------|------|----------|
+| `{model_type}_model.pkl` | Pickle | 训练好的模型对象，用于后续预测 |
+| `metrics.json` | JSON | 包含平均准确率、AUC、R²、MAE等评估指标 |
+| `cv_results.json` | JSON | 每折交叉验证的详细结果和平均指标 |
+| `selected_snps.txt` | 文本 | 经过GWAS/LD筛选后的SNP列表（每行一个SNP名称） |
+| `feature_importance.txt` | TSV | 三列格式：特征名、重要性绝对值、正负效应（1或-1） |
+| `top_features.txt` | 文本 | Top 100重要特征名称列表（每行一个） |
+| `cv_training_curves.png` | PNG | 交叉验证过程中训练集和验证集的损失/准确率变化曲线 |
+| `performance_curves.png` | PNG | 分类任务：ROC曲线；回归任务：预测值vs真实值散点图 |
+| `probability_distribution.png` | PNG | 分类任务：各类别的预测概率分布直方图 |
+
+**临时文件说明**（当使用GWAS筛选时）：
+- GWAS分析会在当前工作目录的`output/`目录下生成临时文件（包括关联分析结果、Kinship矩阵、协变量等）
+- 这些临时文件会在模型训练完成后自动删除
+- 显著SNP列表已保存在`selected_snps.txt`中，无需保留临时文件
+
+**示例**：
+```bash
+association train -i preprocessed_data.txt -m LightGBM -f 1 -o results/
+```
+输出目录结构：
+```
+results/
+└── LightGBM/
+    ├── LightGBM_model.pkl
+    ├── metrics.json
+    ├── cv_results.json
+    ├── selected_snps.txt
+    ├── feature_importance.txt
+    ├── top_features.txt
+    ├── cv_training_curves.png
+    ├── performance_curves.png
+    └── probability_distribution.png
+```
+
+---
+
+### 3. Train-all Output ###
+
+**命令**：`association train-all`
+
+**输出文件结构**：
+```
+{output_dir}/
+├── LightGBM/                        # LightGBM模型输出（同train命令）
+├── RandomForest/                    # RandomForest模型输出
+├── XGBoost/                         # XGBoost模型输出
+├── SVM/                             # SVM模型输出
+├── CatBoost/                         # CatBoost模型输出
+├── Logistic/                        # Logistic模型输出
+└── model_comparison_report.json     # 所有模型的对比报告
+```
+
+**文件说明**：
+
+| 文件名 | 格式 | 内容说明 |
+|--------|------|----------|
+| `model_comparison_report.json` | JSON | 包含所有模型的训练结果对比、任务类型、特征筛选模式、总训练时间等信息 |
+
+每个模型目录下的文件与 `train` 命令相同（见上节）。
+
+**示例**：
+```bash
+association train-all -i preprocessed_data.txt -f 1 -o results/
+```
+输出：6个模型目录 + 1个对比报告文件
+
+---
+
+### 4. Predict Output ###
+
+**命令**：`association predict`
+
+**输出文件列表**：
+
+| 文件名 | 格式 | 说明 |
+|--------|------|------|
+| `{output_dir}/{model_type}/predictions.tsv` | TSV | 预测结果文件，包含样本ID和预测值 |
+
+**文件格式**：
+
+*分类任务*：
+```
+sample    prediction    prob_class_0    prob_class_1
+Sample1   1             0.2             0.8
+Sample2   0             0.9             0.1
+```
+
+*回归任务*：
+```
+sample    prediction
+Sample1   9.5
+Sample2   7.4
+```
+
+**示例**：
+```bash
+association predict -i new_data.csv -m LightGBM -o results/
+```
+输出：
+- `results/LightGBM/predictions.tsv` - 预测结果
+
+---
+
+### 5. Visualize Output ###
+
+**命令**：`association visualize`
+
+**输出文件列表**：
+
+| 文件名 | 格式 | 说明 |
+|--------|------|------|
+| `{output_prefix}_static.png` | PNG | 静态散点图（默认300 DPI，适合论文发表） |
+| `{output_prefix}_interactive.html` | HTML | 交互式散点图（可缩放、悬停查看详情） |
+
+**文件说明**：
+
+- **静态图**：高分辨率PNG格式，显示全基因组特征重要性分布，包含染色体标注和正负效应颜色区分
+- **交互式图**：HTML格式，支持鼠标悬停查看详细信息（染色体、位置、重要性值等）
+
+**控制输出**：
+- `--static-only`：仅生成静态PNG图
+- `--interactive-only`：仅生成交互式HTML图
+- 默认：同时生成两种格式
+
+**示例**：
+```bash
+association visualize -i feature_importance.txt -o plot
+```
+输出：
+- `plot_static.png` - 静态散点图
+- `plot_interactive.html` - 交互式散点图
 
 ---
 
@@ -315,13 +585,13 @@ association visualize -i region.csv -o chr1.png -t line --chromosome 1 --title "
 #### 获取数据
 ```bash
 # 基因型数据（VCF格式，~380MB）
-wget 
+# 请从数据源下载VCF文件
 
 # 表型数据（CSV格式，~2KB）
-wget 
+# 请从数据源下载表型文件
 
-# 解压VCF文件
-gunzip 
+# 如果VCF文件是压缩格式，需要解压
+gunzip genotype.vcf.gz
 ```
 
 #### 文件说明
@@ -332,14 +602,18 @@ gunzip
 
 #### 数据使用示例
 ```bash
-# 预处理示例
-bashassociation preprocess -g rice4k_geno_add_del.vcf -p phenos.csv -o rice_ml.txt --filter-missing 0.05
+# 预处理示例（输出到目录，会生成train_data.txt）
+association preprocess -g rice4k_geno_add_del.vcf -p phenos.csv -o rice_preprocessed/ --threads 4
 
-# 模型训练示例
-association train -i rice_ml.txt -m LightGBM -o rice_importance.csv --task-type regression
+# 模型训练示例（空白对照模式）
+association train -i rice_preprocessed/train_data.txt -m LightGBM -f 1 -o rice_results/
+
+# 模型训练示例（GWAS筛选模式）
+association train -i rice_preprocessed/train_data.txt -m LightGBM -f 2 -o rice_results/ \
+  --gwas_genotype ./data/filtered_plink --gwas_pvalue 0.01
 
 # 可视化示例
-association visualize -i rice_importance.csv -o manhattan.html -t scatter --interactive
+association visualize -i rice_results/LightGBM/feature_importance.txt -o manhattan
 ```
 
 ---
@@ -357,15 +631,33 @@ pip install --prefer-binary lightgbm
 #### 2. 运行时错误
 **Q: 预处理大型VCF文件时内存不足**
 ```bash
-# 解决方案：启用抽样功能
-association preprocess -g large.vcf -p pheno.txt -o out.txt --max-samples 300000
+# 解决方案：使用串行模式处理，减少内存占用
+association preprocess -g large.vcf -p pheno.txt -o out.txt --serial
 ```
 
 **Q: 模型训练时报错"特征数量超过限制"**
 ```bash
-# 解决方案：增加内存限制或减少特征数量
-association train -i data.txt -m LightGBM -o imp.csv --hyperopt 10
+# 解决方案：使用GWAS或LD筛选减少特征数量
+association train -i data.txt -m LightGBM -f 2 -o results/ \
+  --gwas_genotype ./data/filtered_plink --gwas_pvalue 0.01
 ```
+
+**Q: 特征筛选模式2/3/4需要基因型文件，但不知道如何提供**
+```bash
+# 解决方案1：使用preprocess生成的元数据文件（推荐）
+association train -i train_data_metadata.json -m LightGBM -f 4 -o results/
+
+# 解决方案2：手动指定GWAS基因型文件前缀
+association train -i train_data.txt -m LightGBM -f 4 -o results/ \
+  --gwas_genotype ./data/filtered_plink
+```
+
+**Q: GWAS和LD综合筛选的流程是什么？**
+- 模式4（GWAS和LD综合）：先执行GWAS分析，筛选出显著SNP（P值阈值以下），然后仅对这些GWAS显著SNP进行LD过滤，最终直接使用LD过滤结果作为特征进行模型训练。若LD过滤失败或无结果，则退回到仅使用GWAS显著SNP。
+
+**Q: GWAS分析生成的output/目录下的文件会被保留吗？**
+- 不会。所有GWAS分析过程中生成的临时文件（包括`output/`目录下的关联分析结果、Kinship矩阵、协变量等）会在模型训练完成后自动删除。
+- 所有重要的结果（如筛选的SNP列表、特征重要性等）都已保存在模型目录中，无需保留临时文件。
 
 #### 3. 数据格式问题
 **Q: VCF文件解析错误"invalid chromosome format"**
@@ -375,17 +667,19 @@ association train -i data.txt -m LightGBM -o imp.csv --hyperopt 10
 ```
 
 #### 4. 可视化问题
-**Q: 生成的散点图点重叠严重**
+**Q: 如何只生成静态图或交互式图？**
 ```bash
-# 解决方案：启用点大小自适应或减少样本量
-association visualize -i data.csv -o plot.png -t scatter --adjust-size
-```pip install assog2p-1.0.0-py3-none-any.whl  
+# 仅生成静态PNG图
+association visualize -i feature_importance.txt -o plot --static-only
+
+# 仅生成交互式HTML图
+association visualize -i feature_importance.txt -o plot --interactive-only
 ```
 
-**How to Generate a PDF Report?**
-
+**Q: 可视化时提示列名检测失败**
 ```bash
-association visualize -i results.csv -o report.pdf -t bar --dpi 300
+# 解决方案：手动指定列名
+association visualize -i data.txt -o plot --feature-col feature --value-col importance_abs
 ```
 
 ---
@@ -448,10 +742,12 @@ SOFTWARE.
 **Code Structure**
 ```text
 assoG2P/  
-├── bin/                # Core modules  
-│   ├── preprocess.py   # Data preprocessing  
-│   ├── modeltraining.py # Model training  
-│   └── visualization.py # Visualization  
-├── main.py             # Main entry  
-└── setup.py            # Package configuration  
+├── bin/                    # Core modules  
+│   ├── preprocess.py       # Data preprocessing  
+│   ├── modeltraining.py    # Model training (with GWAS/LD integration)
+│   ├── gemma_gwas.py       # GWAS analysis module
+│   ├── plink_ld.py         # LD filtering module
+│   └── visualization.py    # Visualization  
+├── main.py                 # Main entry  
+└── setup.py                # Package configuration  
 ```
