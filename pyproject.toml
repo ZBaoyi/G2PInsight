@@ -1,0 +1,53 @@
+[build-system]
+requires = [
+    "setuptools>=65.0.0",
+    "wheel>=0.37.0",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+# 包名建议：使用小写符合 PyPI 规范
+# 选项1: assog2p (推荐，简洁且符合规范)
+# 选项2: asso-g2p (使用连字符，更易读)
+# 选项3: genome-association-toolkit (描述性更强)
+name = "assog2p"
+version = "1.0.0"
+description = "Genome-wide association analysis toolkit"
+readme = "README.md"
+requires-python = ">=3.8,<3.13"
+license = "MIT"
+authors = [
+    {name = "chenrf", email = "12024128035@stu.ynu.edu.cn"}
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+]
+
+dependencies = [
+    "numpy>=1.20,<2.0",  # numpy 2.0+ 需要 GCC >= 9.3
+    "pandas>=1.3,<2.0",  # pandas 2.0+ 可能需要更新的编译器
+    "scikit-learn>=1.0",
+    "scipy>=1.7,<2.0",  # scipy 2.0+ 可能需要更新的编译器
+    "joblib>=1.0",
+    "matplotlib>=3.5",
+    "numba>=0.57",  # 通常有预编译 wheel，不需要从源码编译
+    "lightgbm>=3.3,<4.0.0",
+    "xgboost>=1.6,<2.1",  # xgboost 2.1+ 可能需要更新的编译器
+    "catboost>=1.0,<2.0",  # catboost 2.0+ 可能需要更新的编译器
+    "shap>=0.40",
+    "plotly>=5.0",
+    "kaleido>=0.2",
+    "seaborn>=0.11",
+]
+
+[project.scripts]
+association = "assoG2P.main:main"

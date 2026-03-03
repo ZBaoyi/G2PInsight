@@ -13,20 +13,27 @@ def detect_available_fonts() -> Tuple[Optional[str], Optional[str]]:
     """
     检测系统中可用的中英文字体
     
+    使用matplotlib.font_manager.FontManager获取所有可用字体，
+    然后按照指定顺序检测中文字体。
+    
     Returns:
         (chinese_font, english_font): 中文字体和英文字体名称
     """
     try:
-        import matplotlib.font_manager as fm
+        from matplotlib.font_manager import FontManager
         
-        # 获取所有可用字体
-        font_list = [f.name for f in fm.fontManager.ttflist]
+        # 获取所有可用字体列表
+        mpl_fonts = set(f.name for f in FontManager().ttflist)
         
-        # 中文字体候选列表（按优先级）
-        chinese_fonts = [
-            'SimHei', 'Microsoft YaHei', 'WenQuanYi Micro Hei', 
-            'WenQuanYi Zen Hei', 'Noto Sans CJK SC', 'Source Han Sans CN',
-            'STHeiti', 'STSong', 'SimSun', 'KaiTi', 'FangSong'
+        # 中文字体候选列表（按优先级顺序）
+        chinese_font_candidates = [
+            'SimHei',        # 黑体
+            'SimSun',        # 宋体
+            'Microsoft YaHei',  # 微软雅黑
+            'KaiTi',         # 楷体
+            'FangSong',      # 仿宋
+            'STSong',        # 华文宋体
+            'STKaiti',       # 华文楷体
         ]
         
         # 英文字体候选列表（按优先级）
@@ -35,24 +42,28 @@ def detect_available_fonts() -> Tuple[Optional[str], Optional[str]]:
             'Helvetica', 'Times New Roman', 'Calibri'
         ]
         
-        # 检测中文字体
+        # 按照指定顺序检测中文字体
         chinese_font = None
-        for font_name in chinese_fonts:
-            if font_name in font_list:
+        for font_name in chinese_font_candidates:
+            if font_name in mpl_fonts:
                 chinese_font = font_name
+                logger.debug(f"检测到中文字体: {font_name}")
                 break
         
         # 检测英文字体
         english_font = None
         for font_name in english_fonts:
-            if font_name in font_list:
+            if font_name in mpl_fonts:
                 english_font = font_name
+                logger.debug(f"检测到英文字体: {font_name}")
                 break
         
         # 如果没有找到，使用默认字体
         if not chinese_font:
+            logger.debug("未检测到中文字体，使用默认字体")
             chinese_font = 'DejaVu Sans'  # matplotlib默认字体，支持基本字符
         if not english_font:
+            logger.debug("未检测到英文字体，使用默认字体")
             english_font = 'DejaVu Sans'
         
         return chinese_font, english_font

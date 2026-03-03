@@ -38,50 +38,52 @@ def detect_input_type(input_path: str) -> Tuple[str, Dict]:
         (文件类型, 参数字典)
         文件类型: "vcf", "ped", "bed", "unknown"
     """
-    path = Path(input_path)
+    # 确保使用绝对路径进行检测
+    input_path_abs = str(Path(input_path).absolute())
+    path = Path(input_path_abs)
     
     # 情况1: VCF文件
     if path.exists() and path.suffix in ['.vcf', '.vcf.gz']:
             return "vcf", {"vcf_file": str(path)}
     
     # 情况2: 检查PLINK二进制格式
-    bed_file = Path(f"{input_path}.bed")
-    bim_file = Path(f"{input_path}.bim")
-    fam_file = Path(f"{input_path}.fam")
+    bed_file = Path(f"{input_path_abs}.bed")
+    bim_file = Path(f"{input_path_abs}.bim")
+    fam_file = Path(f"{input_path_abs}.fam")
     
     if bed_file.exists() and bim_file.exists() and fam_file.exists():
         return "bed", {
-            "bed_prefix": input_path,
+            "bed_prefix": input_path_abs,
             "bed_file": str(bed_file),
             "bim_file": str(bim_file),
             "fam_file": str(fam_file)
         }
     
     # 情况3: 检查PLINK文本格式
-    ped_file = Path(f"{input_path}.ped")
-    map_file = Path(f"{input_path}.map")
+    ped_file = Path(f"{input_path_abs}.ped")
+    map_file = Path(f"{input_path_abs}.map")
     
     if ped_file.exists() and map_file.exists():
         return "ped", {
-            "ped_prefix": input_path,
+            "ped_prefix": input_path_abs,
             "ped_file": str(ped_file),
             "map_file": str(map_file)
         }
     
     # 情况4: 直接提供文件路径的情况
-    if str(input_path).endswith('.ped'):
-        map_candidate = str(input_path).replace('.ped', '.map')
+    if str(input_path_abs).endswith('.ped'):
+        map_candidate = str(input_path_abs).replace('.ped', '.map')
         if Path(map_candidate).exists():
             return "ped", {
-                "ped_prefix": input_path[:-4],
-                "ped_file": input_path,
+                "ped_prefix": input_path_abs[:-4],
+                "ped_file": input_path_abs,
                 "map_file": map_candidate
             }
     
     # 情况5: 直接提供VCF文件路径但后缀检查失败的情况
-    if str(input_path).endswith('.vcf') or str(input_path).endswith('.vcf.gz'):
-        if Path(input_path).exists():
-            return "vcf", {"vcf_file": input_path}
+    if str(input_path_abs).endswith('.vcf') or str(input_path_abs).endswith('.vcf.gz'):
+        if Path(input_path_abs).exists():
+            return "vcf", {"vcf_file": input_path_abs}
     
     return "unknown", {}
 
@@ -107,7 +109,7 @@ def build_plink_input_args(input_type: str, input_info: Dict) -> List[str]:
         return ["--file", input_info["ped_prefix"]]
     
     else:
-        raise ValueError(f"不支持的输入格式: {input_type}")
+        raise ValueError(f"Unsupported input format: {input_type}")
 
 def validate_input_files(input_type: str, input_info: Dict) -> bool:
     """
@@ -124,7 +126,7 @@ def validate_input_files(input_type: str, input_info: Dict) -> bool:
         if input_type == "vcf":
             vcf_file = Path(input_info["vcf_file"])
             if not vcf_file.exists():
-                logger.error(f"VCF文件不存在: {vcf_file}")
+                logger.error(f"VCF file does not exist: {vcf_file}")
                 return False
             
             # 检查VCF文件格式
@@ -137,10 +139,10 @@ def validate_input_files(input_type: str, input_info: Dict) -> bool:
                         header = f.readline()
                 
                 if not header.startswith('#'):
-                    logger.error(f"VCF文件格式不正确: {vcf_file}")
+                    logger.error(f"Invalid VCF file format: {vcf_file}")
                     return False
             except Exception as e:
-                logger.error(f"无法读取VCF文件: {e}")
+                logger.error(f"Cannot read VCF file: {e}")
                 return False
             
             return True
@@ -150,13 +152,13 @@ def validate_input_files(input_type: str, input_info: Dict) -> bool:
             for ext in ['.bed', '.bim', '.fam']:
                 file_path = Path(f"{input_info['bed_prefix']}{ext}")
                 if not file_path.exists():
-                    logger.error(f"PLINK二进制文件缺失: {file_path}")
+                    logger.error(f"PLINK binary file missing: {file_path}")
                     return False
             
             # 检查文件大小
             bed_file = Path(f"{input_info['bed_prefix']}.bed")
             if bed_file.stat().st_size < 100:
-                logger.warning(f"BED文件可能过小: {bed_file}")
+                logger.warning(f"BED file may be too small: {bed_file}")
             
             return True
         
@@ -165,13 +167,13 @@ def validate_input_files(input_type: str, input_info: Dict) -> bool:
             for ext in ['.ped', '.map']:
                 file_path = Path(f"{input_info['ped_prefix']}{ext}")
                 if not file_path.exists():
-                    logger.error(f"PLINK文本文件缺失: {file_path}")
+                    logger.error(f"PLINK text file missing: {file_path}")
                     return False
             
             # 检查PED文件是否有内容
             ped_file = Path(f"{input_info['ped_prefix']}.ped")
             if ped_file.stat().st_size < 100:
-                logger.warning(f"PED文件可能过小: {ped_file}")
+                logger.warning(f"PED file may be too small: {ped_file}")
             
             return True
         
@@ -179,13 +181,13 @@ def validate_input_files(input_type: str, input_info: Dict) -> bool:
             return False
             
     except Exception as e:
-        logger.error(f"文件验证失败: {e}")
+        logger.error(f"File validation failed: {e}")
         return False
 
 def run_plink_command(plink_path: str, args: list, step_name: str) -> bool:
     """运行PLINK命令"""
     cmd = [plink_path] + args
-    logger.info(f"执行: {' '.join(cmd)}")
+    logger.info(f"Executing: {' '.join(cmd)}")
     
     try:
         result = subprocess.run(
@@ -194,13 +196,13 @@ def run_plink_command(plink_path: str, args: list, step_name: str) -> bool:
             text=True,
             check=True
         )
-        logger.info(f"{step_name} 完成")
+        logger.info(f"{step_name} completed")
         return True
     except subprocess.CalledProcessError as e:
-        logger.error(f"{step_name} 失败: {e.stderr}")
+        logger.error(f"{step_name} failed: {e.stderr}")
         return False
     except Exception as e:
-        logger.error(f"{step_name} 失败: {e}")
+        logger.error(f"{step_name} failed: {e}")
         return False
 
 def cleanup_intermediate_files(output_prefix: str, input_type: str, input_info: Dict) -> None:
@@ -245,23 +247,25 @@ def cleanup_intermediate_files(output_prefix: str, input_type: str, input_info: 
                 file_path.unlink()
                 deleted_files.append(pattern)
             except Exception as e:
-                logger.warning(f"无法删除文件 {pattern}: {e}")
+                logger.warning(f"Cannot delete file {pattern}: {e}")
     
     if deleted_files:
-        logger.info(f"已清理中间文件: {', '.join(deleted_files)}")
+        logger.info(f"Cleaned up intermediate files: {', '.join(deleted_files)}")
 
 def check_prune_file_exists(output_prefix: str) -> bool:
     """
     检查LD过滤是否生成了有效的prune.in文件
     Args:
-        output_prefix: 输出文件前缀
+        output_prefix: 输出文件前缀（可以是相对或绝对路径）
     Returns:
         True如果prune.in文件存在且有内容
     """
-    prune_file = Path(f"{output_prefix}.prune.in")
+    # 确保使用绝对路径
+    output_prefix_abs = str(Path(output_prefix).absolute())
+    prune_file = Path(f"{output_prefix_abs}.prune.in")
     
     if not prune_file.exists():
-        logger.error(f"LD过滤未生成prune.in文件: {prune_file}")
+        logger.error(f"LD filtering did not generate prune.in file: {prune_file}")
         return False
     
     # 检查文件是否有内容
@@ -269,12 +273,12 @@ def check_prune_file_exists(output_prefix: str) -> bool:
         with open(prune_file, 'r') as f:
             lines = f.readlines()
         if len(lines) == 0:
-            logger.error(f"prune.in文件为空: {prune_file}")
+            logger.error(f"prune.in file is empty: {prune_file}")
             return False
-        logger.info(f"LD过滤保留了 {len(lines)} 个SNP")
+        logger.info(f"LD filtering retained {len(lines):,} SNPs")
         return True
     except Exception as e:
-        logger.error(f"无法读取prune.in文件: {e}")
+        logger.error(f"Cannot read prune.in file: {e}")
         return False
 
 def run_ld_filtering(
@@ -307,27 +311,27 @@ def run_ld_filtering(
     """
     try:
         # 1. 检测输入文件类型
-        logger.info(f"检测输入文件类型: {input_path}")
+        logger.info(f"Detecting input file type: {input_path}")
         input_type, input_info = detect_input_type(input_path)
         
         if input_type == "unknown":
-            logger.error(f"无法识别输入文件格式: {input_path}")
-            logger.error("支持的格式：")
-            logger.error("  1. VCF格式: .vcf 或 .vcf.gz")
-            logger.error("  2. PLINK二进制格式: .bed/.bim/.fam")
-            logger.error("  3. PLINK文本格式: .ped/.map")
+            logger.error(f"Cannot identify input file format: {input_path}")
+            logger.error("Supported formats:")
+            logger.error("  1. VCF format: .vcf or .vcf.gz")
+            logger.error("  2. PLINK binary format: .bed/.bim/.fam")
+            logger.error("  3. PLINK text format: .ped/.map")
             logger.error("")
-            logger.error("常见问题：")
-            logger.error("  1. 检查文件路径是否正确")
-            logger.error("  2. 检查文件扩展名是否符合规范")
-            logger.error("  3. 对于PLINK格式，确保所有必需文件都存在")
+            logger.error("Common issues:")
+            logger.error("  1. Check if file path is correct")
+            logger.error("  2. Check if file extension follows the specification")
+            logger.error("  3. For PLINK format, ensure all required files exist")
             return 1
         
-        logger.info(f"检测到输入格式: {input_type}")
-        logger.info(f"输入文件信息: {input_info}")
+        logger.info(f"Detected input format: {input_type}")
+        logger.info(f"Input file information: {input_info}")
         
         # 2. 验证输入文件
-        logger.info("验证输入文件...")
+        logger.info("Validating input files...")
         if not validate_input_files(input_type, input_info):
             return 1
         
@@ -335,16 +339,21 @@ def run_ld_filtering(
         input_args = build_plink_input_args(input_type, input_info)
         
         # 5. 步骤1: LD pruning
-        logger.info("开始LD过滤...")
-        logger.info(f"LD参数: 窗口大小={ld_window_kb}KB, 变体数={ld_window}, r²阈值={ld_window_r2}")
+        logger.info("Starting LD filtering...")
+        logger.info(f"LD parameters: window size={ld_window_kb}KB, variant count={ld_window}, r² threshold={ld_window_r2}")
+        
+        # 确保输出前缀是绝对路径
+        output_prefix_abs = str(Path(output_prefix).absolute())
         
         prune_args = input_args + [
             "--indep-pairwise", 
             str(ld_window_kb), 
             str(ld_window), 
             str(ld_window_r2),
+            "--allow-extra-chr",
+            "--allow-no-sex",
             "--threads", str(threads),
-            "--out", output_prefix
+            "--out", output_prefix_abs
         ]
         # 如果提供了样本子集文件，只对指定样本进行LD过滤
         if keep_samples_file:
@@ -352,15 +361,15 @@ def run_ld_filtering(
         # 如果提供了SNP列表文件，只对指定SNP进行LD过滤
         if extract_snps_file:
             prune_args.extend(["--extract", extract_snps_file])
-            logger.info(f"仅对指定SNP列表进行LD过滤: {extract_snps_file}")
+            logger.info(f"Performing LD filtering only on specified SNP list: {extract_snps_file}")
         
         # 确定PLINK可执行路径：优先系统PATH，其次内置软件目录
         plink_executable = shutil.which("plink") or get_bundled_plink_path()
         if not Path(plink_executable).exists():
-            logger.error(f"未找到PLINK可执行文件，请检查PATH或软件目录: {plink_executable}")
+            logger.error(f"PLINK executable not found, please check PATH or software directory: {plink_executable}")
             return 1
         
-        if not run_plink_command(plink_executable, prune_args, "LD过滤"):
+        if not run_plink_command(plink_executable, prune_args, "LD filtering"):
             return 1
         
         # 6. 检查prune.in文件
@@ -368,50 +377,52 @@ def run_ld_filtering(
             return 1
         
         # 7. 步骤2: 提取过滤后的SNP并输出PLINK二进制格式（供GWAS使用）
-        logger.info("提取过滤后的SNP并生成PLINK二进制文件...")
+        logger.info("Extracting filtered SNPs and generating PLINK binary files...")
         extract_args = input_args + [
-            "--extract", f"{output_prefix}.prune.in",
+            "--extract", f"{output_prefix_abs}.prune.in",
             "--make-bed",
+            "--allow-extra-chr",
+            "--allow-no-sex",
             "--threads", str(threads),
-            "--out", output_prefix
+            "--out", output_prefix_abs
         ]
         # 保持与LD过滤阶段一致的样本子集
         if keep_samples_file:
             extract_args.extend(["--keep", keep_samples_file])
         # 注意：extract阶段不需要再指定extract_snps_file，因为prune.in已经包含了过滤后的SNP
         
-        if not run_plink_command(plink_executable, extract_args, "提取SNP生成bed/bim/fam"):
+        if not run_plink_command(plink_executable, extract_args, "Extracting SNPs to generate bed/bim/fam"):
             return 1
         
         # 8. 验证PLINK二进制文件是否生成
-        bed_file = Path(f"{output_prefix}.bed")
-        bim_file = Path(f"{output_prefix}.bim")
-        fam_file = Path(f"{output_prefix}.fam")
+        bed_file = Path(f"{output_prefix_abs}.bed")
+        bim_file = Path(f"{output_prefix_abs}.bim")
+        fam_file = Path(f"{output_prefix_abs}.fam")
         generated_files = [bed_file, bim_file, fam_file]
         if all(p.exists() for p in generated_files):
             logger.info(
-                "LD过滤完成! 生成PLINK二进制文件: %s, %s, %s",
+                "LD filtering completed! Generated PLINK binary files: %s, %s, %s",
                 bed_file, bim_file, fam_file
             )
-            logger.info(f"BED文件大小: {bed_file.stat().st_size / (1024*1024):.2f} MB")
+            logger.info(f"BED file size: {bed_file.stat().st_size / (1024*1024):.2f} MB")
             
             # 9. 清理中间文件（保留prune.in供上层读取）
             if not keep_intermediate:
                 cleanup_intermediate_files(output_prefix, input_type, input_info)
             else:
-                logger.info("保留所有中间文件（调试模式）")
+                logger.info("Keeping all intermediate files (debug mode)")
             
             return 0
         else:
-            logger.error("未生成PLINK二进制文件，请检查PLINK输出日志。") 
+            logger.error("PLINK binary files not generated, please check PLINK output logs.") 
             return 1
         
     except Exception as e:
-        logger.error(f"LD过滤失败: {e}")
+        logger.error(f"LD filtering failed: {e}")
         import traceback
         logger.error(traceback.format_exc())
         return 1
         
 if __name__ == "__main__":
-    logger.error("该模块不可独立运行，请通过model train模块调用！")
+    logger.error("This module cannot be run independently, please call through model training module!")
     sys.exit(1)

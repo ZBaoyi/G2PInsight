@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Model training module with GWAS integration (适配preprocess元数据衔接)
-支持多模型训练、GWAS特征筛选、LD过滤、结果可视化、预测等功能
-- 独立控制GWAS特征筛选和LD过滤开关
-- 逻辑：先判断LD过滤 → 再判断GWAS（若开启则基于LD过滤后的数据）
+Model training module (适配preprocess元数据衔接)
+支持多模型训练、结果可视化、预测等功能
+- GWAS特征筛选和LD过滤已前移到preprocess模块
+- 训练阶段仅使用preprocess已筛选的特征
 """
 
 import os
@@ -17,6 +17,7 @@ import atexit
 import signal
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple, Any
+from concurrent.futures import ProcessPoolExecutor
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -34,16 +35,12 @@ import lightgbm as lgb
 import xgboost as xgb
 from catboost import CatBoostClassifier, CatBoostRegressor
 
-# 进度条（可选）
+# SHAP 支持（可选）
 try:
-    from tqdm import tqdm
-    TQDM_AVAILABLE = True
+    import shap
+    SHAP_AVAILABLE = True
 except ImportError:
-    TQDM_AVAILABLE = False
-
-# ======================== 新增：导入子模块 ========================
-# 以模块名别名导入，便于后续直接调用 gemma_gwas.run_xxx / plink_ld.run_xxx
-from assoG2P.bin import gemma_gwas, plink_ld
+    SHAP_AVAILABLE = False
 
 # ======================== 调试控制开关 ========================
 # 设置为 False 时：保留模型训练过程中产生的所有临时文件和目录，方便排查问题
@@ -84,7 +81,7 @@ class TempFileManager:
     
     def _signal_handler(self, signum, frame):
         """信号处理器"""
-        logger.warning(f"收到信号 {signum}，正在清理临时文件...")
+        logger.warning(f"Received signal {signum}, cleaning up temporary files...")
         self.cleanup_on_exit()
         # 重新发送信号，让程序正常退出
         signal.signal(signum, signal.SIG_DFL)
@@ -119,7 +116,7 @@ class TempFileManager:
         :param cleanup_preprocess: 是否清理preprocess阶段的临时目录（默认False，preprocess模块执行完毕不删除tmp_p目录）
         """
         if not CLEANUP_TEMP_FILES:
-            logger.debug(" 调试模式：CLEANUP_TEMP_FILES=False，跳过临时文件清理")
+            logger.debug("Debug mode: CLEANUP_TEMP_FILES=False, skipping temporary file cleanup")
             return
         
         # 防止重复清理：如果已经清理过临时文件/目录，且本次不清理preprocess，则跳过
@@ -133,18 +130,18 @@ class TempFileManager:
                     try:
                         if fp.exists():
                             fp.unlink()
-                            logger.debug(f"   删除临时文件: {fp}")
+                            logger.debug(f"   Deleted temporary file: {fp}")
                     except Exception as e:
-                        logger.debug(f"   删除临时文件失败 {fp}: {e}")
+                        logger.debug(f"   Failed to delete temporary file {fp}: {e}")
                 
                 # 2. 清理临时目录（逆序删除，确保子目录先删除）
                 for dp in reversed(self.temp_dirs):
                     try:
                         if dp.exists():
                             shutil.rmtree(dp, ignore_errors=True)
-                            logger.debug(f"   删除临时目录: {dp}")
+                            logger.debug(f"   Deleted temporary directory: {dp}")
                     except Exception as e:
-                        logger.debug(f"   删除临时目录失败 {dp}: {e}")
+                        logger.debug(f"   Failed to delete temporary directory {dp}: {e}")
                 
                 # 清空列表
                 self.temp_files.clear()
@@ -157,13 +154,13 @@ class TempFileManager:
                     try:
                         if dp.exists():
                             shutil.rmtree(dp, ignore_errors=True)
-                            logger.debug(f"   删除preprocess临时目录: {dp}")
+                            logger.debug(f"   Deleted preprocess temporary directory: {dp}")
                     except Exception as e:
-                        logger.debug(f"   删除preprocess临时目录失败 {dp}: {e}")
+                        logger.debug(f"   Failed to delete preprocess temporary directory {dp}: {e}")
                 self.preprocess_tmp_dirs.clear()
                 
         except Exception as e:
-            logger.warning(f" 清理临时文件时出错（已忽略）：{e}")
+            logger.warning(f"Error during temporary file cleanup (ignored): {e}")
     
     def clear(self):
         """清空所有注册的临时文件/目录（不删除）"""
@@ -207,15 +204,15 @@ def load_preprocess_metadata(metadata_file: str) -> Dict:
         required_plink = [f"{gwas_prefix}.bed", f"{gwas_prefix}.bim", f"{gwas_prefix}.fam"]
         missing_plink = [f for f in required_plink if not Path(f).exists()]
         if missing_plink:
-            logger.warning(f"元数据中的GWAS PLINK文件不存在: {gwas_prefix}")
-            logger.warning(f"缺失的文件: {', '.join(missing_plink)}")
+            logger.warning(f"GWAS PLINK files from metadata do not exist: {gwas_prefix}")
+            logger.warning(f"Missing files: {', '.join(missing_plink)}")
             # 将gwas_genotype_prefix设为None，表示文件不存在
             metadata["gwas_genotype_prefix"] = None
             metadata["_gwas_genotype_prefix_missing"] = True
         else:
-            logger.debug(f"元数据中的GWAS PLINK文件验证通过: {gwas_prefix}")
+            logger.debug(f"GWAS PLINK files from metadata validated: {gwas_prefix}")
     
-    logger.debug(f"读取元数据: {len(metadata['valid_samples'])}个样本")
+    logger.debug(f"Loaded metadata: {len(metadata['valid_samples']):,} samples")
     return metadata
 
 def parse_train_input_path(input_path: str) -> Dict:
@@ -267,19 +264,19 @@ def parse_train_input_path(input_path: str) -> Dict:
                     metadata_found = True
                     break
                 except Exception as e:
-                    logger.debug(f"读取元数据文件失败 {metadata_path}: {e}")
+                    logger.debug(f"Failed to read metadata file {metadata_path}: {e}")
                     continue  # 尝试下一个路径
         
         if not metadata_found:
-            logger.debug(f"未找到元数据文件，尝试的路径: {possible_metadata_paths}")
+            logger.debug(f"Metadata file not found, attempted paths: {possible_metadata_paths}")
     
     # 验证训练文件存在性
     if not Path(result["train_file"]).exists():
-        raise FileNotFoundError(f"训练文件不存在: {result['train_file']}")
+        raise FileNotFoundError(f"Training file does not exist: {result['train_file']}")
     
     return result
 
-# ======================== 2. 数据加载 & 预处理 ========================
+# ======================== 2. 数据加载 & 处理 ========================
 def clean_feature_names(feature_names: List[str]) -> List[str]:
     """
     清理特征名称，移除LightGBM不支持的特殊JSON字符
@@ -314,15 +311,226 @@ def load_training_data(train_file: str, valid_samples: List[str] = None) -> Tupl
         y: 目标变量Series
         snp_name_mapping: 原始SNP名称到清理后名称的映射字典
     """
-    logger.debug("加载训练数据")
-    try:
-        # 读取数据（sample列为索引，最后一列为表型）
-        df = pd.read_csv(
-            train_file,
-            sep="\t",
-            index_col="sample",
-            na_filter=False  # 禁用缺失值过滤（preprocess已处理）
+    logger.debug("Loading training data")
+    
+    # 检查文件格式
+    train_file_path = Path(train_file)
+    if not train_file_path.exists():
+        raise FileNotFoundError(f"Training data file not found: {train_file}")
+    
+    file_ext = train_file_path.suffix.lower()
+    if file_ext in ['.vcf', '.vcf.gz']:
+        raise ValueError(
+            f"VCF file detected: {train_file}\n"
+            f"Error: Model training/prediction requires preprocessed training data format (tab-separated .txt file with 'sample' column as index).\n"
+            f"VCF files must be preprocessed first using the 'preprocess' command.\n"
+            f"Please run: association preprocess -g {train_file} -p <phenotype_file> -o <output_dir>\n"
+            f"Then use the preprocessed output file for training/prediction."
         )
+    
+    # 检测是否是压缩文件
+    is_compressed = file_ext == '.gz' or train_file.endswith('.gz')
+    
+    try:
+        # 尝试自动检测分隔符
+        # 先读取前几行来检测分隔符
+        import csv
+        import gzip
+        
+        # 根据是否压缩选择打开方式
+        # 注意：gzip 文件不支持 seek(0)，所以需要重新打开文件
+        if is_compressed:
+            with gzip.open(train_file, 'rt', encoding='utf-8') as f:
+                # 读取前10行来检测分隔符（跳过空行）
+                sample_lines = []
+                for _ in range(10):
+                    line = f.readline()
+                    if line.strip():  # 跳过空行
+                        sample_lines.append(line)
+                    if not line:  # 文件结束
+                        break
+        else:
+            with open(train_file, 'r', encoding='utf-8') as f:
+                # 读取前10行来检测分隔符（跳过空行）
+                sample_lines = []
+                for _ in range(10):
+                    line = f.readline()
+                    if line.strip():  # 跳过空行
+                        sample_lines.append(line)
+                    if not line:  # 文件结束
+                        break
+                f.seek(0)  # 重置文件指针（仅对非压缩文件有效）
+        
+        # 检查是否读取到数据
+        if not sample_lines:
+            raise ValueError(f"File {train_file} appears to be empty or contains only empty lines")
+        
+        # 检测最常见的分隔符
+        # 使用csv.Sniffer来检测分隔符（更准确）
+        delimiter = "\t"  # 默认使用制表符
+        try:
+            # 尝试使用csv.Sniffer自动检测
+            sample_text = "".join(sample_lines[:5])  # 使用前5行
+            sniffer = csv.Sniffer()
+            detected_delimiter = sniffer.sniff(sample_text, delimiters="\t, ").delimiter
+            if detected_delimiter:
+                delimiter = detected_delimiter
+                logger.debug(f"CSV Sniffer detected delimiter: {repr(delimiter)}")
+        except Exception as e:
+            logger.debug(f"CSV Sniffer failed: {e}, using manual detection")
+            # 手动检测：统计每种分隔符出现的次数
+            delimiter_counts = {"\t": [], ",": [], " ": []}
+            
+            for line in sample_lines:
+                if not line.strip():
+                    continue
+                delimiter_counts["\t"].append(line.count("\t"))
+                delimiter_counts[","].append(line.count(","))
+                delimiter_counts[" "].append(line.count(" "))
+            
+            # 计算每种分隔符的平均出现次数（排除0值）
+            delimiter_avg = {}
+            for sep, counts in delimiter_counts.items():
+                non_zero_counts = [c for c in counts if c > 0]
+                if non_zero_counts:
+                    delimiter_avg[sep] = sum(non_zero_counts) / len(non_zero_counts)
+                else:
+                    delimiter_avg[sep] = 0
+            
+            # 选择平均出现次数最多的分隔符（但至少要有2个字段）
+            max_avg = max(delimiter_avg.values())
+            if max_avg > 0:
+                for sep, avg_count in delimiter_avg.items():
+                    if avg_count == max_avg and avg_count > 0:
+                        delimiter = sep
+                        break
+            
+            logger.debug(f"Manually detected delimiter: {repr(delimiter)} (avg count: {max_avg:.1f})")
+        
+        # 验证检测到的分隔符：检查第一行使用该分隔符后有多少字段
+        if sample_lines:
+            first_line = sample_lines[0].strip()
+            field_count = len(first_line.split(delimiter))
+            logger.debug(f"First line has {field_count} fields when using delimiter {repr(delimiter)}")
+            
+            # 如果字段数异常（太多或太少），尝试其他分隔符
+            if field_count > 1000 or field_count < 2:
+                logger.warning(f"Detected field count ({field_count}) seems abnormal, trying alternative delimiters")
+                for alt_sep in ["\t", ",", " "]:
+                    if alt_sep != delimiter:
+                        alt_count = len(first_line.split(alt_sep))
+                        if 2 <= alt_count <= 1000:
+                            logger.info(f"Switching to delimiter {repr(alt_sep)} (field count: {alt_count})")
+                            delimiter = alt_sep
+                            break
+        
+        # 读取数据（sample列为索引，最后一列为表型）
+        # 使用更健壮的读取方式，处理格式不一致的情况
+        # pandas 的 read_csv 会自动处理 gzip 压缩文件（如果文件名以 .gz 结尾）
+        df = None
+        read_errors = []
+        
+        # 策略1: 尝试使用检测到的分隔符，跳过错误行
+        try:
+            df = pd.read_csv(
+                train_file,
+                sep=delimiter,
+                index_col="sample",
+                na_filter=False,  # 禁用缺失值过滤（preprocess已处理）
+                engine='python',  # 使用Python引擎，更健壮但稍慢，支持压缩文件
+                on_bad_lines='skip',  # 跳过格式错误的行（pandas >= 1.3.0）
+                compression='gzip' if is_compressed else 'infer'  # 明确指定压缩格式
+            )
+            logger.debug(f"Successfully read file with delimiter {repr(delimiter)} using on_bad_lines='skip'")
+        except (TypeError, ValueError) as e:
+            read_errors.append(f"Strategy 1 (on_bad_lines='skip'): {str(e)}")
+            # 策略2: 对于旧版本的pandas，使用不同的参数
+            try:
+                df = pd.read_csv(
+                    train_file,
+                    sep=delimiter,
+                    index_col="sample",
+                    na_filter=False,
+                    engine='python',
+                    error_bad_lines=False,  # pandas < 1.3.0
+                    warn_bad_lines=True,
+                    compression='gzip' if is_compressed else 'infer'
+                )
+                logger.debug(f"Successfully read file with delimiter {repr(delimiter)} using error_bad_lines=False")
+            except (TypeError, ValueError) as e2:
+                read_errors.append(f"Strategy 2 (error_bad_lines=False): {str(e2)}")
+                # 策略3: 使用最基本的读取方式，不跳过错误行
+                try:
+                    df = pd.read_csv(
+                        train_file,
+                        sep=delimiter,
+                        index_col="sample",
+                        na_filter=False,
+                        engine='python',
+                        compression='gzip' if is_compressed else 'infer'
+                    )
+                    logger.debug(f"Successfully read file with delimiter {repr(delimiter)} using basic mode")
+                except Exception as e3:
+                    read_errors.append(f"Strategy 3 (basic mode): {str(e3)}")
+                    # 策略4: 尝试使用C引擎（更快，但可能不够健壮，且可能不支持压缩）
+                    if not is_compressed:  # C引擎可能不支持压缩文件
+                        try:
+                            df = pd.read_csv(
+                                train_file,
+                                sep=delimiter,
+                                index_col="sample",
+                                na_filter=False,
+                                engine='c',
+                                low_memory=False
+                            )
+                            logger.debug(f"Successfully read file with delimiter {repr(delimiter)} using C engine")
+                        except Exception as e4:
+                            read_errors.append(f"Strategy 4 (C engine): {str(e4)}")
+                    else:
+                        read_errors.append(f"Strategy 4 (C engine): Skipped (compressed file, C engine may not support)")
+                        # 如果所有策略都失败，检查是否是缺少 "sample" 列的问题
+                        error_msg = f"Failed to read file {train_file} with delimiter {repr(delimiter)}. Tried strategies:\n"
+                        error_msg += "\n".join(f"  - {err}" for err in read_errors)
+                        
+                        # 检查是否是缺少 "sample" 列的问题
+                        if any("Index sample invalid" in err or "sample" in err.lower() for err in read_errors):
+                            # 尝试读取第一行来检查列名
+                            try:
+                                with open(train_file, 'r', encoding='utf-8') as f:
+                                    header_line = f.readline().strip()
+                                    if delimiter:
+                                        columns = header_line.split(delimiter)
+                                        if 'sample' not in columns:
+                                            error_msg += f"\n\nError: File does not contain 'sample' column as required.\n"
+                                            error_msg += f"Found columns: {columns[:10]}{'...' if len(columns) > 10 else ''}\n"
+                                            error_msg += f"This file format is not compatible with model training/prediction.\n"
+                                            error_msg += f"Expected format: Tab-separated file with 'sample' column as index (from preprocess module output).\n"
+                                            if file_ext in ['.vcf', '.vcf.gz']:
+                                                error_msg += f"Note: VCF files must be preprocessed first using: association preprocess -g <vcf_file> -p <phenotype_file> -o <output_dir>"
+                            except Exception:
+                                pass
+                        
+                        error_msg += f"\n\nPlease check the file format. Expected delimiter: {repr(delimiter)}"
+                        logger.error(error_msg)
+                        raise ValueError(error_msg) from e4
+        
+        if df is None or df.empty:
+            raise ValueError(f"Failed to read data from {train_file} or file is empty")
+        
+        # 验证文件格式：确保有 "sample" 索引
+        if df.index.name != "sample" and "sample" not in str(df.index.name).lower():
+            # 检查是否有 sample 列
+            if "sample" in df.columns:
+                logger.warning("Found 'sample' column but not as index. Attempting to set it as index...")
+                df = df.set_index("sample")
+            else:
+                raise ValueError(
+                    f"File {train_file} does not have 'sample' column/index as required.\n"
+                    f"Current index name: {df.index.name}\n"
+                    f"Current columns: {list(df.columns[:10])}{'...' if len(df.columns) > 10 else ''}\n"
+                    f"This file format is not compatible with model training/prediction.\n"
+                    f"Expected format: Tab-separated file with 'sample' column as index (from preprocess module output)."
+                )
         
         # 复用preprocess的有效样本，减少数据量
         if valid_samples:
@@ -340,6 +548,33 @@ def load_training_data(train_file: str, valid_samples: List[str] = None) -> Tupl
         
         # 进一步过滤：排除任何包含"phenotype"的列名
         X = filter_phenotype_from_dataframe(X)
+
+        # ======================== 关键修改：统一SNP特征命名 ========================
+        # 目的：让训练和预测阶段的特征命名保持一致（chr_pos），
+        # 避免出现训练使用 1_4392528 而预测使用 1_4392528_A 这种不匹配情况。
+        import re
+        pattern_colon = re.compile(r'^([^:]+):([^_]+)_[^_]+$')       # 1:223238_A -> (1, 223238)
+        pattern_under = re.compile(r'^([^_]+)_([^_]+)_[^_]+$')       # 1_223238_A -> (1, 223238)
+
+        renamed_cols: List[str] = []
+        for col in X.columns:
+            col_str = str(col)
+            chr_part = pos_part = None
+
+            m = pattern_colon.match(col_str)
+            if m:
+                chr_part, pos_part = m.group(1), m.group(2)
+            else:
+                m2 = pattern_under.match(col_str)
+                if m2:
+                    chr_part, pos_part = m2.group(1), m2.group(2)
+
+            if chr_part and pos_part:
+                renamed_cols.append(f"{chr_part}_{pos_part}")
+            else:
+                renamed_cols.append(col_str)
+
+        X.columns = renamed_cols
         
         # 清理特征名称（移除LightGBM不支持的特殊字符）
         original_cols = X.columns.tolist()
@@ -375,161 +610,16 @@ def load_training_data(train_file: str, valid_samples: List[str] = None) -> Tupl
         
         # 数据合法性校验
         if X.empty or y.empty:
-            raise ValueError("加载的训练数据为空")
+            raise ValueError("Loaded training data is empty")
         if X.isnull().any().any():
             X = X.fillna(-1)
         
         return X, y, snp_name_mapping
     except Exception as e:
-        logger.error(f" 加载训练数据失败: {str(e)}")
+        logger.error(f"Failed to load training data: {str(e)}")
         raise
 
-# ======================== 3. LD过滤 & GWAS特征筛选 ========================
-def run_ld_filtering(
-    genotype_prefix: str,
-    output_prefix: str,
-    ld_window_kb: int = 50,
-    ld_window: int = 5,
-    ld_window_r2: float = 0.2,
-    threads: int = 8,
-    keep_samples_file: Optional[str] = None,
-    extract_snps_file: Optional[str] = None
-) -> Tuple[str, List[str]]:
-    """
-    执行LD过滤，返回过滤后的基因型前缀和保留的SNP列表
-    
-    Args:
-        genotype_prefix: 基因型文件前缀
-        output_prefix: 输出文件前缀
-        ld_window_kb: LD窗口大小（KB）
-        ld_window: LD窗口大小（变体数）
-        ld_window_r2: LD r²阈值
-        threads: 线程数
-        keep_samples_file: 样本列表文件（可选，仅对指定样本进行LD过滤）
-        extract_snps_file: SNP列表文件（可选，仅对指定SNP进行LD过滤，用于模式4：先GWAS后LD）
-    
-    Returns:
-        (过滤后的基因型前缀, 保留的SNP列表)
-    """
-    logger.debug(f"LD过滤: 窗口={ld_window_kb}KB, r²={ld_window_r2}")
-    
-    # 执行LD过滤
-    ld_output_prefix = f"{output_prefix}_ld_filtered"
-    ld_result = plink_ld.run_ld_filtering(
-        input_path=genotype_prefix,
-        output_prefix=ld_output_prefix,
-        ld_window_kb=ld_window_kb,
-        ld_window=ld_window,
-        ld_window_r2=ld_window_r2,
-        threads=threads,
-        keep_intermediate=False,
-        keep_samples_file=keep_samples_file,
-        extract_snps_file=extract_snps_file
-    )
-    
-    if ld_result != 0:
-        raise RuntimeError("LD过滤执行失败")
-    
-    # 解析LD过滤后的SNP列表（从prune.in文件）
-    prune_in_file = f"{ld_output_prefix}.prune.in"
-    if not Path(prune_in_file).exists():
-        raise FileNotFoundError(f"LD过滤结果文件缺失: {prune_in_file}")
-    
-    with open(prune_in_file, 'r') as f:
-        ld_selected_snps = [line.strip() for line in f if line.strip()]
-    
-    logger.debug(f"LD过滤完成: {len(ld_selected_snps)}个SNP")
-    return ld_output_prefix, ld_selected_snps
-
-def run_gemma_gwas(
-    genotype_prefix: str,
-    phenotype_file: str,
-    output_prefix: str,
-    pvalue_threshold: float,
-    threads: int = 8,
-    model: str = "lmm"
-) -> List[str]:
-    """
-    调用GEMMA执行GWAS，筛选显著SNP（基于过滤后的基因型文件）
-    
-    注意：此函数依赖于 assoG2P.bin.gemma_gwas 模块中
-    run_complete_gwas_pipeline 的实现细节，尤其是：
-      - 结果文件由 GEMMA 写入默认的 output/ 目录
-      - GWAS结果文件名为 output/{output_prefix}_gwas.assoc.txt
-      - 所有GWAS生成的临时文件会在模型训练完成后自动删除
-    """
-    # 创建输出目录（用于我们自己的派生结果，如significant_snps）
-    output_dir = Path(output_prefix).parent
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    logger.debug("GWAS分析中...")
-    try:
-        # 调用GWAS核心流程（严格按照 gemma_gwas 模块约定）
-        gemma_gwas.run_complete_gwas_pipeline(
-            input_plink_prefix=genotype_prefix,
-            phenotype_file=phenotype_file,
-            output_prefix=output_prefix
-        )
-    except Exception as e:
-        raise RuntimeError(f"GWAS执行失败: {str(e)}")
-    
-    # 解析GWAS结果，筛选显著SNP
-    # gemma_gwas.run_gemma_gwas 内部会对 output_prefix 取 basename 再加后缀 "_gwas" 作为 -o，
-    # GEMMA 默认将结果写入当前工作目录下的 output/ 子目录，因此关联文件路径应为：
-    #   {当前工作目录}/output/{basename(output_prefix)}_gwas.assoc.txt
-    base_prefix = Path(output_prefix).name
-    # 使用绝对路径，基于当前工作目录（调用方已切换到用户指定的输出目录）
-    gwas_result_file = Path("output") / f"{base_prefix}_gwas.assoc.txt"
-    if not gwas_result_file.exists():
-        raise FileNotFoundError(f"GWAS结果文件缺失: {gwas_result_file.absolute()}")
-    
-    # 注册GWAS结果文件以便后续清理
-    # 注意：这里需要从全局临时文件管理器注册，但函数签名中没有传递
-    # 因此需要在调用run_gemma_gwas的地方注册这些文件
-    
-    # 读取GWAS结果（兼容不同GEMMA版本列名）
-    gwas_df = pd.read_csv(gwas_result_file, sep="\t")
-    pvalue_col = None
-    for col in ["p_wald", "p_lrt", "P", "pvalue"]:
-        if col in gwas_df.columns:
-            pvalue_col = col
-            break
-    if not pvalue_col:
-        raise ValueError(f"未识别GWAS结果中的P值列: {gwas_result_file}")
-    
-    # 筛选显著SNP
-    snp_col = "rs" if "rs" in gwas_df.columns else "SNP" if "SNP" in gwas_df.columns else gwas_df.columns[0]
-    significant_snps = gwas_df[gwas_df[pvalue_col] < pvalue_threshold][snp_col].tolist()
-    
-    # 保存显著SNP列表（仍然使用调用方提供的 output_prefix 作为前缀，便于查找）
-    # 使用绝对路径，确保无论工作目录如何都能正确保存
-    snp_list_file = Path(output_prefix).parent.absolute() / f"{Path(output_prefix).name}_significant_snps.txt"
-    with open(snp_list_file, 'w') as f:
-        f.write("\n".join(significant_snps))
-    
-    logger.debug(f"GWAS完成: {len(significant_snps)}个显著SNP")
-    return significant_snps
-
-def generate_gwas_phenotype_file(train_ids: List[str], y_train: pd.Series, output_file: str):
-    """
-    生成GWAS专用表型文件（仅训练集，适配GEMMA与 gemma_gwas 模块）
-    
-    要求三列格式：FID IID PHENO
-      - 该格式是GEMMA官方推荐格式，可直接用于 `gemma -p phenotype_file`
-      - 本项目中的 gemma_gwas.merge_phenotype_to_fam 也已支持三列表型文件
-    这里将 FID 与 IID 均设置为 sample_id，第三列为表型值（缺失填-9）。
-    """
-    Path(output_file).parent.mkdir(parents=True, exist_ok=True)
-    
-    # 写入格式：FID IID PHENO（缺失值填-9）
-    with open(output_file, 'w') as f:
-        for sample_id, pheno in zip(train_ids, y_train):
-            pheno = pheno if not pd.isna(pheno) else -9
-            f.write(f"{sample_id}\t{sample_id}\t{pheno}\n")
-    
-    return output_file
-
-# ======================== 4. 模型训练 & 评估 ========================
+# ======================== 3. 模型训练 & 评估 ========================
 def init_model(model_type: str, task_type: str, random_state: int = 42) -> Any:
     """初始化模型（分类/回归）"""
     common_params = {"random_state": random_state}
@@ -724,22 +814,39 @@ def perform_grid_search(
     
     # 使用RandomizedSearchCV（比GridSearchCV更快）
     # 限制搜索次数以避免过长时间
+    # 注意：如果在ProcessPoolExecutor的子进程中调用，n_jobs应设为1以避免嵌套并行和资源泄漏
+    import os
+    n_jobs_value = -1  # 默认使用所有核心
+    
+    # 检查是否在multiprocessing的子进程中
+    try:
+        from multiprocessing import current_process
+        process_name = current_process().name
+        # 如果进程名不是'MainProcess'，说明在子进程中，使用n_jobs=1避免嵌套并行
+        if process_name != 'MainProcess':
+            n_jobs_value = 1
+            logger.debug(f"  Detected subprocess ({process_name}), using n_jobs=1 to avoid nested parallelism")
+    except Exception:
+        # 如果无法检测，保守地使用n_jobs=1（避免资源泄漏）
+        # 但为了性能，只在明确检测到子进程时才使用n_jobs=1
+        pass
+    
     search = RandomizedSearchCV(
         estimator=base_model,
         param_distributions=param_grid,
         n_iter=n_iter,
         cv=cv,
         scoring=scoring,
-        n_jobs=-1,
+        n_jobs=n_jobs_value,
         random_state=random_state,
         verbose=0
     )
     
-    logger.debug(f"  网格搜索中: {n_iter}次迭代, {cv}折交叉验证...")
+    logger.debug(f"  Grid search: {n_iter} iterations, {cv}-fold cross-validation...")
     search.fit(X_train, y_train)
     
-    logger.debug(f"  最佳参数: {search.best_params_}")
-    logger.debug(f"  最佳得分: {search.best_score_:.4f}")
+    logger.debug(f"  Best parameters: {search.best_params_}")
+    logger.debug(f"  Best score: {search.best_score_:.4f}")
     
     return search.best_estimator_
 
@@ -754,12 +861,12 @@ def evaluate_model(y_true: pd.Series, y_pred: np.ndarray, y_prob: np.ndarray, ta
             y_pred_array = _ensure_numpy_array(y_pred)
             
             if len(y_true_array) == 0 or len(y_pred_array) == 0:
-                logger.warning(" 真实值或预测值为空，无法计算指标")
+                logger.warning("  True values or predictions are empty, cannot calculate metrics")
                 metrics["accuracy"] = "N/A"
                 metrics["recall"] = "N/A"
                 metrics["f1"] = "N/A"
             elif len(y_true_array) != len(y_pred_array):
-                logger.warning(f" 真实值和预测值长度不匹配: {len(y_true_array)} vs {len(y_pred_array)}")
+                logger.warning(f"  True values and predictions length mismatch: {len(y_true_array)} vs {len(y_pred_array)}")
                 metrics["accuracy"] = "N/A"
                 metrics["recall"] = "N/A"
                 metrics["f1"] = "N/A"
@@ -768,7 +875,7 @@ def evaluate_model(y_true: pd.Series, y_pred: np.ndarray, y_prob: np.ndarray, ta
                 metrics["recall"] = round(recall_score(y_true_array, y_pred_array, average="weighted"), 4)
                 metrics["f1"] = round(f1_score(y_true_array, y_pred_array, average="weighted"), 4)
         except Exception as e:
-            logger.warning(f" 计算分类指标失败: {str(e)}")
+            logger.warning(f"  Failed to calculate classification metrics: {str(e)}")
             metrics["accuracy"] = "N/A"
             metrics["recall"] = "N/A"
             metrics["f1"] = "N/A"
@@ -787,7 +894,7 @@ def evaluate_model(y_true: pd.Series, y_pred: np.ndarray, y_prob: np.ndarray, ta
                 
                 # 检查数据长度是否一致
                 if len(y_true_array) != len(y_prob_array):
-                    logger.warning(f" 真实值和概率长度不匹配: {len(y_true_array)} vs {len(y_prob_array)}")
+                    logger.warning(f"  True values and probabilities length mismatch: {len(y_true_array)} vs {len(y_prob_array)}")
                     metrics["auc"] = "N/A"
                 else:
                     # 检查唯一标签数量
@@ -797,7 +904,7 @@ def evaluate_model(y_true: pd.Series, y_pred: np.ndarray, y_prob: np.ndarray, ta
                     if n_unique < 2:
                         # 只有一个类别，无法计算AUC
                         metrics["auc"] = "N/A"
-                        logger.debug(f" 只有一个类别（{unique_labels}），无法计算AUC")
+                        logger.debug(f"  Only one class ({unique_labels}), cannot calculate AUC")
                     elif n_unique == 2:
                         # 二分类
                         try:
@@ -808,7 +915,7 @@ def evaluate_model(y_true: pd.Series, y_pred: np.ndarray, y_prob: np.ndarray, ta
                             else:
                                 metrics["auc"] = "N/A"
                         except Exception as e:
-                            logger.warning(f" 二分类AUC计算失败: {str(e)}")
+                            logger.warning(f"  Binary classification AUC calculation failed: {str(e)}")
                             metrics["auc"] = "N/A"
                     else:
                         # 多分类：使用macro平均
@@ -822,28 +929,41 @@ def evaluate_model(y_true: pd.Series, y_pred: np.ndarray, y_prob: np.ndarray, ta
                             else:
                                 metrics["auc"] = round(roc_auc_score(y_true_binarized, y_prob_array, average="macro", multi_class="ovr"), 4)
                         except Exception as e:
-                            logger.warning(f" 多分类AUC计算失败: {str(e)}")
+                            logger.warning(f"  Multi-class AUC calculation failed: {str(e)}")
                             metrics["auc"] = "N/A"
             else:
                 metrics["auc"] = "N/A"
                 if task_type == "classification":
-                    logger.debug(" 预测概率为空，无法计算AUC")
+                    logger.debug("  Prediction probabilities are empty, cannot calculate AUC")
         except Exception as e:
-            logger.warning(f" 计算AUC失败: {str(e)}")
+            logger.warning(f"  Failed to calculate AUC: {str(e)}")
             metrics["auc"] = "N/A"
     else:
         # 回归指标：只保留皮尔逊相关系数和p值
         try:
             from scipy.stats import pearsonr
-            pearson_corr, pearson_pvalue = pearsonr(y_true, y_pred)
-            metrics["pearson_correlation"] = round(pearson_corr, 4)
-            metrics["pearson_pvalue"] = round(pearson_pvalue, 6)  # p值通常需要更高精度
+            # 修复：确保y_true和y_pred都是numpy数组，且长度一致
+            y_true_array = _ensure_numpy_array(y_true)
+            y_pred_array = _ensure_numpy_array(y_pred)
+            
+            if len(y_true_array) == 0 or len(y_pred_array) == 0:
+                logger.warning("  True values or predictions are empty, cannot calculate Pearson correlation")
+                metrics["pearson_correlation"] = "N/A"
+                metrics["pearson_pvalue"] = "N/A"
+            elif len(y_true_array) != len(y_pred_array):
+                logger.warning(f"  True values and predictions length mismatch: {len(y_true_array)} vs {len(y_pred_array)}")
+                metrics["pearson_correlation"] = "N/A"
+                metrics["pearson_pvalue"] = "N/A"
+            else:
+                pearson_corr, pearson_pvalue = pearsonr(y_true_array, y_pred_array)
+                metrics["pearson_correlation"] = round(pearson_corr, 4)
+                metrics["pearson_pvalue"] = round(pearson_pvalue, 6)  # p值通常需要更高精度
         except ImportError:
-            logger.warning(" scipy未安装，无法计算皮尔逊相关系数和p值")
+            logger.warning("  scipy not installed, cannot calculate Pearson correlation coefficient and p-value")
             metrics["pearson_correlation"] = "N/A"
             metrics["pearson_pvalue"] = "N/A"
         except Exception as e:
-            logger.warning(f" 计算皮尔逊相关系数失败: {str(e)}")
+            logger.warning(f"  Failed to calculate Pearson correlation coefficient: {str(e)}")
             metrics["pearson_correlation"] = "N/A"
             metrics["pearson_pvalue"] = "N/A"
     
@@ -869,7 +989,6 @@ def calculate_feature_importance(
     :param task_type: 任务类型（classification/regression）
     :return: 特征重要性DataFrame
     """
-    importance_dict = {}
     
     try:
         # 不同模型的特征重要性获取方式
@@ -896,7 +1015,7 @@ def calculate_feature_importance(
                     # 回归：直接使用系数绝对值
                     importances = np.abs(model.coef_[0])
             else:
-                logger.warning(f" {model_type}模型不支持特征重要性计算")
+                logger.warning(f"  {model_type} model does not support feature importance calculation")
                 return pd.DataFrame()
         
         elif model_type == "SVM":
@@ -905,14 +1024,14 @@ def calculate_feature_importance(
                 if hasattr(model, 'coef_'):
                     importances = np.abs(model.coef_[0])
                 else:
-                    logger.warning(" SVM模型不支持特征重要性计算（非线性核）")
+                    logger.warning("  SVM model does not support feature importance calculation (non-linear kernel)")
                     return pd.DataFrame()
             else:
-                logger.warning(" SVM模型不支持特征重要性计算（非线性核）")
+                logger.warning("  SVM model does not support feature importance calculation (non-linear kernel)")
                 return pd.DataFrame()
         
         else:
-            logger.warning(f" {model_type}模型不支持特征重要性计算")
+            logger.warning(f"  {model_type} model does not support feature importance calculation")
             return pd.DataFrame()
         
         # 获取原始值（带正负号）用于计算正负效应
@@ -951,11 +1070,131 @@ def calculate_feature_importance(
         importance_df = importance_df.sort_values('importance_abs', ascending=False)
         importance_df = importance_df.reset_index(drop=True)
         
-        logger.info(f" 特征重要性计算完成")
+        logger.info("  Feature importance calculation completed")
         return importance_df
         
     except Exception as e:
-        logger.error(f" 特征重要性计算失败: {str(e)}")
+        logger.error(f"  Feature importance calculation failed: {str(e)}")
+        return pd.DataFrame()
+
+def calculate_shap_values(
+    model: Any,
+    model_type: str,
+    feature_names: List[str],
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    task_type: str
+) -> pd.DataFrame:
+    """
+    计算SHAP值（格式与feature_importance相同）
+    
+    :param model: 训练好的模型
+    :param model_type: 模型类型
+    :param feature_names: 特征名称列表
+    :param X_train: 训练集特征
+    :param y_train: 训练集标签
+    :param task_type: 任务类型（classification/regression）
+    :return: SHAP值DataFrame（三列：feature, shap_abs, effect）
+    """
+    
+    if not SHAP_AVAILABLE:
+        logger.warning("  SHAP library not installed, cannot calculate SHAP values. Please run: pip install shap")
+        return pd.DataFrame()
+    
+    try:
+        # 使用全部数据计算SHAP值
+        X_shap = X_train
+        y_shap = y_train
+        
+        # 根据模型类型选择合适的SHAP解释器
+        if model_type in ["LightGBM", "XGBoost", "CatBoost", "RandomForest"]:
+            # 树模型：使用TreeExplainer
+            explainer = shap.TreeExplainer(model)
+            shap_values = explainer.shap_values(X_shap[feature_names] if feature_names else X_shap)
+        elif model_type == "Logistic":
+            # 线性逻辑回归：使用LinearExplainer
+            explainer = shap.LinearExplainer(model, X_shap[feature_names] if feature_names else X_shap)
+            shap_values = explainer.shap_values(X_shap[feature_names] if feature_names else X_shap)
+        elif model_type == "SVM":
+            # 当前实现的 SVM 使用 sklearn.svm.SVR/SVC，通常为非线性核（如RBF），
+            # shap.LinearExplainer 不支持这类模型，会报 "An unknown model type was passed"。
+            # 为避免极慢的 KernelExplainer 计算（特征数和样本数较大），这里直接跳过SHAP计算。
+            logger.warning("  SHAP values are not calculated for SVM models (non-linear kernels not supported efficiently); skipping.")
+            return pd.DataFrame()
+        else:
+            # 其他模型：使用KernelExplainer（较慢）
+            logger.warning(f"  {model_type} model uses KernelExplainer for SHAP values, may be slow")
+            # 使用少量样本作为背景数据
+            background_size = min(100, len(X_shap))
+            background = X_shap[feature_names].sample(n=background_size, random_state=42) if feature_names else X_shap.sample(n=background_size, random_state=42)
+            explainer = shap.KernelExplainer(
+                model.predict if task_type == "regression" else lambda x: model.predict_proba(x)[:, 1] if hasattr(model, 'predict_proba') else model.predict(x),
+                background
+            )
+            shap_values = explainer.shap_values(X_shap[feature_names] if feature_names else X_shap)
+        
+        # 处理多分类任务的SHAP值（取平均）
+        if isinstance(shap_values, list):
+            # 多分类：对每个类别的SHAP值取平均
+            shap_values = np.mean([np.abs(sv) for sv in shap_values], axis=0)
+        elif len(shap_values.shape) > 2:
+            # 多维数组：取平均
+            shap_values = np.mean(shap_values, axis=0)
+        
+        # 确保是2D数组
+        if len(shap_values.shape) == 1:
+            shap_values = shap_values.reshape(1, -1)
+        
+        # 计算每个特征的平均SHAP值（绝对值）
+        mean_shap_abs = np.abs(shap_values).mean(axis=0)
+        
+        # 计算每个特征的平均SHAP值（带符号，用于确定正负效应）
+        mean_shap_signed = shap_values.mean(axis=0)
+        
+        # 确定正负效应（1表示正效应，-1表示负效应）
+        sign_effect = np.sign(mean_shap_signed)
+        # 将0转换为1（表示正效应）
+        sign_effect = np.where(sign_effect == 0, 1, sign_effect)
+        
+        # 创建SHAP值DataFrame（三列：特征名、绝对值、正负效应）
+        # 特征名统一使用当前训练特征矩阵的列名（X_train.columns），
+        # 而不是外部传入的原始基因型 SNP ID 列表，保证与整体特征处理逻辑一致。
+        # 同时增加鲁棒性检查，确保所有数组长度一致，避免
+        # "All arrays must be of the same length" 错误。
+        feature_list = X_train.columns.tolist()
+        n_features_from_shap = len(mean_shap_abs)
+        n_features_from_names = len(feature_list)
+        n_features_from_sign = len(sign_effect)
+
+        # 取三者中的最小长度进行对齐
+        min_len = min(n_features_from_shap, n_features_from_names, n_features_from_sign)
+        if not (n_features_from_shap == n_features_from_names == n_features_from_sign):
+            logger.warning(
+                " SHAP特征长度不一致，将按最小长度对齐: "
+                f"shap={n_features_from_shap}, names={n_features_from_names}, sign={n_features_from_sign}"
+            )
+
+        feature_list = feature_list[:min_len]
+        mean_shap_abs = mean_shap_abs[:min_len]
+        sign_effect = sign_effect[:min_len]
+
+        shap_df = pd.DataFrame({
+            'feature': feature_list,
+            'shap_abs': mean_shap_abs,
+            'effect': sign_effect.astype(int)
+        })
+        
+        # 按绝对值降序排序
+        shap_df = shap_df.sort_values('shap_abs', ascending=False)
+        shap_df = shap_df.reset_index(drop=True)
+        
+        logger.info(f"  SHAP values calculation completed (using all {len(X_shap):,} samples)")
+        return shap_df
+        
+    except Exception as e:
+        logger.error(f"  SHAP values calculation failed: {str(e)}")
+        import traceback
+        logger.debug(traceback.format_exc())
         return pd.DataFrame()
 
 # ======================== 辅助函数：减少代码重复 ========================
@@ -978,7 +1217,7 @@ def _setup_matplotlib() -> Tuple[bool, Any]:
             pass
         return True, plt
     except ImportError:
-        logger.warning(" matplotlib未安装，跳过绘图功能")
+        logger.warning("  matplotlib not installed, skipping plotting functionality")
         return False, None  # type: ignore
 
 def _ensure_numpy_array(data: Any) -> np.ndarray:
@@ -1017,7 +1256,7 @@ def filter_phenotype_from_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ======================== 可视化函数 ========================
-def plot_performance_curves(y_true: pd.Series, y_pred: np.ndarray, y_prob: Optional[np.ndarray], output_dir: Path, model_type: str, task_type: str) -> None:
+def plot_performance_curves(y_true: pd.Series, y_pred: np.ndarray, y_prob: Optional[np.ndarray], output_dir: Path, model_type: str, task_type: str, publication_quality: bool = True) -> None:
     """
     绘制性能评估指标变化曲线（分类/回归）
     
@@ -1027,11 +1266,36 @@ def plot_performance_curves(y_true: pd.Series, y_pred: np.ndarray, y_prob: Optio
     :param output_dir: 输出目录
     :param model_type: 模型类型
     :param task_type: 任务类型（classification/regression）
+    :param publication_quality: 是否生成期刊发表质量图表（高分辨率、矢量格式、专业配色）
     """
     # 设置matplotlib环境
     matplotlib_available, plt = _setup_matplotlib()
     if not matplotlib_available:
         return
+    
+    # 期刊发表质量设置
+    if publication_quality:
+        # 设置期刊标准字体和样式
+        plt.rcParams.update({
+            'font.family': 'serif',  # 使用serif字体（如Times New Roman）
+            'font.serif': ['Times New Roman', 'DejaVu Serif', 'Liberation Serif'],
+            'font.size': 9,  # 基础字体大小（减小）
+            'axes.labelsize': 10,  # 轴标签字体大小（减小）
+            'axes.titlesize': 11,  # 标题字体大小（减小）
+            'xtick.labelsize': 8,  # x轴刻度字体大小（减小）
+            'ytick.labelsize': 8,  # y轴刻度字体大小（减小）
+            'legend.fontsize': 8,  # 图例字体大小（减小）
+            'figure.titlesize': 12,  # 图形标题字体大小（减小）
+            'lines.linewidth': 2,  # 线条宽度
+            'axes.linewidth': 1.2,  # 坐标轴线宽
+            'grid.linewidth': 0.8,  # 网格线宽
+            'axes.grid': True,  # 默认显示网格
+            'grid.alpha': 0.3,  # 网格透明度
+            'figure.dpi': 300,  # 高分辨率
+            'savefig.dpi': 300,  # 保存时高分辨率
+            'savefig.bbox': 'tight',  # 紧密边界
+            'savefig.pad_inches': 0.1,  # 边距
+        })
     
     # 确保y_true是numpy数组
     y_true_values = _ensure_numpy_array(y_true)
@@ -1040,59 +1304,176 @@ def plot_performance_curves(y_true: pd.Series, y_pred: np.ndarray, y_prob: Optio
     
     if task_type == "regression":
         # ========== Regression performance curves ==========
-        # 只绘制皮尔逊相关系数和P值
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-        fig.suptitle(f'{model_type} Performance (Regression)', fontsize=16, fontweight='bold')
+        # 绘制多个回归评估图：散点图、残差图、残差分布、Q-Q图
+        if publication_quality:
+            # 期刊标准尺寸：单栏宽度约3.5英寸，双栏约7英寸
+            fig, axes = plt.subplots(2, 2, figsize=(7, 6))  # 适合双栏布局
+            fig.suptitle(f'{model_type} Model Performance (Regression)', fontsize=12, fontweight='bold')
+        else:
+            fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+            fig.suptitle(f'{model_type} Performance (Regression)', fontsize=16, fontweight='bold')
         
         # 计算皮尔逊相关系数和P值
         try:
             from scipy.stats import pearsonr
             pearson_corr, pearson_pvalue = pearsonr(y_true_values, y_pred_values)
         except ImportError:
-            logger.warning("scipy未安装，无法计算皮尔逊相关系数和P值")
+            logger.warning("  scipy not installed, cannot calculate Pearson correlation coefficient and P-value")
             pearson_corr = None
             pearson_pvalue = None
         except Exception as e:
-            logger.warning(f"计算皮尔逊相关系数失败: {str(e)}")
+            logger.warning(f"  Failed to calculate Pearson correlation coefficient: {str(e)}")
             pearson_corr = None
             pearson_pvalue = None
         
-        # 1. 皮尔逊相关系数
-        ax1.axis('off')
-        corr_text = f"Pearson Correlation\n\n"
-        if pearson_corr is not None:
-            corr_text += f"  r = {pearson_corr:.4f}\n"
-            corr_text += f"  R² = {pearson_corr**2:.4f}"
-        else:
-            corr_text += "  N/A"
-        ax1.text(0.5, 0.5, corr_text, fontsize=14, ha='center', va='center', 
-                transform=ax1.transAxes, family='monospace', fontweight='bold')
-        ax1.set_title('Pearson Correlation', fontsize=14, fontweight='bold')
+        # 计算残差
+        residuals = y_true_values - y_pred_values
         
-        # 2. P值
-        ax2.axis('off')
-        pval_text = f"P-value\n\n"
-        if pearson_pvalue is not None:
-            pval_text += f"  p = {pearson_pvalue:.6f}\n"
-            if pearson_pvalue < 0.001:
-                pval_text += f"  (p < 0.001)"
-            elif pearson_pvalue < 0.01:
-                pval_text += f"  (p < 0.01)"
-            elif pearson_pvalue < 0.05:
-                pval_text += f"  (p < 0.05)"
-            else:
-                pval_text += f"  (p >= 0.05)"
+        # 1. 预测值 vs 真实值散点图
+        ax1 = axes[0, 0]
+        if publication_quality:
+            # 期刊标准：使用灰度或专业配色，更大的点，清晰的边缘
+            ax1.scatter(y_true_values, y_pred_values, alpha=0.6, s=25, 
+                       color='#2E86AB', edgecolors='black', linewidths=0.3)
+            # 理想预测线：黑色虚线
+            min_val = min(np.min(y_true_values), np.min(y_pred_values))
+            max_val = max(np.max(y_true_values), np.max(y_pred_values))
+            ax1.plot([min_val, max_val], [min_val, max_val], 'k--', linewidth=2, 
+                    label='Ideal (y=x)', dashes=(5, 3))
+            # 回归拟合线：深蓝色实线
+            try:
+                z = np.polyfit(y_true_values, y_pred_values, 1)
+                p = np.poly1d(z)
+                ax1.plot(y_true_values, p(y_true_values), "#E63946", linewidth=2, 
+                        label=f'Fit (slope={z[0]:.3f})')
+            except:
+                pass
+            ax1.set_xlabel('True Values', fontsize=10, fontweight='normal')
+            ax1.set_ylabel('Predicted Values', fontsize=10, fontweight='normal')
+            ax1.set_title('(A) Predicted vs True Values', fontsize=11, fontweight='bold')
+            if pearson_corr is not None:
+                ax1.text(0.05, 0.95, f'r = {pearson_corr:.4f}\nR² = {pearson_corr**2:.4f}', 
+                        transform=ax1.transAxes, fontsize=8, verticalalignment='top',
+                        bbox=dict(boxstyle='round', facecolor='white', edgecolor='black', 
+                                linewidth=0.8, alpha=0.9, pad=0.3))
+            ax1.legend(loc='lower right', frameon=True, fancybox=False, edgecolor='black', 
+                      framealpha=0.9, fontsize=8, handlelength=1.5)
         else:
-            pval_text += "  N/A"
-        ax2.text(0.5, 0.5, pval_text, fontsize=14, ha='center', va='center', 
-                transform=ax2.transAxes, family='monospace', fontweight='bold')
-        ax2.set_title('P-value', fontsize=14, fontweight='bold')
+            ax1.scatter(y_true_values, y_pred_values, alpha=0.5, s=20, edgecolors='black', linewidths=0.5)
+            min_val = min(np.min(y_true_values), np.min(y_pred_values))
+            max_val = max(np.max(y_true_values), np.max(y_pred_values))
+            ax1.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='Ideal Prediction (y=x)')
+            try:
+                z = np.polyfit(y_true_values, y_pred_values, 1)
+                p = np.poly1d(z)
+                ax1.plot(y_true_values, p(y_true_values), "b-", linewidth=1.5, alpha=0.7, label=f'Fit Line (slope={z[0]:.3f})')
+            except:
+                pass
+            ax1.set_xlabel('True Values', fontsize=12)
+            ax1.set_ylabel('Predicted Values', fontsize=12)
+            ax1.set_title('Predicted vs True Values', fontsize=13)
+            if pearson_corr is not None:
+                ax1.text(0.05, 0.95, f'r = {pearson_corr:.4f}\nR² = {pearson_corr**2:.4f}', 
+                        transform=ax1.transAxes, fontsize=11, verticalalignment='top',
+                        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+            ax1.legend(loc='lower right')
+        ax1.grid(True, alpha=0.3)
+        
+        # 2. 残差图（残差 vs 预测值）
+        ax2 = axes[0, 1]
+        if publication_quality:
+            ax2.scatter(y_pred_values, residuals, alpha=0.6, s=25, 
+                       color='#2E86AB', edgecolors='black', linewidths=0.3)
+            ax2.axhline(y=0, color='k', linestyle='--', linewidth=2, 
+                       label='Zero', dashes=(5, 3))
+            ax2.set_xlabel('Predicted Values', fontsize=10, fontweight='normal')
+            ax2.set_ylabel('Residuals', fontsize=10, fontweight='normal')
+            ax2.set_title('(B) Residual Plot', fontsize=11, fontweight='bold')
+            ax2.legend(frameon=True, fancybox=False, edgecolor='black', framealpha=0.9, fontsize=8, handlelength=1.5)
+        else:
+            ax2.scatter(y_pred_values, residuals, alpha=0.5, s=20, edgecolors='black', linewidths=0.5)
+            ax2.axhline(y=0, color='r', linestyle='--', linewidth=2, label='Zero Residual')
+            ax2.set_xlabel('Predicted Values', fontsize=12)
+            ax2.set_ylabel('Residuals (True - Predicted)', fontsize=12)
+            ax2.set_title('Residual Plot', fontsize=13)
+            ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        # 3. 残差分布直方图
+        ax3 = axes[1, 0]
+        mean_residual = np.mean(residuals)
+        std_residual = np.std(residuals)
+        if publication_quality:
+            ax3.hist(residuals, bins=30, edgecolor='black', alpha=0.7, 
+                    color='#A23B72', linewidth=0.8)
+            ax3.axvline(x=0, color='k', linestyle='--', linewidth=2, 
+                       label='Zero', dashes=(5, 3))
+            ax3.axvline(x=mean_residual, color='#E63946', linestyle='--', linewidth=2, 
+                       label=f'Mean={mean_residual:.4f}', dashes=(5, 3))
+            ax3.set_xlabel('Residuals', fontsize=10, fontweight='normal')
+            ax3.set_ylabel('Frequency', fontsize=10, fontweight='normal')
+            ax3.set_title('(C) Residual Distribution', fontsize=11, fontweight='bold')
+            ax3.text(0.05, 0.95, f'Mean: {mean_residual:.4f}\nStd: {std_residual:.4f}', 
+                    transform=ax3.transAxes, fontsize=8, verticalalignment='top',
+                    bbox=dict(boxstyle='round', facecolor='white', edgecolor='black', 
+                            linewidth=0.8, alpha=0.9, pad=0.3))
+            ax3.legend(frameon=True, fancybox=False, edgecolor='black', framealpha=0.9, fontsize=8, handlelength=1.5)
+        else:
+            ax3.hist(residuals, bins=30, edgecolor='black', alpha=0.7, color='skyblue')
+            ax3.axvline(x=0, color='r', linestyle='--', linewidth=2, label='Zero')
+            ax3.axvline(x=mean_residual, color='g', linestyle='--', linewidth=2, 
+                       label=f'Mean={mean_residual:.4f}')
+            ax3.set_xlabel('Residuals', fontsize=12)
+            ax3.set_ylabel('Frequency', fontsize=12)
+            ax3.set_title('Residual Distribution', fontsize=13)
+            ax3.text(0.05, 0.95, f'Mean: {mean_residual:.4f}\nStd: {std_residual:.4f}', 
+                    transform=ax3.transAxes, fontsize=11, verticalalignment='top',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+            ax3.legend()
+        ax3.grid(True, alpha=0.3, axis='y')
+        
+        # 4. Q-Q图（残差正态性检验）
+        ax4 = axes[1, 1]
+        try:
+            from scipy import stats
+            stats.probplot(residuals, dist="norm", plot=ax4)
+            if publication_quality:
+                # 优化Q-Q图的线条样式
+                lines = ax4.get_lines()
+                if len(lines) >= 2:
+                    lines[0].set_linewidth(2)  # 数据点线
+                    lines[0].set_color('#2E86AB')
+                    lines[1].set_linewidth(2)  # 理论线
+                    lines[1].set_color('#E63946')
+                    lines[1].set_linestyle('--')
+                ax4.set_title('(D) Q-Q Plot', fontsize=11, fontweight='bold')
+                ax4.set_xlabel('Theoretical Quantiles', fontsize=10, fontweight='normal')
+                ax4.set_ylabel('Sample Quantiles', fontsize=10, fontweight='normal')
+            else:
+                ax4.set_title('Q-Q Plot (Residual Normality Test)', fontsize=13)
+            ax4.grid(True, alpha=0.3)
+        except ImportError:
+            ax4.text(0.5, 0.5, 'Q-Q Plot requires scipy', ha='center', va='center', 
+                    transform=ax4.transAxes, fontsize=12)
+            ax4.set_title('Q-Q Plot (scipy not available)', fontsize=13)
+        except Exception as e:
+            ax4.text(0.5, 0.5, f'Q-Q Plot failed:\n{str(e)}', ha='center', va='center', 
+                    transform=ax4.transAxes, fontsize=10)
+            ax4.set_title('Q-Q Plot (Error)', fontsize=13)
         
         plt.tight_layout()
         
         # 保存图形
-        plot_file = output_dir / "performance_curves.png"
-        plt.savefig(plot_file, dpi=150, bbox_inches='tight')
+        if publication_quality:
+            # 期刊标准：保存为PDF（矢量格式）和PNG（高分辨率）
+            plot_file_pdf = output_dir / "performance_curves.pdf"
+            plot_file_png = output_dir / "performance_curves.png"
+            plt.savefig(plot_file_pdf, dpi=300, bbox_inches='tight', format='pdf')
+            plt.savefig(plot_file_png, dpi=300, bbox_inches='tight', format='png')
+            logger.info(f"  Publication-quality plots saved: {plot_file_pdf} and {plot_file_png}")
+        else:
+            plot_file = output_dir / "performance_curves.png"
+            plt.savefig(plot_file, dpi=150, bbox_inches='tight')
         plt.close()
     
     else:
@@ -1114,12 +1495,16 @@ def plot_performance_curves(y_true: pd.Series, y_pred: np.ndarray, y_prob: Optio
             prob_col = 0
             y_prob_binary = y_prob[:, prob_col]
         
-        # ========== 图1：多个性能曲线合并在一张图中（2x2子图布局）==========
+        # ========== 图1：多个性能曲线合并在一张图中（1x3子图布局，删除召回率曲线）==========
         try:
-            from sklearn.metrics import roc_curve, auc, precision_recall_curve, f1_score, accuracy_score
+            from sklearn.metrics import roc_curve, auc, precision_recall_curve, f1_score, accuracy_score, recall_score
             
-            fig1, axes = plt.subplots(2, 2, figsize=(14, 12))
-            fig1.suptitle(f'{model_type} Performance Curves (Classification)', fontsize=16, fontweight='bold')
+            if publication_quality:
+                fig1, axes = plt.subplots(1, 3, figsize=(14, 4))
+                fig1.suptitle(f'{model_type} Performance Curves (Classification)', fontsize=12, fontweight='bold')
+            else:
+                fig1, axes = plt.subplots(1, 3, figsize=(18, 5))
+                fig1.suptitle(f'{model_type} Performance Curves (Classification)', fontsize=16, fontweight='bold')
             
             if n_classes == 2:
                 # 二分类：计算不同阈值下的指标
@@ -1132,10 +1517,6 @@ def plot_performance_curves(y_true: pd.Series, y_pred: np.ndarray, y_prob: Optio
                 fpr, tpr, roc_thresholds = roc_curve(y_true_values, y_prob_binary)
                 roc_auc = auc(fpr, tpr)
                 
-                # 计算Precision-Recall曲线
-                precision, recall_pr, pr_thresholds = precision_recall_curve(y_true_values, y_prob_binary)
-                pr_auc = auc(recall_pr, precision)
-                
                 # 计算不同阈值下的准确率、召回率和F1得分
                 for threshold in thresholds:
                     y_pred_thresh = (y_prob_binary >= threshold).astype(int)
@@ -1143,50 +1524,72 @@ def plot_performance_curves(y_true: pd.Series, y_pred: np.ndarray, y_prob: Optio
                     recalls.append(recall_score(y_true_values, y_pred_thresh, zero_division=0))
                     f1_scores.append(f1_score(y_true_values, y_pred_thresh, zero_division=0))
                 
+                # 找到准确率和F1得分的最高值点
+                max_acc_idx = np.argmax(accuracies)
+                max_acc_threshold = thresholds[max_acc_idx]
+                max_acc_value = accuracies[max_acc_idx]
+                
+                max_f1_idx = np.argmax(f1_scores)
+                max_f1_threshold = thresholds[max_f1_idx]
+                max_f1_value = f1_scores[max_f1_idx]
+                
                 # 子图1：ROC曲线（AUC曲线）
-                ax1 = axes[0, 0]
+                ax1 = axes[0]
                 ax1.plot(fpr, tpr, 'b-', lw=2, label=f'ROC Curve (AUC = {roc_auc:.4f})')
                 ax1.plot([0, 1], [0, 1], 'k--', lw=1, label='Random Guess', alpha=0.5)
-                ax1.set_xlabel('False Positive Rate (FPR)', fontsize=12)
-                ax1.set_ylabel('True Positive Rate (TPR)', fontsize=12)
-                ax1.set_title('ROC Curve (AUC)', fontsize=13)
-                ax1.legend(loc='lower right')
+                if publication_quality:
+                    ax1.set_xlabel('False Positive Rate (FPR)', fontsize=10)
+                    ax1.set_ylabel('True Positive Rate (TPR)', fontsize=10)
+                    ax1.set_title('ROC Curve (AUC)', fontsize=11)
+                    ax1.legend(loc='lower right', fontsize=8)
+                else:
+                    ax1.set_xlabel('False Positive Rate (FPR)', fontsize=12)
+                    ax1.set_ylabel('True Positive Rate (TPR)', fontsize=12)
+                    ax1.set_title('ROC Curve (AUC)', fontsize=13)
+                    ax1.legend(loc='lower right')
                 ax1.grid(True, alpha=0.3)
                 ax1.set_xlim([0, 1])
                 ax1.set_ylim([0, 1])
                 
-                # 子图2：Precision-Recall曲线（召回率曲线）
-                ax2 = axes[0, 1]
-                ax2.plot(recall_pr, precision, 'g-', lw=2, label=f'PR Curve (AUC = {pr_auc:.4f})')
-                ax2.set_xlabel('Recall', fontsize=12)
-                ax2.set_ylabel('Precision', fontsize=12)
-                ax2.set_title('Precision-Recall Curve', fontsize=13)
-                ax2.legend(loc='lower left')
+                # 子图2：准确率曲线（添加最高值点的垂直虚线）
+                ax2 = axes[1]
+                ax2.plot(thresholds, accuracies, 'r-', lw=2, label='Accuracy')
+                # 在最高值点处添加垂直虚线
+                ax2.axvline(x=max_acc_threshold, color='r', linestyle='--', linewidth=1.5, alpha=0.7, 
+                           label=f'Max Accuracy: {max_acc_value:.4f} at {max_acc_threshold:.3f}')
+                if publication_quality:
+                    ax2.set_xlabel('Threshold', fontsize=10)
+                    ax2.set_ylabel('Accuracy', fontsize=10)
+                    ax2.set_title('Accuracy Curve', fontsize=11)
+                    ax2.legend(loc='best', fontsize=8)
+                else:
+                    ax2.set_xlabel('Threshold', fontsize=12)
+                    ax2.set_ylabel('Accuracy', fontsize=12)
+                    ax2.set_title('Accuracy Curve', fontsize=13)
+                    ax2.legend(loc='best')
                 ax2.grid(True, alpha=0.3)
                 ax2.set_xlim([0, 1])
                 ax2.set_ylim([0, 1])
                 
-                # 子图3：准确率曲线
-                ax3 = axes[1, 0]
-                ax3.plot(thresholds, accuracies, 'r-', lw=2, label='Accuracy')
-                ax3.set_xlabel('Threshold', fontsize=12)
-                ax3.set_ylabel('Accuracy', fontsize=12)
-                ax3.set_title('Accuracy Curve', fontsize=13)
-                ax3.legend(loc='best')
+                # 子图3：F1得分曲线（添加最高值点的垂直虚线）
+                ax3 = axes[2]
+                ax3.plot(thresholds, f1_scores, 'm-', lw=2, label='F1 Score')
+                # 在最高值点处添加垂直虚线
+                ax3.axvline(x=max_f1_threshold, color='m', linestyle='--', linewidth=1.5, alpha=0.7,
+                           label=f'Max F1: {max_f1_value:.4f} at {max_f1_threshold:.3f}')
+                if publication_quality:
+                    ax3.set_xlabel('Threshold', fontsize=10)
+                    ax3.set_ylabel('F1 Score', fontsize=10)
+                    ax3.set_title('F1 Score Curve', fontsize=11)
+                    ax3.legend(loc='best', fontsize=8)
+                else:
+                    ax3.set_xlabel('Threshold', fontsize=12)
+                    ax3.set_ylabel('F1 Score', fontsize=12)
+                    ax3.set_title('F1 Score Curve', fontsize=13)
+                    ax3.legend(loc='best')
                 ax3.grid(True, alpha=0.3)
                 ax3.set_xlim([0, 1])
                 ax3.set_ylim([0, 1])
-                
-                # 子图4：F1得分曲线
-                ax4 = axes[1, 1]
-                ax4.plot(thresholds, f1_scores, 'm-', lw=2, label='F1 Score')
-                ax4.set_xlabel('Threshold', fontsize=12)
-                ax4.set_ylabel('F1 Score', fontsize=12)
-                ax4.set_title('F1 Score Curve', fontsize=13)
-                ax4.legend(loc='best')
-                ax4.grid(True, alpha=0.3)
-                ax4.set_xlim([0, 1])
-                ax4.set_ylim([0, 1])
                 
             else:
                 # 多分类：绘制每个类别的ROC曲线
@@ -1194,24 +1597,34 @@ def plot_performance_curves(y_true: pd.Series, y_pred: np.ndarray, y_prob: Optio
                 y_true_binarized = label_binarize(y_true_values, classes=unique_classes)
                 
                 # 子图1：ROC曲线
-                ax1 = axes[0, 0]
+                ax1 = axes[0]
                 for i, class_label in enumerate(unique_classes):
                     if y_prob.shape[1] > i:
                         fpr, tpr, _ = roc_curve(y_true_binarized[:, i], y_prob[:, i])
                         roc_auc = auc(fpr, tpr)
                         ax1.plot(fpr, tpr, lw=2, label=f'Class {class_label} (AUC = {roc_auc:.4f})')
                 ax1.plot([0, 1], [0, 1], 'k--', lw=2, label='Random Guess')
-                ax1.set_xlabel('False Positive Rate (FPR)', fontsize=12)
-                ax1.set_ylabel('True Positive Rate (TPR)', fontsize=12)
-                ax1.set_title('ROC Curve (AUC)', fontsize=13)
-                ax1.legend(loc='lower right')
+                if publication_quality:
+                    ax1.set_xlabel('False Positive Rate (FPR)', fontsize=10)
+                    ax1.set_ylabel('True Positive Rate (TPR)', fontsize=10)
+                    ax1.set_title('ROC Curve (AUC)', fontsize=11)
+                    ax1.legend(loc='lower right', fontsize=8)
+                else:
+                    ax1.set_xlabel('False Positive Rate (FPR)', fontsize=12)
+                    ax1.set_ylabel('True Positive Rate (TPR)', fontsize=12)
+                    ax1.set_title('ROC Curve (AUC)', fontsize=13)
+                    ax1.legend(loc='lower right')
                 ax1.grid(True, alpha=0.3)
                 
                 # 其他子图留空或显示提示
-                for ax in [axes[0, 1], axes[1, 0], axes[1, 1]]:
+                for ax in [axes[1], axes[2]]:
                     ax.axis('off')
-                    ax.text(0.5, 0.5, 'Multi-class metrics\nnot implemented', 
-                           ha='center', va='center', transform=ax.transAxes, fontsize=12)
+                    if publication_quality:
+                        ax.text(0.5, 0.5, 'Multi-class metrics\nnot implemented', 
+                               ha='center', va='center', transform=ax.transAxes, fontsize=10)
+                    else:
+                        ax.text(0.5, 0.5, 'Multi-class metrics\nnot implemented', 
+                               ha='center', va='center', transform=ax.transAxes, fontsize=12)
             
             plt.tight_layout()
             plot_file1 = output_dir / "performance_curves.png"
@@ -1221,44 +1634,11 @@ def plot_performance_curves(y_true: pd.Series, y_pred: np.ndarray, y_prob: Optio
         except Exception as e:
             logger.warning(f" Failed to draw performance curves: {str(e)}")
         
-        # ========== 图2：预测概率分布单独绘制 ==========
-        try:
-            fig2, ax2 = plt.subplots(1, 1, figsize=(10, 6))
-            fig2.suptitle(f'{model_type} Predicted Probability Distribution', fontsize=16, fontweight='bold')
-            
-            if n_classes == 2:
-                # 二分类：绘制两个类别的概率分布
-                prob_col = 1 if y_prob.shape[1] > 1 else 0
-                ax2.hist(y_prob[y_true_values == unique_classes[0], prob_col], bins=30, alpha=0.6, 
-                        label=f'True Class={unique_classes[0]}', edgecolor='black', color='blue')
-                ax2.hist(y_prob[y_true_values == unique_classes[1], prob_col], bins=30, alpha=0.6, 
-                        label=f'True Class={unique_classes[1]}', edgecolor='black', color='red')
-            else:
-                # 多分类：绘制前3个类别的概率分布
-                for i, class_label in enumerate(unique_classes[:3]):
-                    if y_prob.shape[1] > i:
-                        mask = y_true_values == class_label
-                        if mask.sum() > 0:
-                            ax2.hist(y_prob[mask, i], bins=30, alpha=0.6, 
-                                    label=f'True Class={class_label}', edgecolor='black')
-            
-            ax2.set_xlabel('Predicted Probability', fontsize=12)
-            ax2.set_ylabel('Count', fontsize=12)
-            ax2.set_title('Predicted Probability Distribution', fontsize=13)
-            ax2.legend()
-            ax2.grid(True, alpha=0.3, axis='y')
-            
-            plt.tight_layout()
-            plot_file2 = output_dir / "probability_distribution.png"
-            plt.savefig(plot_file2, dpi=150, bbox_inches='tight')
-            plt.close()
-            
-        except Exception as e:
-            logger.warning(f" Failed to draw probability distribution: {str(e)}")
+        # 图2：预测概率分布已取消（不再绘制）
 
 def plot_cv_training_curves(cv_results: Dict, output_dir: Path, model_type: str, task_type: str) -> None:
     """
-    绘制交叉验证训练过程曲线图
+    绘制交叉验证训练过程箱线图
     
     :param cv_results: 交叉验证结果字典，包含每折的指标
     :param output_dir: 输出目录
@@ -1272,17 +1652,32 @@ def plot_cv_training_curves(cv_results: Dict, output_dir: Path, model_type: str,
     
     n_folds = len(cv_results.get('fold_metrics', []))
     if n_folds == 0:
-        logger.warning(" 没有交叉验证结果，跳过训练过程曲线绘制")
+        logger.warning("  No cross-validation results, skipping training curve plotting")
         return
+    
+    # 定义统一的箱线图样式
+    box_style = {
+        'patch_artist': True,
+        'widths': 0.6,
+        'showmeans': True,  # 显示均值
+        'meanline': True,   # 均值用线表示
+        'showfliers': True, # 显示异常值
+        'medianprops': {'color': 'black', 'linewidth': 2},
+        'meanprops': {'color': 'red', 'linewidth': 2, 'linestyle': '--'},
+        'boxprops': {'linewidth': 1.5, 'edgecolor': 'black'},
+        'whiskerprops': {'linewidth': 1.5, 'color': 'black'},
+        'capprops': {'linewidth': 1.5, 'color': 'black'},
+        'flierprops': {'marker': 'o', 'markersize': 5, 'alpha': 0.5, 'markerfacecolor': 'gray', 'markeredgecolor': 'black'}
+    }
     
     # 创建图形
     if task_type == "regression":
-        # 只绘制皮尔逊相关系数和P值
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-        fig.suptitle(f'{model_type} Model {n_folds}-Fold Cross-Validation (Regression)', fontsize=16, fontweight='bold')
+        # 回归任务：绘制皮尔逊相关系数和P值箱线图
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+        fig.suptitle(f'{model_type} Model {n_folds}-Fold Cross-Validation (Regression)', 
+                     fontsize=16, fontweight='bold', y=1.02)
         
         # 提取指标
-        folds = list(range(1, n_folds + 1))
         pearson_corrs = []
         pearson_pvalues = []
         
@@ -1296,44 +1691,78 @@ def plot_cv_training_curves(cv_results: Dict, output_dir: Path, model_type: str,
             if isinstance(pval_val, (int, float)) and not np.isnan(pval_val) and pval_val > 0:
                 pearson_pvalues.append(pval_val)
         
-        # 1. 皮尔逊相关系数变化曲线
-        ax1.set_xlabel('Fold', fontsize=12)
-        ax1.set_ylabel('Pearson Correlation', fontsize=12)
-        ax1.set_title('Pearson Correlation Across Folds', fontsize=13)
-        ax1.set_xticks(folds)
-        ax1.grid(True, alpha=0.3)
-        
+        # 1. 皮尔逊相关系数箱线图
         if pearson_corrs and len(pearson_corrs) > 0:
-            ax1.plot(folds[:len(pearson_corrs)], pearson_corrs, 'o-', linewidth=2, markersize=8, label='Per Fold')
+            bp1 = ax1.boxplot([pearson_corrs], labels=['Pearson\nCorrelation'], **box_style)
+            bp1['boxes'][0].set_facecolor('#4A90E2')
+            bp1['boxes'][0].set_alpha(0.7)
+            
+            # 添加统计信息文本
             mean_corr = np.mean(pearson_corrs)
-            ax1.axhline(y=mean_corr, color='r', linestyle='--', linewidth=2, label=f'Mean={mean_corr:.4f}')
-            ax1.legend()
+            median_corr = np.median(pearson_corrs)
+            std_corr = np.std(pearson_corrs)
+            q25 = np.percentile(pearson_corrs, 25)
+            q75 = np.percentile(pearson_corrs, 75)
+            
+            stats_text = f'Mean: {mean_corr:.4f}\nMedian: {median_corr:.4f}\nStd: {std_corr:.4f}\nQ25: {q25:.4f}\nQ75: {q75:.4f}'
+            ax1.text(0.98, 0.02, stats_text, transform=ax1.transAxes, 
+                    fontsize=9, verticalalignment='bottom', horizontalalignment='right',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8, edgecolor='black', linewidth=1))
+            
+            # 添加数据点（带轻微抖动）
+            x_pos = np.random.normal(1, 0.04, size=len(pearson_corrs))
+            ax1.scatter(x_pos, pearson_corrs, alpha=0.6, s=40, color='darkblue', 
+                       edgecolors='black', linewidths=0.5, zorder=3, label='Data points')
+            ax1.legend(loc='upper left', fontsize=9)
         else:
-            ax1.text(0.5, 0.5, 'No data available', ha='center', va='center', transform=ax1.transAxes)
+            ax1.text(0.5, 0.5, 'No data available', ha='center', va='center', 
+                    transform=ax1.transAxes, fontsize=12)
         
-        # 2. p值变化曲线（对数尺度）
-        ax2.set_xlabel('Fold', fontsize=12)
-        ax2.set_ylabel('P-value (log scale)', fontsize=12)
-        ax2.set_title('P-value Across Folds', fontsize=13)
-        ax2.set_xticks(folds)
-        ax2.grid(True, alpha=0.3)
+        ax1.set_ylabel('Pearson Correlation', fontsize=12, fontweight='bold')
+        ax1.set_title('Pearson Correlation Distribution', fontsize=13, fontweight='bold', pad=15)
+        ax1.grid(True, alpha=0.3, axis='y', linestyle='--')
+        ax1.set_ylim([min(pearson_corrs) - 0.1 * abs(min(pearson_corrs)) if pearson_corrs else -1, 
+                      max(pearson_corrs) + 0.1 * abs(max(pearson_corrs)) if pearson_corrs else 1])
         
+        # 2. P值箱线图（对数尺度）
         if pearson_pvalues and len(pearson_pvalues) > 0:
-            ax2.semilogy(folds[:len(pearson_pvalues)], pearson_pvalues, 'o-', linewidth=2, markersize=8, label='Per Fold')
+            bp2 = ax2.boxplot([pearson_pvalues], labels=['P-value'], **box_style)
+            bp2['boxes'][0].set_facecolor('#E74C3C')
+            bp2['boxes'][0].set_alpha(0.7)
+            
+            # 添加统计信息文本
             mean_pvalue = np.mean(pearson_pvalues)
-            ax2.axhline(y=mean_pvalue, color='r', linestyle='--', linewidth=2, label=f'Mean={mean_pvalue:.6f}')
-            ax2.legend()
+            median_pvalue = np.median(pearson_pvalues)
+            std_pvalue = np.std(pearson_pvalues)
+            q25 = np.percentile(pearson_pvalues, 25)
+            q75 = np.percentile(pearson_pvalues, 75)
+            
+            stats_text = f'Mean: {mean_pvalue:.6f}\nMedian: {median_pvalue:.6f}\nStd: {std_pvalue:.6f}\nQ25: {q25:.6f}\nQ75: {q75:.6f}'
+            ax2.text(0.98, 0.02, stats_text, transform=ax2.transAxes, 
+                    fontsize=9, verticalalignment='bottom', horizontalalignment='right',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8, edgecolor='black', linewidth=1))
+            
+            # 添加数据点（带轻微抖动）
+            x_pos = np.random.normal(1, 0.04, size=len(pearson_pvalues))
+            ax2.scatter(x_pos, pearson_pvalues, alpha=0.6, s=40, color='darkred', 
+                       edgecolors='black', linewidths=0.5, zorder=3, label='Data points')
+            ax2.legend(loc='upper left', fontsize=9)
         else:
-            ax2.text(0.5, 0.5, 'No data available', ha='center', va='center', transform=ax2.transAxes)
+            ax2.text(0.5, 0.5, 'No data available', ha='center', va='center', 
+                    transform=ax2.transAxes, fontsize=12)
+        
+        ax2.set_ylabel('P-value (log scale)', fontsize=12, fontweight='bold')
+        ax2.set_title('P-value Distribution', fontsize=13, fontweight='bold', pad=15)
+        ax2.set_yscale('log')
+        ax2.grid(True, alpha=0.3, axis='y', linestyle='--')
         
     else:
-        # 分类任务
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-        # 使用英文标题避免字体问题
-        fig.suptitle(f'{model_type} Model {n_folds}-Fold Cross-Validation (Classification)', fontsize=16, fontweight='bold')
+        # 分类任务：绘制所有指标的箱线图
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        fig.suptitle(f'{model_type} Model {n_folds}-Fold Cross-Validation (Classification)', 
+                     fontsize=16, fontweight='bold', y=0.995)
         
         # 提取指标
-        folds = list(range(1, n_folds + 1))
         accuracies = []
         recalls = []
         f1_scores = []
@@ -1355,101 +1784,168 @@ def plot_cv_training_curves(cv_results: Dict, output_dir: Path, model_type: str,
             if isinstance(auc_val, (int, float)) and not np.isnan(auc_val) and auc_val != 'N/A':
                 aucs.append(auc_val)
         
-        # 1. 准确率变化曲线
+        # 1. 准确率箱线图
         ax1 = axes[0, 0]
-        ax1.set_xlabel('Fold', fontsize=12)
-        ax1.set_ylabel('Accuracy', fontsize=12)
-        ax1.set_title('Accuracy Across Folds', fontsize=13)
-        ax1.set_xticks(folds)
-        ax1.set_ylim([0, 1.1])
-        ax1.grid(True, alpha=0.3)
-        
         if accuracies and len(accuracies) > 0:
-            ax1.plot(folds[:len(accuracies)], accuracies, 'o-', linewidth=2, markersize=8, label='Accuracy')
+            bp1 = ax1.boxplot([accuracies], labels=['Accuracy'], **box_style)
+            bp1['boxes'][0].set_facecolor('#3498DB')
+            bp1['boxes'][0].set_alpha(0.7)
+            
+            # 添加统计信息
             mean_acc = np.mean(accuracies)
-            ax1.axhline(y=mean_acc, color='r', linestyle='--', linewidth=2, label=f'Mean={mean_acc:.4f}')
-            ax1.legend()
+            median_acc = np.median(accuracies)
+            std_acc = np.std(accuracies)
+            q25 = np.percentile(accuracies, 25)
+            q75 = np.percentile(accuracies, 75)
+            
+            stats_text = f'Mean: {mean_acc:.4f}\nMedian: {median_acc:.4f}\nStd: {std_acc:.4f}\nQ25: {q25:.4f}\nQ75: {q75:.4f}'
+            ax1.text(0.98, 0.02, stats_text, transform=ax1.transAxes, 
+                    fontsize=9, verticalalignment='bottom', horizontalalignment='right',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8, edgecolor='black', linewidth=1))
+            
+            # 添加数据点
+            x_pos = np.random.normal(1, 0.04, size=len(accuracies))
+            ax1.scatter(x_pos, accuracies, alpha=0.6, s=40, color='darkblue', 
+                       edgecolors='black', linewidths=0.5, zorder=3)
         else:
-            ax1.text(0.5, 0.5, 'No data available', ha='center', va='center', transform=ax1.transAxes)
+            ax1.text(0.5, 0.5, 'No data available', ha='center', va='center', 
+                    transform=ax1.transAxes, fontsize=12)
         
-        # 2. 召回率和F1得分变化曲线
+        ax1.set_ylabel('Accuracy', fontsize=12, fontweight='bold')
+        ax1.set_title('Accuracy Distribution', fontsize=13, fontweight='bold', pad=15)
+        ax1.set_ylim([0, 1.1])
+        ax1.grid(True, alpha=0.3, axis='y', linestyle='--')
+        
+        # 2. 召回率和F1得分箱线图（并排）
         ax2 = axes[0, 1]
-        ax2.set_xlabel('Fold', fontsize=12)
-        ax2.set_ylabel('Score', fontsize=12)
-        ax2.set_title('Recall and F1 Score Across Folds', fontsize=13)
-        ax2.set_xticks(folds)
+        box_data = []
+        box_labels = []
+        if recalls and len(recalls) > 0:
+            box_data.append(recalls)
+            box_labels.append('Recall')
+        if f1_scores and len(f1_scores) > 0:
+            box_data.append(f1_scores)
+            box_labels.append('F1 Score')
+        
+        if box_data:
+            bp2 = ax2.boxplot(box_data, labels=box_labels, **box_style)
+            colors = ['#E74C3C', '#27AE60']
+            for patch, color in zip(bp2['boxes'], colors[:len(box_data)]):
+                patch.set_facecolor(color)
+                patch.set_alpha(0.7)
+            
+            # 添加统计信息
+            stats_text = ""
+            if recalls and len(recalls) > 0:
+                mean_rec = np.mean(recalls)
+                median_rec = np.median(recalls)
+                stats_text += f'Recall:\n  Mean: {mean_rec:.4f}\n  Median: {median_rec:.4f}\n\n'
+            if f1_scores and len(f1_scores) > 0:
+                mean_f1 = np.mean(f1_scores)
+                median_f1 = np.median(f1_scores)
+                stats_text += f'F1 Score:\n  Mean: {mean_f1:.4f}\n  Median: {median_f1:.4f}'
+            
+            ax2.text(0.98, 0.02, stats_text, transform=ax2.transAxes, 
+                    fontsize=9, verticalalignment='bottom', horizontalalignment='right',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8, edgecolor='black', linewidth=1))
+            
+            # 添加数据点
+            scatter_colors = ['darkred', 'darkgreen']
+            for i, data in enumerate(box_data, 1):
+                x_pos = np.random.normal(i, 0.04, size=len(data))
+                ax2.scatter(x_pos, data, alpha=0.6, s=40, color=scatter_colors[i-1], 
+                           edgecolors='black', linewidths=0.5, zorder=3)
+        else:
+            ax2.text(0.5, 0.5, 'No data available', ha='center', va='center', 
+                    transform=ax2.transAxes, fontsize=12)
+        
+        ax2.set_ylabel('Score', fontsize=12, fontweight='bold')
+        ax2.set_title('Recall and F1 Score Distribution', fontsize=13, fontweight='bold', pad=15)
         ax2.set_ylim([0, 1.1])
-        ax2.grid(True, alpha=0.3)
+        ax2.grid(True, alpha=0.3, axis='y', linestyle='--')
         
-        if recalls and len(recalls) > 0:
-            ax2.plot(folds[:len(recalls)], recalls, 'o-', linewidth=2, markersize=8, label='Recall')
-            mean_recall = np.mean(recalls)
-            ax2.axhline(y=mean_recall, color='r', linestyle='--', linewidth=2, alpha=0.5)
-        if f1_scores and len(f1_scores) > 0:
-            ax2.plot(folds[:len(f1_scores)], f1_scores, 's-', linewidth=2, markersize=8, label='F1 Score')
-            mean_f1 = np.mean(f1_scores)
-            ax2.axhline(y=mean_f1, color='g', linestyle='--', linewidth=2, alpha=0.5)
-        if recalls or f1_scores:
-            ax2.legend()
-        else:
-            ax2.text(0.5, 0.5, 'No data available', ha='center', va='center', transform=ax2.transAxes)
-        
-        # 3. AUC变化曲线
+        # 3. AUC箱线图
         ax3 = axes[1, 0]
-        ax3.set_xlabel('Fold', fontsize=12)
-        ax3.set_ylabel('AUC', fontsize=12)
-        ax3.set_title('AUC Across Folds', fontsize=13)
-        ax3.set_xticks(folds)
-        ax3.set_ylim([0, 1.1])
-        ax3.grid(True, alpha=0.3)
-        
         if aucs and len(aucs) > 0:
-            ax3.plot(folds[:len(aucs)], aucs, 'o-', linewidth=2, markersize=8, label='AUC', color='purple')
+            bp3 = ax3.boxplot([aucs], labels=['AUC'], **box_style)
+            bp3['boxes'][0].set_facecolor('#9B59B6')
+            bp3['boxes'][0].set_alpha(0.7)
+            
+            # 添加统计信息
             mean_auc = np.mean(aucs)
-            ax3.axhline(y=mean_auc, color='r', linestyle='--', linewidth=2, label=f'Mean={mean_auc:.4f}')
-            ax3.legend()
+            median_auc = np.median(aucs)
+            std_auc = np.std(aucs)
+            q25 = np.percentile(aucs, 25)
+            q75 = np.percentile(aucs, 75)
+            
+            stats_text = f'Mean: {mean_auc:.4f}\nMedian: {median_auc:.4f}\nStd: {std_auc:.4f}\nQ25: {q25:.4f}\nQ75: {q75:.4f}'
+            ax3.text(0.98, 0.02, stats_text, transform=ax3.transAxes, 
+                    fontsize=9, verticalalignment='bottom', horizontalalignment='right',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8, edgecolor='black', linewidth=1))
+            
+            # 添加数据点
+            x_pos = np.random.normal(1, 0.04, size=len(aucs))
+            ax3.scatter(x_pos, aucs, alpha=0.6, s=40, color='purple', 
+                       edgecolors='black', linewidths=0.5, zorder=3)
         else:
-            ax3.text(0.5, 0.5, 'No data available', ha='center', va='center', transform=ax3.transAxes)
+            ax3.text(0.5, 0.5, 'No data available', ha='center', va='center', 
+                    transform=ax3.transAxes, fontsize=12)
         
-        # 4. 指标统计摘要
+        ax3.set_ylabel('AUC', fontsize=12, fontweight='bold')
+        ax3.set_title('AUC Distribution', fontsize=13, fontweight='bold', pad=15)
+        ax3.set_ylim([0, 1.1])
+        ax3.grid(True, alpha=0.3, axis='y', linestyle='--')
+        
+        # 4. 所有指标综合箱线图
         ax4 = axes[1, 1]
-        ax4.axis('off')
-        stats_text = f"{n_folds}-Fold CV Statistics\n\n"
+        all_metrics = []
+        all_labels = []
+        all_colors = []
+        
         if accuracies and len(accuracies) > 0:
-            stats_text += f"Accuracy:\n"
-            stats_text += f"  Mean: {np.mean(accuracies):.4f}\n"
-            stats_text += f"  Std: {np.std(accuracies):.4f}\n\n"
-        else:
-            stats_text += "Accuracy: N/A\n\n"
-            
+            all_metrics.append(accuracies)
+            all_labels.append('Accuracy')
+            all_colors.append('#3498DB')
         if recalls and len(recalls) > 0:
-            stats_text += f"Recall:\n"
-            stats_text += f"  Mean: {np.mean(recalls):.4f}\n"
-            stats_text += f"  Std: {np.std(recalls):.4f}\n\n"
-        else:
-            stats_text += "Recall: N/A\n\n"
-            
+            all_metrics.append(recalls)
+            all_labels.append('Recall')
+            all_colors.append('#E74C3C')
         if f1_scores and len(f1_scores) > 0:
-            stats_text += f"F1 Score:\n"
-            stats_text += f"  Mean: {np.mean(f1_scores):.4f}\n"
-            stats_text += f"  Std: {np.std(f1_scores):.4f}\n\n"
-        else:
-            stats_text += "F1 Score: N/A\n\n"
-            
+            all_metrics.append(f1_scores)
+            all_labels.append('F1 Score')
+            all_colors.append('#27AE60')
         if aucs and len(aucs) > 0:
-            stats_text += f"AUC:\n"
-            stats_text += f"  Mean: {np.mean(aucs):.4f}\n"
-            stats_text += f"  Std: {np.std(aucs):.4f}\n"
-        else:
-            stats_text += "AUC: N/A\n"
+            all_metrics.append(aucs)
+            all_labels.append('AUC')
+            all_colors.append('#9B59B6')
+        
+        if all_metrics:
+            bp4 = ax4.boxplot(all_metrics, labels=all_labels, **box_style)
+            for patch, color in zip(bp4['boxes'], all_colors):
+                patch.set_facecolor(color)
+                patch.set_alpha(0.7)
             
-        ax4.text(0.1, 0.5, stats_text, fontsize=11, verticalalignment='center', family='monospace')
+            # 添加数据点
+            for i, (data, color) in enumerate(zip(all_metrics, all_colors), 1):
+                x_pos = np.random.normal(i, 0.04, size=len(data))
+                ax4.scatter(x_pos, data, alpha=0.6, s=40, color=color, 
+                           edgecolors='black', linewidths=0.5, zorder=3)
+        else:
+            ax4.text(0.5, 0.5, 'No data available', ha='center', va='center', 
+                    transform=ax4.transAxes, fontsize=12)
+        
+        ax4.set_ylabel('Score', fontsize=12, fontweight='bold')
+        ax4.set_title('All Metrics Comparison', fontsize=13, fontweight='bold', pad=15)
+        ax4.set_ylim([0, 1.1])
+        ax4.grid(True, alpha=0.3, axis='y', linestyle='--')
+        ax4.tick_params(axis='x', rotation=45)
     
     plt.tight_layout()
     
     # 保存图形
     plot_file = output_dir / "cv_training_curves.png"
-    plt.savefig(plot_file, dpi=150, bbox_inches='tight')
+    plt.savefig(plot_file, dpi=300, bbox_inches='tight', facecolor='white')
+    logger.debug(f"   Cross-validation boxplot saved: {plot_file}")
     plt.close()
 
 def save_training_results(
@@ -1460,12 +1956,15 @@ def save_training_results(
     model_type: str,
     task_type: str,
     feature_importance_df: Optional[pd.DataFrame] = None,
+    shap_df: Optional[pd.DataFrame] = None,
     y_test: Optional[pd.Series] = None,
     y_pred: Optional[np.ndarray] = None,
-    y_prob: Optional[np.ndarray] = None
+    y_prob: Optional[np.ndarray] = None,
+    cv_results: Optional[Dict] = None,
+    publication_quality: bool = True
 ) -> None:
     """
-    保存训练结果（模型文件、评估指标、筛选的SNP列表、特征重要性）
+    保存训练结果（模型文件、评估指标、筛选的SNP列表、特征重要性、SHAP值）
     
     :param model: 训练好的模型
     :param metrics: 评估指标
@@ -1474,9 +1973,12 @@ def save_training_results(
     :param model_type: 模型类型
     :param task_type: 任务类型
     :param feature_importance_df: 特征重要性DataFrame
+    :param shap_df: SHAP值DataFrame
     :param y_test: 测试集真实值（用于绘制性能曲线）
     :param y_pred: 测试集预测值（用于绘制性能曲线）
     :param y_prob: 测试集预测概率（分类任务需要，用于绘制性能曲线）
+    :param cv_results: 交叉验证结果字典（用于绘制交叉验证曲线）
+    :param publication_quality: 是否生成期刊发表质量图表（高分辨率、矢量格式、专业配色）
     """
     # 创建模型专属目录
     model_dir = Path(output_dir) / model_type
@@ -1486,7 +1988,7 @@ def save_training_results(
     model_file = model_dir / f"{model_type}_model.pkl"
     import joblib
     joblib.dump(model, model_file)
-    logger.debug(f"   模型已保存: {model_file.name}")
+    logger.debug(f"   Model saved: {model_file.name}")
     
     # 2. 保存评估指标
     metrics_file = model_dir / "metrics.json"
@@ -1497,20 +1999,34 @@ def save_training_results(
             "metrics": metrics,
             "training_time": time.strftime("%Y-%m-%d %H:%M:%S")
         }, f, indent=2)
-    logger.debug(f"   评估指标已保存: {metrics_file.name}")
+    logger.debug(f"   Evaluation metrics saved: {metrics_file.name}")
     
-    # 3. 保存筛选的SNP列表
-    snp_file = model_dir / "selected_snps.txt"
-    with open(snp_file, 'w') as f:
-        if selected_snps:
-            # 排除phenotype列
-            filtered_snps = filter_phenotype_columns(selected_snps)
-            f.write("\n".join(filtered_snps))
-        else:
-            f.write("No SNPs selected (LD/GWAS skipped or no significant SNPs)")
-    logger.debug(f"   SNP列表已保存: {snp_file.name}")
+    # 2.5 保存训练阶段使用的特征列表（用于预测阶段特征对齐）
+    # 说明：
+    # - selected_snps 已经是去除 phenotype 后的所有特征列名（且经过 clean_feature_names 清洗）
+    # - 预测阶段将以此列表为基准：
+    #   * 训练有、预测也有 → 正常使用；
+    #   * 训练有、预测没有 → 在预测矩阵中补一列，整列填0；
+    #   * 训练没有、预测有 → 在预测阶段丢弃该列。
+    try:
+        features_file = model_dir / "training_features.json"
+        with open(features_file, "w") as f:
+            json.dump(
+                {
+                    "model_type": model_type,
+                    "task_type": task_type,
+                    "feature_names": list(selected_snps) if selected_snps is not None else [],
+                    "saved_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                },
+                f,
+                indent=2,
+            )
+        logger.debug(f"   Training feature names saved: {features_file.name}")
+    except Exception as e:
+        # 保存失败不影响训练流程，但会在预测阶段失去自动对齐能力
+        logger.warning(f"   Failed to save training feature names (ignored): {e}")
     
-    # 4. 保存特征重要性
+    # 3. 保存特征重要性（可选）
     if feature_importance_df is not None and not feature_importance_df.empty:
         # 排除phenotype列
         filtered_importance_df = feature_importance_df[
@@ -1518,56 +2034,148 @@ def save_training_results(
         ]
         importance_file = model_dir / "feature_importance.txt"
         filtered_importance_df.to_csv(importance_file, sep='\t', index=False)
-        logger.debug(f"   特征重要性已保存: {importance_file.name}")
+        logger.debug(f"   Feature importance saved: {importance_file.name}")
+    
+    # 4.5. 保存SHAP值（可选，格式与feature_importance相同）
+    if shap_df is not None and not shap_df.empty:
+        # 排除phenotype列
+        filtered_shap_df = shap_df[
+            shap_df['feature'].astype(str).apply(lambda x: 'phenotype' not in x.lower())
+        ]
+        # 重命名列以匹配feature_importance格式（feature, importance_abs, effect）
+        # 但为了区分，我们保持shap_abs列名，或者重命名为importance_abs以兼容可视化
+        shap_file = model_dir / "shap_values.txt"
+        # 为了兼容可视化模块，将shap_abs重命名为importance_abs
+        shap_output_df = filtered_shap_df.copy()
+        shap_output_df = shap_output_df.rename(columns={'shap_abs': 'importance_abs'})
+        shap_output_df.to_csv(shap_file, sep='\t', index=False)
+        logger.debug(f"   SHAP values saved: {shap_file.name}")
         
-        # 保存Top N特征
-        top_n = min(100, len(filtered_importance_df))
-        top_features_file = model_dir / "top_features.txt"
-        top_features = filtered_importance_df.head(top_n)['feature'].tolist()
-        with open(top_features_file, 'w') as f:
-            f.write("\n".join(top_features))
-        logger.debug(f"   Top {top_n}特征已保存: {top_features_file.name}")
-    
-    # 5. 绘制性能评估指标变化曲线（分类和回归任务）
+    # 5. 保存所有绘图数据到一个统一文件（用于visualization模块）
     if y_test is not None and y_pred is not None:
-        try:
-            plot_performance_curves(y_test, y_pred, y_prob, model_dir, model_type, task_type)
-            logger.debug(f"   性能评估曲线已保存")
-        except Exception as e:
-            logger.warning(f" 绘制性能评估曲线失败: {str(e)}")
+        import pickle
+        plotting_data_file = model_dir / "plotting_data.npz"
+        save_dict = {
+            # 预测数据（numpy数组）
+            'y_test': y_test.values if isinstance(y_test, pd.Series) else y_test,
+            'y_pred': y_pred,
+            # 元数据（字符串）
+            'model_type': np.array([model_type], dtype=object),
+            'task_type': np.array([task_type], dtype=object),
+            'publication_quality': np.array([publication_quality], dtype=bool)
+        }
+        # 预测概率（如果存在）
+        if y_prob is not None:
+            save_dict['y_prob'] = y_prob
+        # 交叉验证结果（使用pickle序列化字典）
+        if cv_results is not None:
+            save_dict['cv_results'] = np.array([pickle.dumps(cv_results)], dtype=object)
+        
+        np.savez_compressed(plotting_data_file, **save_dict)
+        logger.debug(f"   Plotting data saved: {plotting_data_file.name}")
     
-    logger.info(f" 结果保存完成: {model_dir}")
+    logger.info(f"  Results saved successfully: {model_dir}")
 
-# ======================== 5. 核心训练函数（关键修改：解耦LD和GWAS逻辑） ========================
+# ======================== 5. 核心训练函数 ========================
+
+def _run_single_fold_cv(
+    fold_idx: int,
+    train_idx,
+    val_idx,
+    X: pd.DataFrame,
+    y: pd.Series,
+    model_type: str,
+    task_type: str,
+    random_state: int
+):
+    """
+    进程池中执行的单折训练与评估函数（用于5折交叉验证并行）
+    
+    修复说明：
+    - 使用iloc进行位置索引访问，确保即使DataFrame/Series的索引不是整数也能正确工作
+    - train_idx和val_idx是numpy数组，表示位置索引，与iloc兼容
+    """
+    logger = logging.getLogger(__name__)
+    logger.debug(f"[Fold {fold_idx}] Training in worker process...")
+
+    try:
+        # 修复：使用iloc进行位置索引访问，确保索引正确
+        # train_idx和val_idx是numpy数组，表示位置索引（从0开始）
+        # iloc使用位置索引，即使DataFrame/Series的索引是字符串也能正确工作
+        X_train_fold = X.iloc[train_idx].copy()  # 添加copy()避免SettingWithCopyWarning
+        X_val_fold = X.iloc[val_idx].copy()
+        y_train_fold = y.iloc[train_idx].copy()
+        y_val_fold = y.iloc[val_idx].copy()
+
+        # 超参数搜索
+        param_grid = get_param_grid(model_type, task_type)
+        model_fold = perform_grid_search(
+            model_type=model_type,
+            task_type=task_type,
+            X_train=X_train_fold,
+            y_train=y_train_fold,
+            param_grid=param_grid,
+            n_iter=20,  # 每次搜索20个参数组合
+            cv=3,       # 网格搜索使用3折交叉验证
+            random_state=random_state
+        )
+
+        # 预测与概率
+        y_pred_fold = model_fold.predict(X_val_fold)
+        y_prob_fold = None
+        if task_type == "classification":
+            try:
+                if hasattr(model_fold, "predict_proba"):
+                    y_prob_fold = model_fold.predict_proba(X_val_fold)
+                elif hasattr(model_fold, "decision_function"):
+                    decision_scores = model_fold.decision_function(X_val_fold)
+                    from sklearn.utils.extmath import softmax
+                    if len(decision_scores.shape) == 1:
+                        prob_neg = 1 / (1 + np.exp(decision_scores))
+                        prob_pos = 1 - prob_neg
+                        y_prob_fold = np.column_stack([prob_neg, prob_pos])
+                    else:
+                        y_prob_fold = softmax(decision_scores)
+            except Exception as e:
+                logger.warning(f"[Fold {fold_idx}] Failed to obtain prediction probabilities: {str(e)}")
+
+        fold_metrics = evaluate_model(y_val_fold, y_pred_fold, y_prob_fold, task_type)
+        
+        # 清理资源：删除模型引用，帮助GC
+        del model_fold
+        
+        # 清理joblib的临时目录（如果存在）
+        try:
+            import joblib
+            import tempfile
+            # joblib可能会在tempfile.gettempdir()下创建临时目录
+            # 这里我们只是确保资源被释放，实际的清理由resource_tracker处理
+            import gc
+            gc.collect()
+        except Exception:
+            pass
+        
+        return fold_idx, fold_metrics, y_val_fold, y_pred_fold, y_prob_fold
+    except Exception as e:
+        logger.error(f"[Fold {fold_idx}] Error in worker process: {str(e)}", exc_info=True)
+        raise
 def run_single_model(
     input_path: str,
     model_type: str,
     output_dir: str,
-    feature_selection_mode: int,
     task_type: Optional[str] = None,
     n_folds: int = 5,
     random_state: int = 42,
-    gwas_genotype: Optional[str] = None,
-    gwas_pvalue: Optional[float] = None,
-    # LD过滤参数（当feature_selection_mode需要时使用）
-    ld_window_kb: int = 50,
-    ld_window: int = 5,
-    ld_window_r2: float = 0.2,
-    ld_threads: int = 8
+    # 特征重要性计算参数（可选）
+    calculate_feature_importance: bool = False,
+    # 图表质量参数
+    publication_quality: bool = True
 ) -> int:
     """
     单模型训练主函数
-    特征筛选模式（feature_selection_mode）：
-    1: 空白对照（不使用GWAS和LD）
-    2: GWAS筛选（仅使用GWAS）
-    3: LD过滤（仅使用LD）
-    4: GWAS和LD综合过滤（先GWAS后LD）
-    
-    逻辑：
-    1. 根据feature_selection_mode确定是否开启LD过滤和GWAS
-    2. 先判断是否开启GWAS → 执行GWAS分析，得到显著SNP列表
-    3. 再判断是否开启LD过滤 → 对于模式4，仅对GWAS显著SNP执行LD过滤；对于模式3，对所有SNP执行LD过滤
-    4. 最终特征筛选：对于模式4，直接使用LD过滤结果（因为LD过滤已经只针对GWAS显著SNP）；若LD过滤失败，则退回到仅使用GWAS显著SNP
+    说明：
+    - GWAS / LD / GWAS+LD 综合过滤逻辑已经前移到 preprocess 模块
+    - 训练阶段使用 preprocess 已筛选的特征，不再执行额外的特征筛选
     """
     start_time = time.time()
     output_dir_path = Path(output_dir)
@@ -1596,52 +2204,15 @@ def run_single_model(
         train_file = input_info["train_file"]
         valid_samples = input_info["metadata"]["valid_samples"] if input_info["metadata"] else None
         
-        # GWAS路径优先级：优先使用preprocess元数据中的过滤后PLINK前缀，其次才使用用户手动指定
-        # 如果元数据中的路径不存在，提示用户手动输入
-        if input_info["gwas_genotype_prefix"]:
-            # 验证文件是否存在（确保使用绝对路径）
-            gwas_prefix = input_info["gwas_genotype_prefix"]
-            # 如果是相对路径，尝试转换为绝对路径（相对于元数据文件所在目录）
-            if not Path(gwas_prefix).is_absolute() and input_info["metadata"]:
-                # 尝试从元数据文件路径推断
-                metadata_file = input_info.get("_metadata_file_path")
-                if metadata_file:
-                    metadata_dir = Path(metadata_file).parent
-                    gwas_prefix = str((metadata_dir / gwas_prefix).absolute())
-            else:
-                # 确保是绝对路径
-                gwas_prefix = str(Path(gwas_prefix).absolute())
-            
-            required_plink = [f"{gwas_prefix}.bed", f"{gwas_prefix}.bim", f"{gwas_prefix}.fam"]
-            missing_plink = [f for f in required_plink if not Path(f).exists()]
-            if missing_plink:
-                logger.warning(f"元数据中的GWAS PLINK文件不存在: {gwas_prefix}")
-                logger.warning(f"缺失的文件: {', '.join(missing_plink)}")
-                if gwas_genotype:
-                    final_gwas_genotype = gwas_genotype
-                    logger.info(f"使用命令行提供的GWAS基因型前缀: {final_gwas_genotype}")
-                else:
-                    final_gwas_genotype = None
-                    # 注意：这里不抛出异常，让后续的检查逻辑统一处理错误提示
-            else:
-                final_gwas_genotype = gwas_prefix
-                logger.info(f"使用preprocess元数据中的GWAS基因型前缀: {final_gwas_genotype}")
-        elif gwas_genotype:
-            final_gwas_genotype = gwas_genotype
-            logger.info(f"使用命令行提供的GWAS基因型前缀: {final_gwas_genotype}")
-        else:
-            final_gwas_genotype = None
-
-        # 如果存在GWAS/LD所需的基因型前缀，记录其所在的 tmp 目录
         # 如果元数据里带有 preprocess_tmp_dir（tmp_p目录），则记录（但不清理，preprocess模块执行完毕不删除）
         if input_info["preprocess_tmp_dir"]:
             preprocess_tmp_dir = Path(input_info["preprocess_tmp_dir"]).absolute()
             _temp_file_manager.register_preprocess_tmp_dir(preprocess_tmp_dir)
 
         # Step 2: 加载训练数据
-        logger.debug("加载训练数据...")
+        logger.debug("Loading training data...")
         X, y, snp_name_mapping = load_training_data(train_file, valid_samples)
-        logger.info(f"数据集: {X.shape[0]}样本, {X.shape[1]}特征")
+        logger.info(f"Dataset: {X.shape[0]:,} samples, {X.shape[1]:,} features")
 
         # 若未提供task_type，则基于表型推断（规则与preprocess一致）
         def infer_task_type_from_y(series: pd.Series) -> str:
@@ -1654,7 +2225,7 @@ def run_single_model(
 
         if task_type is None:
             task_type = infer_task_type_from_y(y)
-            logger.info(f"任务类型: {task_type} (自动推断)")
+            logger.info(f"Task type: {task_type}")
         
         # 初始化交叉验证
         if task_type == "classification":
@@ -1664,310 +2235,72 @@ def run_single_model(
             kf = KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
             splits = list(kf.split(X, y))
         
-        logger.info(f"开始{n_folds}折交叉验证")
+        logger.info(f"Starting {n_folds}-fold cross-validation")
 
-        # Step 3: 根据feature_selection_mode确定是否启用LD和GWAS
-        # 注意：特征筛选在交叉验证之前使用全部数据执行，避免数据泄露
-        # 模式说明：
-        # 1: 空白对照（不使用GWAS和LD）
-        # 2: GWAS筛选（仅使用GWAS）
-        # 3: LD过滤（仅使用LD）
-        # 4: GWAS和LD综合过滤（先GWAS后LD）
-        if feature_selection_mode not in [1, 2, 3, 4]:
-            raise ValueError(f" feature_selection_mode必须是1、2、3或4，当前值: {feature_selection_mode}")
-        
-        enable_ld = feature_selection_mode in [3, 4]  # 模式3或4启用LD
-        enable_gwas = feature_selection_mode in [2, 4]  # 模式2或4启用GWAS
-        
-        mode_names = {
-            1: "空白对照（不使用GWAS和LD）",
-            2: "GWAS筛选（仅使用GWAS）",
-            3: "LD过滤（仅使用LD）",
-            4: "GWAS和LD综合过滤（先GWAS后LD）"
-        }
-        
-        # 检查必需的基因型文件
-        if (enable_ld or enable_gwas) and not final_gwas_genotype:
-            error_msg = (
-                f"\n错误：特征筛选模式 {feature_selection_mode} ({mode_names[feature_selection_mode]}) 需要GWAS基因型文件。\n"
-                f"请通过以下方式之一提供：\n"
-            )
-            if input_info["metadata"]:
-                error_msg += (
-                    f"  1. 检查预处理阶段生成的元数据文件中的 gwas_genotype_prefix 字段\n"
-                    f"     如果元数据中的文件路径不存在或文件已被删除，请使用方式2手动指定\n"
-                    f"  2. 使用 --gwas_genotype 参数手动指定GWAS基因型文件前缀\n"
-                    f"     例如：--gwas_genotype /path/to/your/plink_prefix\n"
-                )
-            else:
-                error_msg += (
-                    f"  1. 确保预处理阶段生成的元数据文件（*_metadata.json）存在且包含 gwas_genotype_prefix 字段\n"
-                    f"     如果元数据文件不存在，请重新运行预处理步骤\n"
-                    f"  2. 使用 --gwas_genotype 参数手动指定GWAS基因型文件前缀\n"
-                    f"     例如：--gwas_genotype /path/to/your/plink_prefix\n"
-                )
-            raise ValueError(error_msg)
-        
-        # Step 4: 特征筛选（使用全部数据，避免数据泄露）
-        # selected_snps / ld_selected_snps 均使用“原始SNP名称”
-        selected_snps = None          # GWAS显著SNP列表（原始名称）
-        ld_selected_snps = None       # LD过滤保留的SNP列表（原始名称）
-        all_sample_ids = X.index.tolist()
+        # 使用全部特征（preprocess 已完成所需的特征筛选）
+        X_filtered = X
 
-        # Step 5: 先执行GWAS特征筛选（如果开启）
-        if enable_gwas and final_gwas_genotype:
-            logger.debug("GWAS分析中...")
-            if gwas_pvalue is None:
-                gwas_pvalue = 0.01
-            # 生成全部数据的表型文件（用于GWAS），放在 temp_m/gwas
-            gwas_dir = register_dir(run_tmp_dir / "gwas")
-            pheno_file = gwas_dir / "all_pheno.tsv"
-            generate_gwas_phenotype_file(all_sample_ids, y, pheno_file)
-            register_file(pheno_file)
-            
-            # 执行GWAS（直接基于原始/预处理后的GWAS基因型前缀）
-            # 注意：GEMMA会将结果写入当前工作目录下的output/目录
-            # 为了确保输出到用户指定的目录，需要切换工作目录
-            # 所有GWAS生成的临时文件会在模块完成后自动删除
-            gwas_output_prefix = gwas_dir / "all_gwas"
-            
-            # 确保所有文件路径都是绝对路径，避免切换工作目录后找不到文件
-            final_gwas_genotype_abs = Path(final_gwas_genotype).absolute().as_posix()
-            pheno_file_abs = pheno_file.absolute().as_posix()
-            gwas_output_prefix_abs = gwas_output_prefix.absolute().as_posix()
-            
-            # 保存当前工作目录，然后切换到用户指定的输出目录
-            original_cwd = os.getcwd()
-            try:
-                # 切换到用户指定的输出目录，这样GEMMA会将output/目录创建在这里
-                os.chdir(output_dir_path)
-                selected_snps = run_gemma_gwas(
-                    genotype_prefix=final_gwas_genotype_abs,
-                    phenotype_file=pheno_file_abs,
-                    output_prefix=gwas_output_prefix_abs,
-                    pvalue_threshold=gwas_pvalue,
-                    threads=ld_threads
-                )
-            finally:
-                # 恢复原始工作目录
-                os.chdir(original_cwd)
-            
-            logger.info(f"GWAS筛选完成: {len(selected_snps) if selected_snps else 0}个显著SNP")
-            
-            # 注册GWAS结果文件以便后续清理
-            # GEMMA将结果写入用户指定输出目录下的output/目录
-            base_prefix = Path(gwas_output_prefix).name
-            gwas_result_file = output_dir_path / "output" / f"{base_prefix}_gwas.assoc.txt"
-            if gwas_result_file.exists():
-                register_file(gwas_result_file)
-                logger.debug(f"已注册GWAS结果文件以便清理: {gwas_result_file}")
-            
-            # 注册GWAS生成的其他文件（kinship矩阵、协变量、中间文件等）
-            # GEMMA会在用户指定输出目录下的output/目录中生成多个文件
-            gemma_output_dir = output_dir_path / "output"
-            if gemma_output_dir.exists():
-                # 查找所有与本次GWAS相关的文件
-                gwas_patterns = [
-                    f"{base_prefix}_gwas*",
-                    f"{base_prefix}_kinship*",
-                    f"{base_prefix}_covariates*",
-                    f"{base_prefix}_clean_geno*",
-                    f"{base_prefix}_geno_pca*",
-                    f"{base_prefix}_valid_samples*"
-                ]
-                
-                for pattern in gwas_patterns:
-                    for file_path in gemma_output_dir.glob(pattern):
-                        if file_path.is_file():
-                            register_file(file_path)
-                            logger.debug(f"已注册GWAS相关文件以便清理: {file_path}")
-                
-                # 如果output目录下只有本次GWAS生成的文件，也可以考虑注册整个目录
-                # 但为了安全起见，只注册文件，不删除整个output目录（可能包含其他运行的结果）
-            
-            # 注册显著SNP列表文件（run_gemma_gwas函数会在output_prefix所在目录生成）
-            # 使用绝对路径，确保无论工作目录如何都能找到文件
-            snp_list_file = gwas_output_prefix.parent.absolute() / f"{base_prefix}_significant_snps.txt"
-            if snp_list_file.exists():
-                register_file(snp_list_file)
-                logger.debug(f"已注册GWAS显著SNP列表文件以便清理: {snp_list_file}")
-        elif enable_gwas and not final_gwas_genotype:
-            logger.warning(" GWAS筛选需要基因型文件，跳过")
-
-        # Step 6: 再执行LD过滤（如果开启）
-        if enable_ld and final_gwas_genotype:
-            logger.debug("LD过滤中...")
-            # 生成有效样本文件（用于LD过滤，使用全部数据）
-            ld_dir = register_dir(run_tmp_dir / "ld")
-            valid_sample_file = ld_dir / "valid_samples.txt"
-            with open(valid_sample_file, 'w') as f:
-                for sample_id in all_sample_ids:
-                    f.write(f"{sample_id}\t{sample_id}\n")
-            register_file(valid_sample_file)
-            
-            # 模式4：如果已有GWAS显著SNP，只对这些SNP进行LD过滤
-            extract_snps_file = None
-            if feature_selection_mode == 4 and selected_snps:
-                # 创建GWAS显著SNP列表文件，用于LD过滤
-                extract_snps_file = ld_dir / "gwas_significant_snps.txt"
-                with open(extract_snps_file, 'w') as f:
-                    for snp in selected_snps:
-                        f.write(f"{snp}\n")
-                register_file(extract_snps_file)
-                logger.info(f"模式4：仅对{len(selected_snps)}个GWAS显著SNP进行LD过滤")
-            
-            # 执行LD过滤（所有LD中间文件和结果写入 temp_m/ld）
-            # 模式4：只对GWAS显著SNP进行LD过滤
-            # 模式3：对所有SNP进行LD过滤
-            # 确保所有文件路径都是绝对路径
-            final_gwas_genotype_abs = Path(final_gwas_genotype).absolute().as_posix()
-            ld_output_prefix_abs = ld_dir.absolute() / "train_ld"
-            valid_sample_file_abs = valid_sample_file.absolute().as_posix()
-            extract_snps_file_abs = extract_snps_file.absolute().as_posix() if extract_snps_file else None
-            
-            _, ld_selected_snps = run_ld_filtering(
-                genotype_prefix=final_gwas_genotype_abs,
-                output_prefix=str(ld_output_prefix_abs),
-                ld_window_kb=ld_window_kb,
-                ld_window=ld_window,
-                ld_window_r2=ld_window_r2,
-                threads=ld_threads,
-                keep_samples_file=valid_sample_file_abs,
-                extract_snps_file=extract_snps_file_abs
-            )
-            logger.info(f"LD过滤完成: {len(ld_selected_snps)}个SNP")
-        elif enable_ld and not final_gwas_genotype:
-            logger.warning(" LD过滤需要基因型文件，跳过")
-
-        # Step 7: 应用特征筛选
-        # 逻辑说明：
-        # - 模式4：先GWAS筛选，再对GWAS显著SNP进行LD过滤，直接使用LD过滤结果（因为LD过滤已经只针对GWAS显著SNP）
-        # - 模式2：仅使用GWAS显著SNP
-        # - 模式3：仅使用LD过滤结果
-        # - 模式1：使用全部特征
-        raw_selected_snps = None  # 仍为"原始SNP名称"
-
-        if feature_selection_mode == 4:
-            # 模式4：先GWAS后LD，LD过滤结果已经是针对GWAS显著SNP的，直接使用
-            if ld_selected_snps:
-                raw_selected_snps = ld_selected_snps
-                logger.info(f"模式4（先GWAS后LD）: {len(raw_selected_snps)}个SNP（GWAS显著SNP经LD过滤后）")
-            elif selected_snps:
-                # 如果LD过滤失败或没有结果，退回到GWAS结果
-                raw_selected_snps = selected_snps
-                logger.warning("模式4：LD过滤无结果，退回仅使用GWAS显著SNP")
-            else:
-                raw_selected_snps = X.columns.tolist()
-                logger.warning("模式4：GWAS和LD均无结果，使用全部特征")
-        elif selected_snps:
-            # 模式2：仅GWAS
-            raw_selected_snps = selected_snps
-        elif ld_selected_snps:
-            # 模式3：仅LD
-            raw_selected_snps = ld_selected_snps
-        else:
-            # 模式1：全部特征
-            raw_selected_snps = X.columns.tolist()
-
-        # 将“原始SNP名称”映射到清理后的列名：
-        # - 对于有snp_name_mapping的SNP，用映射后的列名
-        # - 对于非SNP特征（不在映射中），直接保留原列名（若在X中存在）
-        mapped_snps = []
-        for snp in raw_selected_snps:
-            cleaned = snp_name_mapping.get(snp, snp)
-            if cleaned in X.columns and cleaned not in mapped_snps:
-                mapped_snps.append(cleaned)
-
-        if mapped_snps:
-            selected_snps = mapped_snps
-        else:
-            # 理论上不会为空，兜底使用全部特征
-            selected_snps = X.columns.tolist()
-
-        # 确保排除phenotype列（如果存在）
-        selected_snps = filter_phenotype_columns(selected_snps)
-        
-        # 应用特征筛选到X
-        X_filtered = X[selected_snps]
-        logger.info(f"特征筛选完成: {X_filtered.shape[1]}个特征")
-
-        # Step 8: 5折交叉验证训练和评估
+        # 5折交叉验证：使用进程池并行执行每一折
         cv_fold_metrics = []
         all_y_test = []
         all_y_pred = []
         all_y_prob = []
-        fold_iter = tqdm(splits, total=n_folds, desc="CV folds", unit="fold") if TQDM_AVAILABLE else splits
 
-        for fold_idx, (train_idx, val_idx) in enumerate(fold_iter, 1):
-            logger.debug(f"[{fold_idx}/{n_folds}] 训练中...")
-            X_train_fold = X_filtered.iloc[train_idx]
-            X_val_fold = X_filtered.iloc[val_idx]
-            y_train_fold = y.iloc[train_idx]
-            y_val_fold = y.iloc[val_idx]
-            
-            # 执行超参数网格搜索
-            logger.debug(f"  [{fold_idx}/{n_folds}] 超参数搜索中...")
-            param_grid = get_param_grid(model_type, task_type)
-            model_fold = perform_grid_search(
-                model_type=model_type,
-                task_type=task_type,
-                X_train=X_train_fold,
-                y_train=y_train_fold,
-                param_grid=param_grid,
-                n_iter=20,  # 每次搜索20个参数组合
-                cv=3,  # 网格搜索使用3折交叉验证
-                random_state=random_state
-            )
-            
-            # 预测和评估
-            y_pred_fold = model_fold.predict(X_val_fold)
-            
-            # 尝试获取预测概率（分类任务需要）
-            y_prob_fold = None
-            if task_type == "classification":
+        # 修复：在多进程环境中，确保DataFrame/Series可以被正确序列化
+        # 如果DataFrame/Series太大，序列化可能会很慢，但通常不会出错
+        # 为了安全起见，添加错误处理
+        executor = ProcessPoolExecutor(max_workers=n_folds)
+        try:
+            futures = []
+            for fold_idx, (train_idx, val_idx) in enumerate(splits, 1):
+                # 修复：确保train_idx和val_idx是numpy数组（KFold返回的已经是numpy数组）
+                # 但为了安全起见，显式转换为numpy数组
+                train_idx = np.asarray(train_idx)
+                val_idx = np.asarray(val_idx)
+                
+                futures.append(
+                    executor.submit(
+                        _run_single_fold_cv,
+                        fold_idx,
+                        train_idx,
+                        val_idx,
+                        X_filtered,
+                        y,
+                        model_type,
+                        task_type,
+                        random_state
+                    )
+                )
+
+            for future in futures:
                 try:
-                    if hasattr(model_fold, 'predict_proba'):
-                        y_prob_fold = model_fold.predict_proba(X_val_fold)
-                    elif hasattr(model_fold, 'decision_function'):
-                        # 对于某些SVM模型，如果没有probability=True，使用decision_function
-                        decision_scores = model_fold.decision_function(X_val_fold)
-                        # 将decision_function转换为概率（简单归一化）
-                        if len(decision_scores.shape) == 1:
-                            # 二分类
-                            from sklearn.utils.extmath import softmax
-                            prob_neg = 1 / (1 + np.exp(decision_scores))
-                            prob_pos = 1 - prob_neg
-                            y_prob_fold = np.column_stack([prob_neg, prob_pos])
-                        else:
-                            # 多分类：使用softmax
-                            from sklearn.utils.extmath import softmax
-                            y_prob_fold = softmax(decision_scores)
-                    else:
-                        logger.warning(f" 模型不支持predict_proba或decision_function，无法计算AUC")
+                    fold_idx, fold_metrics, y_val_fold, y_pred_fold, y_prob_fold = future.result()
+                    cv_fold_metrics.append(fold_metrics)
                 except Exception as e:
-                    logger.warning(f" 获取预测概率失败: {str(e)}")
-            
-            fold_metrics = evaluate_model(y_val_fold, y_pred_fold, y_prob_fold, task_type)
-            cv_fold_metrics.append(fold_metrics)
-            
-            # 显示当前折的关键指标
-            if task_type == "regression":
-                corr = fold_metrics.get('pearson_correlation', 'N/A')
-                logger.info(f"[{fold_idx}/{n_folds}] 相关系数: {corr}")
-            else:
-                acc = fold_metrics.get('accuracy', 'N/A')
-                auc = fold_metrics.get('auc', 'N/A')
-                logger.info(f"[{fold_idx}/{n_folds}] 准确率: {acc}, AUC: {auc}")
-            
-            # 收集所有折的预测结果（用于最终的性能评估曲线）
-            all_y_test.append(y_val_fold)
-            all_y_pred.append(y_pred_fold)
-            if y_prob_fold is not None:
-                all_y_prob.append(y_prob_fold)
-            
-        
+                    logger.error(f"  Fold {fold_idx} failed: {str(e)}", exc_info=True)
+                    # 如果某一折失败，记录错误但继续处理其他折
+                    # 添加一个空的metrics字典，避免后续计算平均指标时出错
+                    cv_fold_metrics.append({})
+                    continue
+
+                # 日志输出每折关键指标
+                if task_type == "regression":
+                    corr = fold_metrics.get("pearson_correlation", "N/A")
+                    logger.info(f"[{fold_idx}/{n_folds}] Pearson correlation: {corr}")
+                else:
+                    acc = fold_metrics.get("accuracy", "N/A")
+                    auc = fold_metrics.get("auc", "N/A")
+                    logger.info(f"[{fold_idx}/{n_folds}] Accuracy: {acc}, AUC: {auc}")
+
+                all_y_test.append(y_val_fold)
+                all_y_pred.append(y_pred_fold)
+                if y_prob_fold is not None:
+                    all_y_prob.append(y_prob_fold)
+        finally:
+            # 显式关闭executor，确保所有资源被正确清理
+            executor.shutdown(wait=True)
         # 计算平均指标
-        logger.info(f"{n_folds}折交叉验证平均结果:")
+        logger.info(f"{n_folds}-fold cross-validation average results:")
         
         avg_metrics = {}
         if task_type == "regression":
@@ -2007,7 +2340,7 @@ def run_single_model(
         logger.info(f"   {avg_metrics}")
         
         # Step 9: 使用全部数据训练最终模型（用于特征重要性）
-        logger.debug("训练最终模型...")
+        logger.debug("Training final model...")
         param_grid = get_param_grid(model_type, task_type)
         final_model = perform_grid_search(
             model_type=model_type,
@@ -2019,20 +2352,69 @@ def run_single_model(
             cv=5,  # 使用5折交叉验证
             random_state=random_state
         )
-        logger.info("最终模型训练完成")
+        logger.info("Final model training completed")
         
         # 合并所有折的预测结果
-        y_test_combined = pd.concat(all_y_test, axis=0) if all_y_test else None
+        # 修复：确保Series合并时索引唯一，避免重复索引导致的错误
+        # 在交叉验证中，每个fold的验证集互不重叠，但为了安全起见，使用ignore_index=False保留原始索引
+        # 如果确实有重复索引，使用keys参数区分不同fold
+        if all_y_test:
+            try:
+                y_test_combined = pd.concat(all_y_test, axis=0, ignore_index=False)
+                # 检查是否有重复索引（理论上不应该有，因为交叉验证的fold互不重叠）
+                if y_test_combined.index.duplicated().any():
+                    logger.warning("  Detected duplicate indices in y_test, using keys to distinguish folds")
+                    y_test_combined = pd.concat(all_y_test, axis=0, keys=range(len(all_y_test)), names=['fold', None])
+                    y_test_combined = y_test_combined.droplevel(0)  # 移除fold级别，保留原始索引
+            except Exception as e:
+                logger.warning(f"  Failed to concatenate y_test with original indices: {e}, using ignore_index=True")
+                y_test_combined = pd.concat(all_y_test, axis=0, ignore_index=True)
+        else:
+            y_test_combined = None
+        
+        # 修复：确保numpy数组正确连接
         y_pred_combined = np.concatenate(all_y_pred) if all_y_pred else None
-        y_prob_combined = np.vstack(all_y_prob) if all_y_prob and len(all_y_prob) > 0 else None
+        
+        # 修复：确保概率矩阵正确堆叠，处理可能的维度不一致问题
+        if all_y_prob and len(all_y_prob) > 0:
+            try:
+                # 检查所有概率数组的形状是否一致
+                shapes = [prob.shape for prob in all_y_prob]
+                if len(set(shapes)) > 1:
+                    logger.warning(f"  Inconsistent probability shapes: {shapes}, attempting to align")
+                    # 如果形状不一致，尝试找到最小维度并截断
+                    min_shape = min(shapes, key=lambda x: x[0])
+                    all_y_prob = [prob[:min_shape[0]] if prob.shape[0] > min_shape[0] else prob for prob in all_y_prob]
+                y_prob_combined = np.vstack(all_y_prob)
+            except Exception as e:
+                logger.warning(f"  Failed to stack probability arrays: {e}")
+                y_prob_combined = None
+        else:
+            y_prob_combined = None
         
         metrics = avg_metrics  # 使用平均指标作为最终指标
 
-        # Step 10: 计算特征重要性（使用最终模型）
-        logger.debug("计算特征重要性...")
+        # Step 10: 计算特征重要性（可选，使用最终模型）
+        feature_importance_df = None
+        if calculate_feature_importance:
+            logger.debug("Calculating feature importance...")
+            feature_cols = filter_phenotype_columns(X_filtered.columns.tolist())
+            
+            feature_importance_df = calculate_feature_importance(
+                model=final_model,
+                model_type=model_type,
+                feature_names=feature_cols,
+                X_train=X_filtered[feature_cols] if feature_cols else X_filtered,
+                y_train=y,
+                task_type=task_type
+            )
+            logger.info("Feature importance calculation completed")
+        
+        # Step 10.5: 计算SHAP值（默认计算，使用最终模型）
+        logger.debug("Calculating SHAP values...")
         feature_cols = filter_phenotype_columns(X_filtered.columns.tolist())
         
-        feature_importance_df = calculate_feature_importance(
+        shap_df = calculate_shap_values(
             model=final_model,
             model_type=model_type,
             feature_names=feature_cols,
@@ -2040,10 +2422,13 @@ def run_single_model(
             y_train=y,
             task_type=task_type
         )
-        logger.info("特征重要性计算完成")
+        if not shap_df.empty:
+            logger.info("SHAP values calculation completed")
+        else:
+            logger.warning("  SHAP values calculation failed or returned empty results")
 
         # Step 11: 保存结果
-        logger.debug("保存结果...")
+        logger.debug("Saving results...")
         model_dir = Path(output_dir) / model_type
         model_dir.mkdir(parents=True, exist_ok=True)
         
@@ -2056,12 +2441,10 @@ def run_single_model(
         cv_results_file = model_dir / "cv_results.json"
         with open(cv_results_file, 'w') as f:
             json.dump(cv_results, f, indent=2, default=str)
-        # 绘制交叉验证训练过程曲线
-        try:
-            plot_cv_training_curves(cv_results, model_dir, model_type, task_type)
-        except Exception as e:
-            logger.warning(f" 绘制训练过程曲线失败: {str(e)}")
         
+        # 训练阶段不再做GWAS/LD特征筛选，这里将全部特征名（去掉phenotype列）作为selected_snps
+        selected_snps = filter_phenotype_columns(X_filtered.columns.tolist())
+
         save_training_results(
             model=final_model,
             metrics=metrics,
@@ -2070,14 +2453,17 @@ def run_single_model(
             model_type=model_type,
             task_type=task_type,
             feature_importance_df=feature_importance_df,
+            shap_df=shap_df,
             y_test=y_test_combined,
             y_pred=y_pred_combined,
-            y_prob=y_prob_combined
+            y_prob=y_prob_combined,
+            cv_results=cv_results,
+            publication_quality=publication_quality
         )
 
-        # 最终日志
+        # 最终日志：输出当前模型的训练用时
         total_time = round(time.time() - start_time, 2)
-        logger.info(f"训练完成 (耗时: {total_time}秒)")
+        logger.info(f"Training completed for {model_type} (elapsed time: {total_time} seconds)")
         # 根据调试开关决定是否清理临时目录/文件
         if CLEANUP_TEMP_FILES:
             # 正常结束：仅清理本次运行的临时目录，不清理preprocess的临时目录（preprocess模块不删除tmp目录）
@@ -2099,13 +2485,13 @@ def run_single_model(
                                 # Python 3.9+ 使用 is_relative_to
                                 if tmp_root_abs == preprocess_tmp_dir_abs or preprocess_tmp_dir_abs.is_relative_to(tmp_root_abs):
                                     should_delete = False
-                                    logger.debug(f"跳过删除tmp_root（与preprocess_tmp_dir重叠）: {tmp_root}")
+                                    logger.debug(f"Skipping deletion of tmp_root (overlaps with preprocess_tmp_dir): {tmp_root}")
                             except AttributeError:
                                 # Python < 3.9 使用其他方法检查
                                 try:
                                     preprocess_tmp_dir_abs.relative_to(tmp_root_abs)
                                     should_delete = False
-                                    logger.debug(f"跳过删除tmp_root（与preprocess_tmp_dir重叠）: {tmp_root}")
+                                    logger.debug(f"Skipping deletion of tmp_root (overlaps with preprocess_tmp_dir): {tmp_root}")
                                 except ValueError:
                                     pass  # 不是相对路径，可以删除
                         if should_delete:
@@ -2119,26 +2505,25 @@ def run_single_model(
                         preprocess_tmp_dir_path = Path(preprocess_tmp_dir)
                         if preprocess_tmp_dir_path.exists():
                             shutil.rmtree(preprocess_tmp_dir_path, ignore_errors=True)
-                            logger.info(f"已删除preprocess临时目录: {preprocess_tmp_dir_path}")
+                            logger.info(f"Deleted preprocess temporary directory: {preprocess_tmp_dir_path}")
                     except Exception as e:
-                        logger.warning(f"删除preprocess临时目录失败（已忽略）: {e}")
+                        logger.warning(f"Failed to delete preprocess temporary directory (ignored): {e}")
                 
                 # 正常运行完成后，删除GWAS运行产生的output目录
                 gwas_output_dir = output_dir_path / "output"
                 if gwas_output_dir.exists():
                     try:
                         shutil.rmtree(gwas_output_dir, ignore_errors=True)
-                        logger.info(f"已删除GWAS output目录: {gwas_output_dir}")
                     except Exception as e:
-                        logger.warning(f"删除GWAS output目录失败（已忽略）: {e}")
+                        logger.warning(f"Failed to delete GWAS output directory (ignored): {e}")
             except Exception as cleanup_err:
-                logger.debug(f"清理临时目录时出错（已忽略）：{cleanup_err}")
+                logger.debug(f"Error during temporary directory cleanup (ignored): {cleanup_err}")
         else:
-            logger.debug("调试模式：CLEANUP_TEMP_FILES=False，本次运行产生的临时文件和目录将被保留。")
+            logger.debug("Debug mode: CLEANUP_TEMP_FILES=False, temporary files and directories from this run will be retained.")
         return 0
 
     except Exception as e:
-        logger.error(f"单模型训练失败: {str(e)}", exc_info=True)
+        logger.error(f"Single model training failed: {str(e)}", exc_info=True)
         # 根据调试开关决定异常时是否清理临时目录/文件
         if CLEANUP_TEMP_FILES:
             # 异常：仅清理本次运行登记的临时文件/目录，不触碰preprocess阶段的临时目录
@@ -2158,13 +2543,13 @@ def run_single_model(
                                 # Python 3.9+ 使用 is_relative_to
                                 if tmp_root_abs == preprocess_tmp_dir_abs or preprocess_tmp_dir_abs.is_relative_to(tmp_root_abs):
                                     should_delete = False
-                                    logger.debug(f"异常时跳过删除tmp_root（与preprocess_tmp_dir重叠）: {tmp_root}")
+                                    logger.debug(f"Exception: skipping deletion of tmp_root (overlaps with preprocess_tmp_dir): {tmp_root}")
                             except AttributeError:
                                 # Python < 3.9 使用其他方法检查
                                 try:
                                     preprocess_tmp_dir_abs.relative_to(tmp_root_abs)
                                     should_delete = False
-                                    logger.debug(f"异常时跳过删除tmp_root（与preprocess_tmp_dir重叠）: {tmp_root}")
+                                    logger.debug(f"Exception: skipping deletion of tmp_root (overlaps with preprocess_tmp_dir): {tmp_root}")
                                 except ValueError:
                                     pass  # 不是相对路径，可以删除
                         if should_delete:
@@ -2172,24 +2557,20 @@ def run_single_model(
                 except Exception:
                     pass
             except Exception as cleanup_err:
-                logger.debug(f"清理临时目录时出错（已忽略）：{cleanup_err}")
+                logger.debug(f"Error during temporary directory cleanup (ignored): {cleanup_err}")
         else:
-            logger.debug("调试模式：发生异常也保留本次运行产生的临时文件和目录（CLEANUP_TEMP_FILES=False）。")
+            logger.debug("Debug mode: Exception occurred, but temporary files and directories from this run will be retained (CLEANUP_TEMP_FILES=False).")
         return 1
 def run_all_models(
     input_path: str,
     output_dir: str,
-    feature_selection_mode: int,
     task_type: Optional[str] = None,
     n_folds: int = 5,
     random_state: int = 42,
-    gwas_genotype: Optional[str] = None,
-    gwas_pvalue: Optional[float] = None,
-    # LD过滤参数（当feature_selection_mode需要时使用）
-    ld_window_kb: int = 50,
-    ld_window: int = 5,
-    ld_window_r2: float = 0.2,
-    ld_threads: int = 8
+    # 特征重要性计算参数（可选）
+    calculate_feature_importance: bool = False,
+    # 图表质量参数
+    publication_quality: bool = True
 ) -> int:
     """训练所有支持的模型，并生成对比报告"""
     # 首先解析输入路径，获取task_type默认值
@@ -2197,12 +2578,13 @@ def run_all_models(
     if task_type is None:
         task_type = input_info.get("task_type") or "regression"
         if not input_info.get("task_type"):
-            logger.warning(f" 未指定task_type且元数据中无task_type信息，使用默认值: regression")
+            logger.warning(f"  task_type not specified and no task_type information in metadata, using default: regression")
     else:
         pass
     
     supported_models = ["LightGBM", "RandomForest", "XGBoost", "SVM", "CatBoost", "Logistic"]
     results = {}
+    model_metrics_summary = {}  # 记录每个模型的评估指标（用于后续选择最佳模型）  # 新增
     start_time = time.time()
 
     output_dir_path = Path(output_dir)
@@ -2213,27 +2595,151 @@ def run_all_models(
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        # 遍历所有模型训练
-        for model_type in supported_models:
-            logger.info(f"训练模型: {model_type}")
-            ret_code = run_single_model(
-                input_path=input_path,
-                model_type=model_type,
-                output_dir=output_dir,
-                feature_selection_mode=feature_selection_mode,
-                task_type=task_type,
-                n_folds=n_folds,
-                random_state=random_state,
-                gwas_genotype=gwas_genotype,
-                gwas_pvalue=gwas_pvalue,
-                ld_window_kb=ld_window_kb,
-                ld_window=ld_window,
-                ld_window_r2=ld_window_r2,
-                ld_threads=ld_threads
-            )
-            results[model_type] = "成功" if ret_code == 0 else "失败"
+        # ======================== 关键改动：使用进程池并行训练所有模型 ========================
+        # 说明：
+        # - 每个模型类型在一个独立的进程中调用 run_single_model 进行完整训练（含CV、特征重要性、SHAP等）
+        # - 进程池大小根据模型个数和CPU核数自动设置，避免资源过载
+        import os
+        max_workers = len(supported_models)
+        cpu_count = os.cpu_count() or max_workers
+        max_workers = min(max_workers, cpu_count)
+        logger.info(f"Running all-models training in parallel: {len(supported_models)} models, max_workers={max_workers}")
 
-        # 生成模型对比报告
+        from concurrent.futures import ProcessPoolExecutor
+
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {}
+            for model_type in supported_models:
+                logger.info(f"[train-all] Submitting model training task: {model_type}")
+                future = executor.submit(
+                    run_single_model,
+                    input_path,
+                    model_type,
+                    output_dir,
+                    task_type,
+                    n_folds,
+                    random_state,
+                    calculate_feature_importance,
+                    publication_quality,
+                )
+                futures[future] = model_type
+
+            # 收集各模型的退出码
+            for future, model_type in futures.items():
+                try:
+                    ret_code = future.result()
+                except Exception as e:
+                    logger.error(f"[train-all] Model {model_type} training failed with exception: {e}", exc_info=True)
+                    ret_code = 1
+                results[model_type] = "成功" if ret_code == 0 else "失败"
+
+        # ======================== 新增：读取各模型评估指标，打印性能并选择最佳模型 ========================
+        # 说明：
+        # - 每个模型的 metrics.json 由 run_single_model/save_training_results 写入
+        # - 分类任务优先使用 AUC 作为选择标准，其次 Accuracy
+        # - 回归任务使用 Pearson correlation 作为选择标准
+        best_model_type = None
+        best_score = None
+        best_metric_name = None
+
+        logger.info("Model performance summary (based on metrics.json):")
+        for model_type in supported_models:
+            model_dir = output_dir_path / model_type
+            metrics_file = model_dir / "metrics.json"
+            if not metrics_file.exists():
+                logger.warning(f"  Metrics file not found for model {model_type}: {metrics_file}")
+                continue
+
+            try:
+                with open(metrics_file, "r") as f:
+                    metrics_data = json.load(f)
+            except Exception as e:
+                logger.warning(f"  Failed to load metrics for model {model_type}: {e}")
+                continue
+
+            metrics = metrics_data.get("metrics", {}) or {}
+            model_metrics_summary[model_type] = metrics
+
+            if task_type == "classification":
+                # 分类：优先按 AUC 选最佳，其次 Accuracy
+                raw_auc = metrics.get("auc")
+                auc = raw_auc if isinstance(raw_auc, (int, float)) else None
+                raw_acc = metrics.get("accuracy")
+                acc = raw_acc if isinstance(raw_acc, (int, float)) else None
+
+                logger.info(
+                    f"  {model_type}: accuracy={metrics.get('accuracy')}, "
+                    f"recall={metrics.get('recall')}, f1={metrics.get('f1')}, auc={metrics.get('auc')}"
+                )
+
+                score = None
+                metric_name = None
+                if auc is not None:
+                    score = auc
+                    metric_name = "auc"
+                elif acc is not None:
+                    score = acc
+                    metric_name = "accuracy"
+            else:
+                # 回归：使用 Pearson correlation 选最佳
+                raw_corr = metrics.get("pearson_correlation")
+                corr = raw_corr if isinstance(raw_corr, (int, float)) else None
+                logger.info(
+                    f"  {model_type}: pearson_correlation={metrics.get('pearson_correlation')}, "
+                    f"pearson_pvalue={metrics.get('pearson_pvalue')}"
+                )
+                score = corr
+                metric_name = "pearson_correlation"
+
+            if score is not None:
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best_model_type = model_type
+                    best_metric_name = metric_name
+
+        # 保存最佳模型副本到统一路径，便于下游直接加载
+        if best_model_type is not None:
+            best_model_dir = output_dir_path / best_model_type
+            best_model_src = best_model_dir / f"{best_model_type}_model.pkl"
+            if best_model_src.exists():
+                best_model_dst = output_dir_path / "best_model.pkl"
+                try:
+                    import shutil
+                    shutil.copy2(best_model_src, best_model_dst)
+                except Exception as e:
+                    logger.warning(f"  Failed to copy best model file: {e}")
+
+                # 额外保存一个 best_model_info.json，记录最佳模型及所有模型性能
+                best_info_file = output_dir_path / "best_model_info.json"
+                try:
+                    with open(best_info_file, "w") as f:
+                        json.dump(
+                            {
+                                "task_type": task_type,
+                                "best_model_type": best_model_type,
+                                "best_metric_name": best_metric_name,
+                                "best_metric_value": best_score,
+                                "all_model_metrics": model_metrics_summary,
+                                "generated_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            },
+                            f,
+                            indent=2,
+                            default=str,
+                        )
+                    logger.info(
+                        f"Best model: {best_model_type} ("
+                        f"{best_metric_name}={best_score}) saved to {best_model_dst}"
+                    )
+                except Exception as e:
+                    logger.warning(f"  Failed to save best_model_info.json: {e}")
+            else:
+                logger.warning(
+                    f"  Best model file not found for model {best_model_type}: {best_model_src}"
+                )
+        else:
+            logger.warning("  No valid metrics found to select the best model.")
+
+        # 生成模型对比报告（保留原有结构，增加整体训练时间信息）
         output_dir_path = Path(output_dir)
         output_dir_path.mkdir(parents=True, exist_ok=True)
         report_file = output_dir_path / "model_comparison_report.json"
@@ -2242,19 +2748,13 @@ def run_all_models(
                 "task_type": task_type,
                 "n_folds": n_folds,
                 "random_state": random_state,
-                "feature_selection_mode": feature_selection_mode,
-                "gwas_pvalue": gwas_pvalue if feature_selection_mode in [2, 4] else None,
-                "ld_parameters": {
-                    "window_kb": ld_window_kb,
-                    "window": ld_window,
-                    "r2": ld_window_r2
-                } if feature_selection_mode in [3, 4] else None,
+                "note": "GWAS/LD特征筛选已在preprocess模块完成",
                 "training_results": results,
                 "total_training_time": round(time.time() - start_time, 2),
                 "generated_time": time.strftime("%Y-%m-%d %H:%M:%S")
             }, f, indent=2)
 
-        logger.info(f" 所有模型训练完成")
+        logger.info("  All models training completed")
         
         # 根据调试开关决定是否清理临时目录/文件
         if CLEANUP_TEMP_FILES:
@@ -2277,13 +2777,13 @@ def run_all_models(
                                 # Python 3.9+ 使用 is_relative_to
                                 if tmp_dir_abs == preprocess_tmp_dir_abs or preprocess_tmp_dir_abs.is_relative_to(tmp_dir_abs):
                                     should_delete = False
-                                    logger.debug(f"跳过删除tmp_dir（与preprocess_tmp_dir重叠）: {tmp_dir}")
+                                    logger.debug(f"Skipping deletion of tmp_dir (overlaps with preprocess_tmp_dir): {tmp_dir}")
                             except AttributeError:
                                 # Python < 3.9 使用其他方法检查
                                 try:
                                     preprocess_tmp_dir_abs.relative_to(tmp_dir_abs)
                                     should_delete = False
-                                    logger.debug(f"跳过删除tmp_dir（与preprocess_tmp_dir重叠）: {tmp_dir}")
+                                    logger.debug(f"Skipping deletion of tmp_dir (overlaps with preprocess_tmp_dir): {tmp_dir}")
                                 except ValueError:
                                     pass  # 不是相对路径，可以删除
                     except Exception:
@@ -2293,7 +2793,7 @@ def run_all_models(
                         import shutil
                         shutil.rmtree(tmp_dir, ignore_errors=True)
             except Exception as cleanup_err:
-                logger.warning(f" 删除全模型训练临时目录失败（已忽略）：{cleanup_err}")
+                logger.warning(f"  Failed to delete all-models training temporary directory (ignored): {cleanup_err}")
             
             # 正常运行完成后，删除preprocess模块产生的tmp_p目录
             try:
@@ -2302,25 +2802,24 @@ def run_all_models(
                     preprocess_tmp_dir_path = Path(input_info["preprocess_tmp_dir"]).absolute()
                     if preprocess_tmp_dir_path.exists():
                         shutil.rmtree(preprocess_tmp_dir_path, ignore_errors=True)
-                        logger.info(f"已删除preprocess临时目录: {preprocess_tmp_dir_path}")
+                        logger.info(f"Deleted preprocess temporary directory: {preprocess_tmp_dir_path}")
             except Exception as e:
-                logger.warning(f"删除preprocess临时目录失败（已忽略）: {e}")
+                logger.warning(f"Failed to delete preprocess temporary directory (ignored): {e}")
             
             # 正常运行完成后，删除GWAS运行产生的output目录
             gwas_output_dir = output_dir_path / "output"
             if gwas_output_dir.exists():
                 try:
                     shutil.rmtree(gwas_output_dir, ignore_errors=True)
-                    logger.info(f"已删除GWAS output目录: {gwas_output_dir}")
                 except Exception as e:
-                    logger.warning(f"删除GWAS output目录失败（已忽略）: {e}")
+                    logger.warning(f"Failed to delete GWAS output directory (ignored): {e}")
         else:
-            logger.debug("调试模式：CLEANUP_TEMP_FILES=False，本次运行产生的临时文件和目录将被保留。")
+            logger.debug("Debug mode: CLEANUP_TEMP_FILES=False, temporary files and directories from this run will be retained.")
         
         return 0
 
     except Exception as e:
-        logger.error(f" 全模型训练失败: {str(e)}", exc_info=True)
+        logger.error(f"  All-models training failed: {str(e)}", exc_info=True)
         # 异常时也尝试清理空的 tmp 根目录（不会触碰其中仍有内容的情况）
         # 由于tmp_dir是temp_m，preprocess_tmp_dir是tmp_p，名称不同，不会冲突
         # 但保留检查逻辑作为额外安全措施
@@ -2338,13 +2837,13 @@ def run_all_models(
                             # Python 3.9+ 使用 is_relative_to
                             if tmp_dir_abs == preprocess_tmp_dir_abs or preprocess_tmp_dir_abs.is_relative_to(tmp_dir_abs):
                                 should_delete = False
-                                logger.debug(f"异常时跳过删除tmp_dir（与preprocess_tmp_dir重叠）: {tmp_dir}")
+                                logger.debug(f"Exception: skipping deletion of tmp_dir (overlaps with preprocess_tmp_dir): {tmp_dir}")
                         except AttributeError:
                             # Python < 3.9 使用其他方法检查
                             try:
                                 preprocess_tmp_dir_abs.relative_to(tmp_dir_abs)
                                 should_delete = False
-                                logger.debug(f"异常时跳过删除tmp_dir（与preprocess_tmp_dir重叠）: {tmp_dir}")
+                                logger.debug(f"Exception: skipping deletion of tmp_dir (overlaps with preprocess_tmp_dir): {tmp_dir}")
                             except ValueError:
                                 pass  # 不是相对路径，可以删除
                 except Exception:
@@ -2360,35 +2859,254 @@ def run_all_models(
 # ======================== 6. 预测函数 ========================
 def predict_with_model(
     input_path: str,
-    model_type: str,
+    model_path: str,
     output_dir: str,
     task_type: str
 ) -> int:
-    """使用训练好的模型进行预测"""
+    """使用训练好的模型进行预测
+    
+    支持输入格式：
+    - 训练数据格式（.txt，包含sample列作为索引）
+    - VCF格式（.vcf/.vcf.gz），会自动转换为训练数据格式
+    """
     try:
-        # 1. 加载预测数据
-        X, _, _ = load_training_data(input_path)  # 预测数据无需表型和映射，_占位
+        # 保存原始输入路径（用于后续清理）
+        original_input_path = input_path
+        input_path_obj = Path(input_path)
+        file_ext = input_path_obj.suffix.lower()
+        is_vcf_input = file_ext in ['.vcf', '.gz'] or input_path.endswith('.vcf.gz')
+        tmp_dir_to_clean = None
+        
+        # 如果是VCF文件，先转换为训练数据格式
+        if is_vcf_input:
+            logger.info(f"Detected VCF file: {input_path}")
+            logger.info("Converting VCF to training data format...")
+            
+            # 导入preprocess模块的函数
+            from assoG2P.bin.preprocess import (
+                genotype_to_plink,
+                plink_to_training_data_optimized,
+                auto_detect_chromosomes
+            )
+            import tempfile
+            import shutil
+            
+            # 创建临时目录
+            output_dir_path = Path(output_dir)
+            tmp_dir = output_dir_path / "tmp_predict"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            tmp_dir_to_clean = tmp_dir  # 保存临时目录路径用于清理
+            
+            try:
+                # 步骤1: VCF转PLINK
+                plink_prefix = str(tmp_dir / "predict_plink")
+                logger.info("  Step 1: Converting VCF to PLINK format...")
+                plink_prefix = genotype_to_plink(input_path, plink_prefix)
+                logger.info(f"  PLINK conversion completed: {plink_prefix}")
+                
+                # 步骤2: PLINK转训练数据格式
+                # 对于预测，我们不需要表型数据，创建一个空的表型DataFrame
+                # 但需要确保样本ID匹配
+                logger.info("  Step 2: Converting PLINK to training data format...")
+                
+                # 读取.fam文件获取样本ID
+                fam_file = f"{plink_prefix}.fam"
+                if not Path(fam_file).exists():
+                    raise FileNotFoundError(f"PLINK .fam file not found: {fam_file}")
+                
+                # 读取样本ID
+                fam_df = pd.read_csv(fam_file, sep=r"\s+", header=None, 
+                                    names=["FID", "IID", "PAT", "MAT", "SEX", "PHENOTYPE"])
+                sample_ids = fam_df["IID"].tolist()
+                
+                # 创建空的表型DataFrame（所有值设为0，仅用于占位）
+                pheno_df = pd.DataFrame({
+                    "sample": sample_ids,
+                    "phenotype": [0] * len(sample_ids)
+                }).set_index("sample")
+                
+                # 生成临时训练数据文件
+                temp_train_file = str(tmp_dir / "predict_train_data.txt")
+                
+                # 调用plink_to_training_data_optimized
+                train_df, actual_train_file = plink_to_training_data_optimized(
+                    plink_prefix=plink_prefix,
+                    pheno_df=pheno_df,
+                    output_file=temp_train_file,
+                    tmp_dir=str(tmp_dir),
+                    use_cache=True
+                )
+                
+                logger.info(f"  Training data conversion completed: {actual_train_file}")
+                
+                # 使用转换后的文件作为输入
+                input_path = actual_train_file
+                
+            except Exception as e:
+                logger.error(f"  Failed to convert VCF to training data format: {str(e)}")
+                raise
+        
+        # 0. 解析模型路径：
+        #    1) 推荐：直接指定模型文件路径（*.pkl）
+        #    2) 兼容旧接口：传入模型名称，在 output_dir 下查找对应子目录和模型文件
+        model_path_obj = Path(model_path).absolute()
+        model_dir: Path
+        model_file: Path
+        model_type: str = ""
+
+        if model_path_obj.is_file():
+            # 形式1：直接指定模型文件
+            model_file = model_path_obj
+            model_dir = model_file.parent
+            name = model_file.stem
+            if name.endswith("_model"):
+                model_type = name[:-6]
+            else:
+                model_type = name
+        else:
+            # 形式2：兼容旧接口，把 model_path 当作模型名称，在 output_dir 下查找
+            model_type = model_path
+            model_dir = Path(output_dir).absolute() / model_type
+            model_file = model_dir / f"{model_type}_model.pkl"
+
+        # 1. 加载预测数据（特征矩阵）
+        # 说明：
+        # - 这里复用 load_training_data 以保证特征清洗规则一致（clean_feature_names 等）；
+        # - 对于纯预测数据，如果没有 phenotype 列，则最后一列会被当作 y 丢弃，
+        #   因此更推荐采用与训练相同格式的矩阵（包含 phenotype 列），或在上游统一格式。
+        X, _, _ = load_training_data(input_path)
+        
+        # 1.1 加载训练阶段使用的特征列表
+        features_file = model_dir / "training_features.json"
+        if features_file.exists():
+            try:
+                with open(features_file, "r") as f:
+                    feature_info = json.load(f)
+                train_features = feature_info.get("feature_names") or []
+            except Exception as e:
+                logger.warning(f"  Failed to load training_features.json, fallback to raw X columns: {e}")
+                train_features = list(X.columns)
+        else:
+            logger.warning(
+                "  training_features.json not found, using current X columns as features; "
+                "train/predict feature alignment may be unreliable."
+            )
+            train_features = list(X.columns)
+        
+        # 1.2 按训练特征集合对齐预测特征：
+        # - 训练有、预测也有：直接使用预测中的该列；
+        # - 训练有、预测没有：在预测矩阵中补一列，整列填 0；
+        # - 训练没有、预测有：不加入模型输入（即丢弃该列）。
+        
+        # 调试信息：检查特征匹配情况
+        logger.debug(f"  Training features count: {len(train_features)}")
+        logger.debug(f"  Prediction features count: {len(X.columns)}")
+        logger.debug(f"  Training features (first 10): {train_features[:10]}")
+        logger.debug(f"  Prediction features (first 10): {list(X.columns[:10])}")
+        
+        # 检查特征名称匹配情况
+        matched_features = [col for col in train_features if col in X.columns]
+        missing_in_predict = [col for col in train_features if col not in X.columns]
+        extra_in_predict = [col for col in X.columns if col not in train_features]
+        
+        logger.info(f"  Feature alignment: {len(matched_features)} matched, {len(missing_in_predict)} missing, {len(extra_in_predict)} extra")
+        
+        if len(matched_features) == 0:
+            logger.warning(
+                f"  WARNING: No features matched between training and prediction data!\n"
+                f"  This will result in all-zero feature matrix and constant predictions.\n"
+                f"  Training features (first 20): {train_features[:20]}\n"
+                f"  Prediction features (first 20): {list(X.columns[:20])}\n"
+                f"  This may be due to feature name cleaning differences. Please check feature names."
+            )
+        
+        if len(missing_in_predict) > len(matched_features):
+            logger.warning(
+                f"  WARNING: More features missing ({len(missing_in_predict)}) than matched ({len(matched_features)}).\n"
+                f"  This may result in poor prediction quality."
+            )
+        
+        X_aligned = pd.DataFrame(index=X.index)
+        # 重新计算 missing_in_predict（避免重复）
+        missing_in_predict = [col for col in train_features if col not in X.columns]
+        
+        for col in train_features:
+            if col in X.columns:
+                X_aligned[col] = X[col]
+            else:
+                X_aligned[col] = 0
+        
+        # 验证对齐后的特征矩阵
+        if X_aligned.empty:
+            raise ValueError("Aligned feature matrix is empty!")
+        
+        # 检查是否所有特征值都是0
+        non_zero_counts = (X_aligned != 0).sum(axis=1)
+        if (non_zero_counts == 0).all():
+            logger.error(
+                f"  ERROR: All feature values are zero! This will result in constant predictions.\n"
+                f"  Matched features: {len(matched_features)}\n"
+                f"  Missing features: {len(missing_in_predict)}\n"
+                f"  Please check if feature names match between training and prediction data."
+            )
+        else:
+            logger.debug(f"  Non-zero feature counts per sample: min={non_zero_counts.min()}, max={non_zero_counts.max()}, mean={non_zero_counts.mean():.1f}")
+        
+        if missing_in_predict:
+            logger.info(
+                f"  {len(missing_in_predict)} feature(s) present in training but missing in predict; "
+                f"filled with 0. Example: {missing_in_predict[:5]}"
+            )
         
         # 2. 加载训练好的模型
-        model_file = Path(output_dir) / model_type / f"{model_type}_model.pkl"
         if not model_file.exists():
             raise FileNotFoundError(f"模型文件不存在: {model_file}")
         import joblib
         model = joblib.load(model_file)
-        logger.info(f" 加载预训练模型")
+        logger.info("  Loading pre-trained model")
         
-        # 3. 执行预测
-        y_pred = model.predict(X)
-        y_prob = model.predict_proba(X) if task_type == "classification" else None
+        # 3. 执行预测（基于对齐后的特征矩阵）
+        # 验证特征矩阵的有效性
+        logger.debug(f"  Aligned feature matrix shape: {X_aligned.shape}")
+        
+        # 检查特征矩阵是否有变化
+        feature_variance = X_aligned.var()
+        zero_variance_features = (feature_variance == 0).sum()
+        if zero_variance_features > 0:
+            logger.warning(f"  WARNING: {zero_variance_features} features have zero variance (constant values)")
+        
+        y_pred = model.predict(X_aligned)
+        y_prob = model.predict_proba(X_aligned) if task_type == "classification" and hasattr(model, "predict_proba") else None
+        
+        # 检查预测结果的多样性
+        unique_predictions = len(np.unique(y_pred))
+        logger.info(f"  Prediction statistics: {unique_predictions} unique values out of {len(y_pred)} samples")
+        if unique_predictions == 1:
+            logger.error(
+                f"  ERROR: All predictions are the same value: {y_pred[0]}\n"
+                f"  This usually indicates one of the following issues:\n"
+                f"  1. Feature names don't match between training and prediction data\n"
+                f"  2. All feature values are zero (check matched_features: {len(matched_features)})\n"
+                f"  3. Model is predicting a constant value for all samples\n"
+                f"  Please check the feature alignment logs above."
+            )
+        else:
+            logger.info(f"  Prediction range: [{np.min(y_pred):.4f}, {np.max(y_pred):.4f}], mean: {np.mean(y_pred):.4f}")
         
         # 4. 保存预测结果
-        output_dir = Path(output_dir) / model_type
-        output_dir.mkdir(parents=True, exist_ok=True)
-        pred_file = output_dir / "predictions.tsv"
+        # 规则：
+        #   - 如果用户传入的是模型文件路径，则预测结果保存在该模型文件所在目录；
+        #   - 如果使用旧接口（仅传模型名称），则仍保存在 output_dir/model_type 下。
+        if model_path_obj.is_file():
+            pred_output_dir = model_dir
+        else:
+            pred_output_dir = Path(output_dir) / model_type
+        pred_output_dir.mkdir(parents=True, exist_ok=True)
+        pred_file = pred_output_dir / "predictions.tsv"
         
         # 构建结果DataFrame
         result_df = pd.DataFrame({
-            "sample": X.index,
+            "sample": X_aligned.index,
             "prediction": y_pred
         })
         # 分类任务添加概率列
@@ -2397,11 +3115,19 @@ def predict_with_model(
                 result_df[f"prob_class_{i}"] = y_prob[:, i]
         
         result_df.to_csv(pred_file, sep="\t", index=False)
-        logger.info(f" 预测完成")
+        logger.info(f"  Prediction completed. Results saved to: {pred_file}")
+        
+        # 清理临时文件（如果是VCF转换产生的）
+        if is_vcf_input and tmp_dir_to_clean and tmp_dir_to_clean.exists():
+            try:
+                logger.debug(f"Cleaning up temporary directory: {tmp_dir_to_clean}")
+                shutil.rmtree(tmp_dir_to_clean, ignore_errors=True)
+            except Exception as e:
+                logger.debug(f"Failed to clean up temporary files: {e}")
         
         return 0
     except Exception as e:
-        logger.error(f" 预测失败: {str(e)}", exc_info=True)
+        logger.error(f"  Prediction failed: {str(e)}", exc_info=True)
         return 1
 
 # ======================== 7. 主函数（新增LD过滤命令行参数） ========================
@@ -2419,16 +3145,7 @@ if __name__ == "__main__":
                              help="任务类型（可选，如未指定将从元数据读取或默认regression）")
     train_parser.add_argument("--n_folds", type=int, default=5, help="交叉验证折数（默认: 5）")
     train_parser.add_argument("--random_state", type=int, default=42)
-    train_parser.add_argument("-f", "--feature_selection_mode", type=int, required=True, choices=[1, 2, 3, 4],
-                             help="特征筛选模式(必选): 1=空白对照, 2=GWAS筛选, 3=LD过滤, 4=GWAS和LD综合过滤")
-    train_parser.add_argument("--gwas_genotype", help="GWAS基因型文件前缀（模式2或4需要）")
-    train_parser.add_argument("--gwas_pvalue", type=float, default=0.01, help="GWAS P值阈值（模式2或4使用，默认5e-8）")
-    train_parser.add_argument("--ld_window_kb", type=int, default=50, help="LD窗口大小(KB，模式3或4使用)")
-    train_parser.add_argument("--ld_window", type=int, default=5, help="LD窗口变体数（模式3或4使用）")
-    train_parser.add_argument("--ld_window_r2", type=float, default=0.2, help="LD r²阈值（模式3或4使用）")
-    train_parser.add_argument("--ld_threads", type=int, default=8, help="LD过滤线程数（模式3或4使用）")
-
-    # 全模型训练（新增LD过滤参数）
+    # 全模型训练
     train_all_parser = subparsers.add_parser("train-all", help="Train all models")
     train_all_parser.add_argument("-i", "--input", required=True)
     train_all_parser.add_argument("-o", "--output_dir", required=True)
@@ -2436,20 +3153,17 @@ if __name__ == "__main__":
                                  help="任务类型（可选，如未指定将从元数据读取或默认regression）")
     train_all_parser.add_argument("--n_folds", type=int, default=5, help="交叉验证折数（默认: 5）")
     train_all_parser.add_argument("--random_state", type=int, default=42)
-    train_all_parser.add_argument("-f", "--feature_selection_mode", type=int, required=True, choices=[1, 2, 3, 4],
-                                help="特征筛选模式(必选): 1=空白对照, 2=GWAS筛选, 3=LD过滤, 4=GWAS和LD综合过滤")
-    train_all_parser.add_argument("--gwas_genotype", help="GWAS基因型文件前缀（模式2或4需要）")
-    train_all_parser.add_argument("--gwas_pvalue", type=float, default=0.01, help="GWAS P值阈值（模式2或4使用，默认5e-8）")
-    train_all_parser.add_argument("--ld_window_kb", type=int, default=50, help="LD窗口大小(KB，模式3或4使用)")
-    train_all_parser.add_argument("--ld_window", type=int, default=5, help="LD窗口变体数（模式3或4使用）")
-    train_all_parser.add_argument("--ld_window_r2", type=float, default=0.2, help="LD r²阈值（模式3或4使用）")
-    train_all_parser.add_argument("--ld_threads", type=int, default=8, help="LD过滤线程数（模式3或4使用）")
-
     # 预测
     predict_parser = subparsers.add_parser("predict", help="Predict with trained model")
     predict_parser.add_argument("-i", "--input", required=True, help="预测数据文件")
-    predict_parser.add_argument("-m", "--model", required=True, choices=["LightGBM", "RandomForest", "XGBoost", "SVM", "CatBoost", "Logistic"])
-    predict_parser.add_argument("-o", "--output_dir", required=True, help="模型输出目录（包含训练好的模型）")
+    # 这里的 -m 改为模型文件路径（.pkl），与主入口保持一致
+    predict_parser.add_argument(
+        "-m",
+        "--model",
+        required=True,
+        help="模型文件路径（.pkl），例如 /path/to/LightGBM_model.pkl"
+    )
+    predict_parser.add_argument("-o", "--output_dir", required=True, help="模型输出目录（旧接口用于推断模型目录，可与 -m 同目录）")
     predict_parser.add_argument("--task_type", required=True, choices=["classification", "regression"])
 
     args = parser.parse_args()
@@ -2458,36 +3172,24 @@ if __name__ == "__main__":
             input_path=args.input,
             model_type=args.model,
             output_dir=args.output_dir,
-            feature_selection_mode=args.feature_selection_mode,
             task_type=args.task_type,
             n_folds=args.n_folds,
             random_state=args.random_state,
-            gwas_genotype=args.gwas_genotype,
-            gwas_pvalue=args.gwas_pvalue,
-            ld_window_kb=args.ld_window_kb,
-            ld_window=args.ld_window,
-            ld_window_r2=args.ld_window_r2,
-            ld_threads=args.ld_threads
+            publication_quality=True
         ))
     elif args.command == "train-all":
         sys.exit(run_all_models(
             input_path=args.input,
             output_dir=args.output_dir,
-            feature_selection_mode=args.feature_selection_mode,
             task_type=args.task_type,
             n_folds=args.n_folds,
             random_state=args.random_state,
-            gwas_genotype=args.gwas_genotype,
-            gwas_pvalue=args.gwas_pvalue,
-            ld_window_kb=args.ld_window_kb,
-            ld_window=args.ld_window,
-            ld_window_r2=args.ld_window_r2,
-            ld_threads=args.ld_threads
+            publication_quality=True
         ))
     elif args.command == "predict":
         sys.exit(predict_with_model(
             input_path=args.input,
-            model_type=args.model,
+            model_path=args.model,
             output_dir=args.output_dir,
             task_type=args.task_type
         ))

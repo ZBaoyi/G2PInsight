@@ -2,39 +2,43 @@
 """
 GEMMA GWAS模块 - 严格匹配shell命令逻辑
 固定输入格式：PLINK二进制文件（.bed/.bim/.fam）
-支持命令行直接运行，参数解析+完整错误处理
 """
 
 import subprocess
 import logging
 import os
 import sys
-import argparse
 import pandas as pd
 from pathlib import Path
 from typing import Optional, Tuple
 
-# ======================== 固定配置（完全匹配shell环境）========================
+# ======================== 基础配置 =========================
+# 初始化基础日志（仅控制台输出）
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-# 1. 固定软件路径（不再检测系统路径）
+# 软件路径（保持原始硬编码）
 bin_dir = Path(__file__).parent
 software_dir = bin_dir / "software"
 plink_executable = str(software_dir / "plink")
 gemma_executable = str(software_dir / "gemma-0.98.5-linux-static-AMD64")
 
-# 2. 固定输入格式要求（仅支持PLINK二进制格式）
+# 固定输入格式要求
 REQUIRED_INPUT_FILES = {
-    "bed": ".bed",  # 基因型二进制文件
-    "bim": ".bim",  # 标记信息文件
-    "fam": ".fam"   # 样本信息文件
+    "bed": ".bed",
+    "bim": ".bim",
+    "fam": ".fam"
 }
 
-# ======================== 核心函数（严格对应shell命令）========================
+# ======================== 参数合法性校验 =========================
 def validate_input_files(input_prefix: str) -> None:
-    """
-    验证输入文件格式（固定为PLINK二进制格式）
-    """
+    """验证PLINK二进制文件完整性"""
+    if not isinstance(input_prefix, str) or not input_prefix.strip():
+        raise ValueError("input_prefix必须为非空字符串")
+    
     missing_files = []
     for file_type, suffix in REQUIRED_INPUT_FILES.items():
         file_path = f"{input_prefix}{suffix}"
@@ -43,20 +47,49 @@ def validate_input_files(input_prefix: str) -> None:
     
     if missing_files:
         raise FileNotFoundError(
-            f"输入文件格式错误（仅支持PLINK二进制格式）！缺失文件：{', '.join(missing_files)}\n"
-            f"要求：输入前缀{input_prefix}必须对应以下文件：\n"
-            f"  - {input_prefix}.bed (基因型二进制文件)\n"
-            f"  - {input_prefix}.bim (SNP标记信息文件)\n"
-            f"  - {input_prefix}.fam (样本表型信息文件)"
+            f"缺失PLINK二进制文件：{', '.join(missing_files)}"
         )
-    logger.info(f"输入文件验证通过：{input_prefix}.*")
+    logger.info(f"输入文件验证通过：{input_prefix}")
 
+def validate_phenotype_file(phenotype_file: str) -> pd.DataFrame:
+    """验证表型文件存在性，自动读取前两列并打印前5行"""
+    if not isinstance(phenotype_file, str) or not phenotype_file.strip():
+        raise ValueError("phenotype_file必须为非空字符串")
+    if not Path(phenotype_file).exists():
+        raise FileNotFoundError(f"表型文件不存在：{phenotype_file}")
+    
+    # 读取表型文件（仅取前两列）
+    try:
+        # usecols=[0,1] 强制读取前两列，skipinitialspace=True 忽略列前空格
+        pheno_df = pd.read_csv(
+            phenotype_file, 
+            sep=r'\s+', 
+            header=None, 
+            usecols=[0, 1],  # 强制仅读取前两列
+            skipinitialspace=True
+        )
+        # 重命名列
+        pheno_df.columns = ['IID', 'PHENO']
+        
+        # 打印前5行
+        logger.info("="*50)
+        logger.info("表型文件前5行（仅读取前两列）：")
+        logger.info(pheno_df.head().to_string(index=False))
+        logger.info("="*50)
+        
+        # 校验前两列是否为空
+        if pheno_df['IID'].isnull().any() or pheno_df['PHENO'].isnull().any():
+            logger.warning("表型文件前两列包含空值，请检查！")
+        
+        return pheno_df
+    except Exception as e:
+        raise RuntimeError(f"表型文件读取失败：{str(e)}")
+
+# ======================== 核心执行函数 =========================
 def run_shell_command(cmd: list, step_name: str) -> None:
-    """
-    执行shell命令（严格复刻命令执行逻辑）
-    """
+    """执行shell命令（仅保留核心逻辑）"""
     cmd_str = " ".join(cmd)
-    logger.info(f"\n【执行命令】{step_name}:\n{cmd_str}")
+    logger.info(f"[执行命令] {step_name}：{cmd_str}")
     
     result = subprocess.run(
         cmd,
@@ -66,248 +99,266 @@ def run_shell_command(cmd: list, step_name: str) -> None:
         encoding='utf-8'
     )
     
-    # 输出命令执行结果
     if result.stdout:
-        logger.info(f"标准输出:\n{result.stdout[:1000]}")  # 只显示前1000字符避免刷屏
-    if result.stderr:
-        logger.warning(f"标准错误:\n{result.stderr[:1000]}")
+        logger.info(f"标准输出：{result.stdout[:1000]}")
     
-    # 检查执行状态
+    # 处理标准错误输出：区分真正的错误和信息性消息
+    if result.stderr:
+        stderr_content = result.stderr[:1000]
+        # GEMMA 会将信息性消息（如 "**** INFO: Done."）输出到 stderr
+        # 如果命令成功执行（returncode == 0），且 stderr 中只包含 INFO/Done 等关键词，则记录为 info 级别
+        if result.returncode == 0:
+            # 检查是否包含真正的错误关键词
+            error_keywords = ['ERROR', 'FATAL', 'FAIL', 'Exception', 'Traceback']
+            if any(keyword in stderr_content.upper() for keyword in error_keywords):
+                logger.warning(f"标准错误（可能存在问题）：{stderr_content}")
+            else:
+                # 信息性消息，记录为 info 级别
+                logger.info(f"标准错误（信息性消息）：{stderr_content}")
+        else:
+            # 命令失败，stderr 肯定是错误
+            logger.error(f"标准错误：{stderr_content}")
+    
     if result.returncode != 0:
-        raise RuntimeError(f"{step_name} 执行失败（返回码：{result.returncode}）")
-    logger.info(f"【完成】{step_name}")
+        raise RuntimeError(f"{step_name}执行失败，返回码：{result.returncode}")
+    logger.info(f"[完成] {step_name}")
 
 def plink_quality_control(input_prefix: str, output_prefix: str) -> None:
-    """
-    PLINK质控 - 严格对应shell命令：plink --bfile input --maf 0.05 --geno 0.2 --make-bed --out output
-    """
+    """PLINK质控（geno 0.2、maf 0.05）"""
     cmd = [
         plink_executable,
         "--bfile", input_prefix,
-        "--maf", "0.05",       # 固定参数，匹配shell
-        "--geno", "0.2",       # 固定参数，匹配shell
+        "--maf", "0.05",
+        "--geno", "0.2",
+        "--allow-extra-chr",
+        "--allow-no-sex",
         "--make-bed",
         "--out", output_prefix
     ]
-    run_shell_command(cmd, "PLINK质控（MAF/GENO过滤）")
+    run_shell_command(cmd, "PLINK质控")
 
-def merge_phenotype_to_fam(phenotype_file: str, fam_file: str) -> None:
-    """
-    表型匹配到FAM文件 - 严格对应shell的awk命令逻辑
-    
-    支持两种常见表型文件格式：
-      1) 两列：IID PHENO
-      2) 三列：FID IID PHENO  （推荐，用于直接传给GEMMA的 -p）
-    """
-    # 1. 备份原始fam文件（对应shell: mv $clean_fam $clean_fam.bak）
+def merge_phenotype_to_fam(pheno_df: pd.DataFrame, fam_file: str) -> None:
+    """表型匹配到FAM文件（使用预处理好的前两列表型数据）"""
+    # 备份原始fam文件
     bak_fam = f"{fam_file}.bak"
     if not Path(bak_fam).exists():
         cmd = ["mv", fam_file, bak_fam]
-        run_shell_command(cmd, f"备份FAM文件到 {bak_fam}")
+        run_shell_command(cmd, "备份FAM文件")
     
-    # 2. 读取表型文件构建映射（对应shell: awk 'NR==FNR{{pheno[$1]=$2;next}}{{print $0, pheno[$2]}}'）
-    logger.info(f"读取表型文件：{phenotype_file}")
-    pheno_df_raw = pd.read_csv(phenotype_file, sep='\s+', header=None)
-    if pheno_df_raw.shape[1] >= 3:
-        # 三列表型：FID IID PHENO（兼容GEMMA标准三列格式）
-        pheno_df = pheno_df_raw.iloc[:, :3]
-        pheno_df.columns = ['FID', 'IID', 'PHENO']
-    elif pheno_df_raw.shape[1] == 2:
-        # 两列表型：IID PHENO（旧版格式）
-        pheno_df = pheno_df_raw.copy()
-        pheno_df.columns = ['IID', 'PHENO']
-    else:
-        raise ValueError(
-            f"表型文件格式不正确（需要2列 IID PHENO 或 3列 FID IID PHENO）：{phenotype_file}，"
-            f"当前列数={pheno_df_raw.shape[1]}"
-        )
-    pheno_dict = dict(zip(pheno_df['IID'].astype(str), pheno_df['PHENO'].astype(str)))
+    # 构建表型映射（IID转字符串避免类型不匹配）
+    pheno_dict = dict(zip(
+        pheno_df['IID'].astype(str).str.strip(), 
+        pheno_df['PHENO'].astype(str).str.strip()
+    ))
     
-    # 3. 重新生成fam文件（保留前5列，第6列替换为匹配的表型，缺失填-9）
-    logger.info(f"匹配表型到FAM文件：{fam_file}")
-    fam_df = pd.read_csv(bak_fam, sep='\s+', header=None, names=['FID', 'IID', 'PAT', 'MAT', 'SEX', 'OLD_PHENO'])
-    fam_df['PHENO'] = fam_df['IID'].astype(str).map(pheno_dict).fillna("-9")
+    # 读取并替换FAM第六列
+    fam_df = pd.read_csv(
+        bak_fam, 
+        sep=r'\s+', 
+        header=None, 
+        names=['FID', 'IID', 'PAT', 'MAT', 'SEX', 'OLD_PHENO']
+    )
+    # IID转字符串并去空格，避免匹配失败
+    fam_df['IID'] = fam_df['IID'].astype(str).str.strip()
+    # 替换表型，缺失填-9
+    fam_df['PHENO'] = fam_df['IID'].map(pheno_dict).fillna("-9")
     
-    # 保留前5列 + 新表型列（对应shell的print $0, pheno[$2]）
+    # 保存新FAM文件
     new_fam_df = fam_df[['FID', 'IID', 'PAT', 'MAT', 'SEX', 'PHENO']]
     new_fam_df.to_csv(fam_file, sep=' ', header=False, index=False)
     
-    # 统计匹配结果
+    # 基础统计
     matched = (fam_df['PHENO'] != "-9").sum()
     total = len(fam_df)
-    logger.info(f"表型匹配完成：{matched}/{total} 样本匹配成功，缺失表型填充-9")
+    logger.info(f"表型匹配完成：{matched}/{total} 样本匹配成功（缺失表型填-9）")
 
 def calculate_pca(input_prefix: str, output_prefix: str) -> None:
-    """
-    PCA计算 - 严格对应shell命令：plink --bfile input --pca 5 --out output
-    """
+    """计算PCA（前5个主成分）"""
     cmd = [
         plink_executable,
         "--bfile", input_prefix,
-        "--pca", "5",          # 固定参数，匹配shell
+        "--pca", "5",
+        "--allow-extra-chr",
+        "--allow-no-sex",
         "--out", output_prefix
     ]
-    run_shell_command(cmd, "PLINK PCA计算（前5主成分）")
+    run_shell_command(cmd, "PCA计算")
 
 def filter_valid_samples(fam_file: str, output_sample_file: str) -> None:
-    """
-    筛选有效表型样本 - 严格对应shell命令：awk '$6 != "-9" {print $1, $2}' $clean_fam > $valid_samples
-    """
-    logger.info(f"筛选有效表型样本（排除-9）：{fam_file}")
-    fam_df = pd.read_csv(fam_file, sep='\s+', header=None, names=['FID', 'IID', 'PAT', 'MAT', 'SEX', 'PHENO'])
+    """筛选有效表型样本（排除-9）"""
+    fam_df = pd.read_csv(
+        fam_file, 
+        sep=r'\s+', 
+        header=None, 
+        names=['FID', 'IID', 'PAT', 'MAT', 'SEX', 'PHENO']
+    )
     valid_df = fam_df[fam_df['PHENO'] != "-9"][['FID', 'IID']]
     valid_df.to_csv(output_sample_file, sep=' ', header=False, index=False)
-    logger.info(f"有效样本保存到：{output_sample_file}（共{len(valid_df)}个样本）")
+    logger.info(f"有效样本保存到：{output_sample_file}，共{len(valid_df)}个样本")
 
 def filter_plink_samples(input_prefix: str, sample_file: str, output_prefix: str) -> None:
-    """
-    过滤PLINK样本 - 严格对应shell命令：plink --bfile input --keep sample_file --make-bed --out output
-    """
+    """过滤PLINK样本（仅保留有效样本）"""
     cmd = [
         plink_executable,
         "--bfile", input_prefix,
         "--keep", sample_file,
+        "--allow-extra-chr",
+        "--allow-no-sex",
         "--make-bed",
         "--out", output_prefix
     ]
-    run_shell_command(cmd, "PLINK样本过滤（仅保留有效表型样本）")
+    run_shell_command(cmd, "PLINK样本过滤")
 
 def filter_pca_by_samples(pca_file: str, sample_file: str, output_pca_file: str) -> None:
-    """
-    过滤PCA结果 - 严格对应shell命令：awk 'NR==FNR{valid[$1,$2]=1;next} valid[$1,$2]' $valid_samples $pca_eigenvec > $filtered_pca
-    """
-    logger.info(f"过滤PCA文件：{pca_file}")
-    
+    """过滤PCA结果（仅保留有效样本）"""
     # 读取有效样本
-    valid_df = pd.read_csv(sample_file, sep='\s+', header=None, names=['FID', 'IID'])
-    valid_set = set(zip(valid_df['FID'].astype(str), valid_df['IID'].astype(str)))
+    valid_df = pd.read_csv(
+        sample_file, 
+        sep=r'\s+', 
+        header=None, 
+        names=['FID', 'IID']
+    )
+    valid_set = set(zip(
+        valid_df['FID'].astype(str).str.strip(), 
+        valid_df['IID'].astype(str).str.strip()
+    ))
     
-    # 读取并过滤PCA文件
-    pca_df = pd.read_csv(pca_file, sep='\s+', header=None)
-    pca_df['key'] = list(zip(pca_df[0].astype(str), pca_df[1].astype(str)))
+    # 过滤PCA文件
+    pca_df = pd.read_csv(pca_file, sep=r'\s+', header=None)
+    pca_df['key'] = list(zip(
+        pca_df[0].astype(str).str.strip(), 
+        pca_df[1].astype(str).str.strip()
+    ))
     filtered_df = pca_df[pca_df['key'].isin(valid_set)].drop('key', axis=1)
-    
-    # 保存过滤结果
     filtered_df.to_csv(output_pca_file, sep=' ', header=False, index=False)
-    logger.info(f"过滤后PCA保存到：{output_pca_file}（共{len(filtered_df)}个样本）")
+    logger.info(f"过滤后PCA保存到：{output_pca_file}，共{len(filtered_df)}个样本")
 
 def extract_pca_covariates(pca_file: str, output_cov_file: str) -> None:
-    """
-    提取PCA协变量 - 严格对应shell命令：cut -d ' ' -f 3- $filtered_pca > $cov_file
-    """
-    logger.info(f"提取PCA协变量（跳过前2列）：{pca_file}")
-    pca_df = pd.read_csv(pca_file, sep='\s+', header=None)
-    cov_df = pca_df.iloc[:, 2:]  # 跳过FID/IID列（前2列）
+    """提取PCA协变量（仅保留主成分数值）"""
+    pca_df = pd.read_csv(pca_file, sep=r'\s+', header=None)
+    cov_df = pca_df.iloc[:, 2:]  # 跳过前2列（FID/IID）
     cov_df.to_csv(output_cov_file, sep=' ', header=False, index=False)
-    logger.info(f"协变量文件保存到：{output_cov_file}（共{cov_df.shape[1]}个主成分）")
+    logger.info(f"PCA协变量保存到：{output_cov_file}，共{cov_df.shape[1]}个主成分")
 
-def calculate_kinship_matrix(genotype_prefix: str, phenotype_file: str, output_prefix: str) -> str:
-    """
-    计算Kinship矩阵 - 严格对应shell命令：gemma -bfile input -p phenotype -gk 1 -o output
-    """
-    # 注意：GEMMA会将 -o 参数当作“文件名”，并固定写到当前工作目录下的 output/ 目录，
-    # 因此这里必须只传递“basename”，不能包含路径，否则会出现
-    #   error writing file: ./output//path/to/xxx_kinship.cXX.txt
-    # 这样的报错。
+def calculate_kinship_matrix(genotype_prefix: str, output_prefix: str) -> str:
+    """计算亲缘关系矩阵（移除-p参数）"""
     base_prefix = Path(output_prefix).name
     kinship_prefix = f"{base_prefix}_kinship"
     cmd = [
         gemma_executable,
         "-bfile", genotype_prefix,
-        "-p", phenotype_file,
-        "-gk", "1",            # 固定参数，匹配shell
+        "-gk", "1",
         "-o", kinship_prefix
     ]
-    run_shell_command(cmd, "GEMMA Kinship矩阵计算")
+    run_shell_command(cmd, "亲缘矩阵计算")
     
-    # 返回kinship文件路径（GEMMA默认输出到当前工作目录下的output目录）
-    # 使用绝对路径，确保无论工作目录如何切换都能找到文件
+    # 返回kinship文件路径
     kinship_file = Path("output") / f"{kinship_prefix}.cXX.txt"
     if not kinship_file.exists():
-        raise FileNotFoundError(f"Kinship矩阵文件未生成：{kinship_file.absolute()}")
-    # 返回绝对路径，确保调用方可以正确使用
+        raise FileNotFoundError(f"亲缘矩阵文件未生成：{kinship_file}")
     return kinship_file.absolute().as_posix()
 
-def run_gemma_gwas(genotype_prefix: str, phenotype_file: str, kinship_file: str, 
-                   cov_file: str, output_prefix: str) -> None:
-    """
-    运行GWAS分析 - 严格对应shell命令：gemma -bfile input -p phenotype -k kinship -c cov -lmm 1 -o output
-    """
-    # 同 kinship，一样只使用 basename 作为 -o 前缀，避免在 output/ 目录下再嵌套路径
+def run_gemma_gwas(genotype_prefix: str, kinship_file: str, cov_file: str, output_prefix: str) -> None:
+    """运行GWAS分析（移除-p参数）"""
+    # 使用与亲缘矩阵相同的策略：仅使用前缀的 basename，避免在 GEMMA 的 -o 参数中出现绝对路径
+    # 注意：GEMMA 的 -o 参数是相对于当前工作目录的，所以使用相对路径
+    # GEMMA 会在当前工作目录下创建 output/ 目录，并在其中生成结果文件
     base_prefix = Path(output_prefix).name
     gwas_prefix = f"{base_prefix}_gwas"
+    
+    # 记录当前工作目录，用于调试
+    current_dir = os.getcwd()
+    logger.info(f"GWAS执行目录（当前工作目录）：{current_dir}")
+    logger.info(f"GWAS输出前缀（相对路径）：{gwas_prefix}（将在 {current_dir}/output/ 下生成结果文件）")
+    
     cmd = [
         gemma_executable,
         "-bfile", genotype_prefix,
-        "-p", phenotype_file,
         "-k", kinship_file,
         "-c", cov_file,
-        "-lmm", "1",           # 固定参数，匹配shell
+        "-lmm", "4",
         "-o", gwas_prefix
     ]
-    run_shell_command(cmd, "GEMMA GWAS分析（LMM模型）")
+    run_shell_command(cmd, "GWAS关联分析")
+    
+    # 验证结果文件是否生成
+    expected_result_file = Path(current_dir) / "output" / f"{gwas_prefix}.assoc.txt"
+    if expected_result_file.exists():
+        logger.info(f"GWAS结果文件已生成：{expected_result_file}")
+    else:
+        logger.warning(f"GWAS结果文件未找到（可能路径不同）：{expected_result_file}")
 
 def run_complete_gwas_pipeline(
-    input_plink_prefix: str,  # 固定输入：PLINK二进制文件前缀
-    phenotype_file: str,      # 固定输入：表型文件（两列：IID PHENO）
-    output_prefix: str        # 输出前缀
+    input_plink_prefix: str,
+    phenotype_file: str,
+    output_prefix: str,
+    perform_plink_qc: bool = True,
 ) -> None:
+    """完整GWAS流程
+    
+    Args:
+        input_plink_prefix: 输入PLINK前缀
+        phenotype_file: 表型文件路径（两列：IID PHENO）
+        output_prefix: 输出前缀（可包含路径）
+        perform_plink_qc: 是否在GWAS前执行PLINK质控（--maf 0.05, --geno 0.2）
     """
-    完整GWAS流程 - 严格按shell命令顺序执行，固定输入格式要求
-    """
-    # ======================== 输入验证 ========================
-    logger.info("\n【步骤0】验证输入文件格式")
+    # 输入校验
     validate_input_files(input_plink_prefix)
-    if not Path(phenotype_file).exists():
-        raise FileNotFoundError(f"表型文件不存在：{phenotype_file}")
-    logger.info(f"表型文件验证通过：{phenotype_file}")
+    # 读取表型文件（自动取前两列+打印前5行）
+    pheno_df = validate_phenotype_file(phenotype_file)
     
-    # ======================== 流程执行（严格对应shell命令顺序）========================
-    # 步骤1：PLINK质控
-    clean_geno_prefix = f"{output_prefix}_clean_geno"
-    plink_quality_control(input_plink_prefix, clean_geno_prefix)
+    # 1. PLINK质控（可选）
+    if perform_plink_qc:
+        clean_geno_prefix = f"{output_prefix}_clean_geno"
+        plink_quality_control(input_plink_prefix, clean_geno_prefix)
+    else:
+        logger.info("跳过GWAS阶段的PLINK质控（根据上游参数设置）")
+        clean_geno_prefix = input_plink_prefix
     
-    # 步骤2：匹配表型到FAM文件
+    # 2. 表型匹配到FAM（使用预处理的表型数据）
     clean_fam_file = f"{clean_geno_prefix}.fam"
-    merge_phenotype_to_fam(phenotype_file, clean_fam_file)
+    merge_phenotype_to_fam(pheno_df, clean_fam_file)
     
-    # 步骤3：计算PCA
+    # 3. 计算PCA
     pca_prefix = f"{output_prefix}_geno_pca"
     calculate_pca(clean_geno_prefix, pca_prefix)
     
-    # 步骤4：筛选有效表型样本
+    # 4. 筛选有效样本
     valid_sample_file = f"{output_prefix}_valid_samples.txt"
     filter_valid_samples(clean_fam_file, valid_sample_file)
     
-    # 步骤5：过滤PLINK样本
+    # 5. 过滤PLINK样本
     filtered_geno_prefix = f"{output_prefix}_clean_geno_filtered"
     filter_plink_samples(clean_geno_prefix, valid_sample_file, filtered_geno_prefix)
     
-    # 步骤6：过滤PCA结果
+    # 6. 过滤PCA（从过滤后样本提取协变量）
     pca_eigenvec_file = f"{pca_prefix}.eigenvec"
     filtered_pca_file = f"{output_prefix}_geno_pca_filtered.eigenvec"
     filter_pca_by_samples(pca_eigenvec_file, valid_sample_file, filtered_pca_file)
     
-    # 步骤7：提取PCA协变量
+    # 7. 提取PCA协变量
     cov_file = f"{output_prefix}_covariates_filtered.txt"
     extract_pca_covariates(filtered_pca_file, cov_file)
     
-    # 步骤8：计算Kinship矩阵
-    kinship_file = calculate_kinship_matrix(filtered_geno_prefix, phenotype_file, output_prefix)
+    # 8. 计算亲缘矩阵（无-p参数）
+    kinship_file = calculate_kinship_matrix(filtered_geno_prefix, output_prefix)
     
-    # 步骤9：运行GWAS分析
-    run_gemma_gwas(filtered_geno_prefix, phenotype_file, kinship_file, cov_file, output_prefix)
+    # 9. 运行GWAS（无-p参数）
+    run_gemma_gwas(filtered_geno_prefix, kinship_file, cov_file, output_prefix)
     
-    # ======================== 完成 ========================
-    logger.info("\n" + "="*80)
-    logger.info("GWAS流程全部完成！")
-    logger.info(f"核心输出文件：")
-    logger.info(f"  - GWAS结果：output/{output_prefix}_gwas.assoc.txt")
-    logger.info(f"  - Kinship矩阵：{kinship_file}")
-    logger.info(f"  - 协变量文件：{cov_file}")
-    logger.info("="*80)
+    logger.info("GWAS流程执行完成！")
 
 if __name__ == "__main__":
-    # 防止直接运行该模块，提示需通过model train调用
-    logger.error("该模块不可独立运行，请通过model train模块调用！")
-    sys.exit(1)
+    # 基础调用逻辑
+    if len(sys.argv) != 4:
+        print("使用方式：python gwas_module.py <输入PLINK前缀> <表型文件> <输出前缀>")
+        sys.exit(1)
+    
+    try:
+        input_plink_prefix = sys.argv[1]
+        phenotype_file = sys.argv[2]
+        output_prefix = sys.argv[3]
+        run_complete_gwas_pipeline(input_plink_prefix, phenotype_file, output_prefix)
+    except Exception as e:
+        logger.error(f"流程执行失败：{str(e)}")
+        sys.exit(1)

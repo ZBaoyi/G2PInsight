@@ -41,12 +41,12 @@
   - 内置5折交叉验证
   - 超参数自动优化（RandomizedSearchCV）
   - 特征重要性计算与排序
-  - GWAS特征筛选（基于GEMMA）
-  - LD过滤（基于PLINK）
+  - GWAS特征筛选
+  - LD过滤
   - 综合特征筛选（GWAS + LD）
 
 ### 3. Result Visualization
-- **功能**：生成 publication 级别的全基因组特征重要性散点图
+- **功能**：生成全基因组特征重要性散点图
 - **图表类型**：全基因组特征重要性散点图（Manhattan-style scatter plot）
 - **核心特性**：
   - 静态（PNG）和交互式（HTML）输出
@@ -58,7 +58,13 @@
 
 ## Installation Guide ##
 ### System Requirements
-- Python 3.8-3.11 (64-bit)
+- Python 3.8-3.12 (64-bit)  
+  **重要：请在安装前确认当前环境的 Python 版本在 3.8 到 3.12 之间。**
+  - 可用命令检查：
+    - `python --version` 或 `python3 --version`
+  - 如果版本不在此范围内，建议创建单独的 conda 环境，例如：
+    - `conda create -n assoG2P-env python=3.10`
+    - `conda activate assoG2P-env`
 - Linux/macOS: Bash shell
 
 ### Quick Install
@@ -88,6 +94,51 @@ conda activate bioenv
 ```
 
 然后可以使用PLINK等工具进行基因型数据的筛选、过滤、质量控制。
+
+### Whl Package Installation
+推荐使用whl包进行安装，这是最简单快捷的安装方式。
+
+#### 下载whl包
+whl包可以从以下位置获取：
+- **项目仓库**：从GitHub仓库的`dist/`目录下载whl文件
+  - 访问：`https://github.com/chenrf0407/G2O_tool/tree/master/dist/`
+  - 下载文件：`assoG2P-1.0.0-py3-none-any.whl`
+- **本地构建**：如果已克隆项目，whl文件位于项目根目录的`dist/`目录下
+- **文件名格式**：`assoG2P-1.0.0-py3-none-any.whl`
+
+#### 安装whl包
+**步骤1：下载whl文件**
+```bash
+# 方法1：从GitHub仓库下载（需要手动下载）
+# 访问 https://github.com/chenrf0407/G2O_tool/tree/master/dist/
+# 下载 assoG2P-1.0.0-py3-none-any.whl 文件
+
+# 方法2：如果已克隆项目，whl文件在dist目录下
+cd /path/to/assoG2P
+ls dist/  # 查看whl文件
+```
+
+**步骤2：安装whl包**
+```bash
+# 激活conda环境
+conda activate bioenv
+
+# 进入whl文件所在目录，或使用完整路径
+cd /path/to/whl/file
+
+# 安装whl包（推荐方式）
+pip install assoG2P-1.0.0-py3-none-any.whl
+
+# 也可以直接指定whl文件的完整路径
+pip install /path/to/assoG2P-1.0.0-py3-none-any.whl
+```
+
+**安装成功提示**：
+```bash
+Installing collected packages: assoG2P
+Successfully installed assoG2P-1.0.0
+```
+
 ### Alternative Installation (Source Code)
 如果whl包不可用，可以从源码安装：
 ```bash
@@ -104,17 +155,136 @@ association --version
 ```
 
 ### 常见安装问题
+**Q: 如何选择安装方式？**
+- **推荐**：使用whl包安装（最简单快捷）
+- **备选**：从源码安装（需要编译，可能较慢）
+
 **Q: 安装时出现权限问题**
 ```bash
-# Linux/macOS添加sudo前缀
-sudo pip install assog2p-1.0.0-py3-none-any.whl
+# 方法1：使用用户安装模式（推荐）
+pip install --user assoG2P-1.0.0-py3-none-any.whl
+
+# 方法2：Linux/macOS添加sudo前缀
+sudo pip install assoG2P-1.0.0-py3-none-any.whl
+
+# 方法3：在conda环境中安装（无需sudo）
+conda activate bioenv
+pip install assoG2P-1.0.0-py3-none-any.whl
 ```
 
 **Q: 如何验证安装成功？**
 安装成功后，会显示以下信息：
 ```bash
-Installing collected packages : assog2p
-Successfully installed assog2p-1.0.0
+Installing collected packages: assoG2P
+Successfully installed assoG2P-1.0.0
+```
+
+然后验证安装：
+```bash
+# 检查版本
+association --version
+# 应显示：assoG2P 1.0.0
+
+# 查看帮助信息
+association -h
+```
+
+**Q: whl包在哪里下载？**
+- **注意**：本项目尚未发布到PyPI，无法通过`pip install assoG2P`直接安装
+- 从项目GitHub仓库的`dist/`目录下载：`https://github.com/chenrf0407/G2O_tool/tree/master/dist/`
+- 或从项目本地`dist/`目录获取（如果已克隆项目）
+- whl文件名格式：`assoG2P-{version}-py3-none-any.whl`
+- 下载后需要先保存到本地，然后使用`pip install`命令安装本地whl文件
+
+**Q: 安装whl包时出现"Preparing metadata (pyproject.toml) ... error"或CMake版本错误**
+这是依赖包（如xgboost）需要从源码编译，但CMake版本过低导致的。解决方法：
+
+```bash
+# 方法1：升级CMake（推荐）
+# 在conda环境中升级CMake
+conda activate bioenv
+conda install cmake>=3.18 -c conda-forge
+
+# 然后重新安装whl包
+pip install assoG2P-1.0.0-py3-none-any.whl
+```
+
+```bash
+# 方法2：使用预编译的依赖包（如果CMake无法升级）
+# 先单独安装预编译的xgboost和其他依赖
+conda activate bioenv
+pip install --prefer-binary xgboost lightgbm catboost
+
+# 然后安装whl包（跳过已安装的依赖）
+pip install --no-deps assoG2P-1.0.0-py3-none-any.whl
+
+# 最后安装其他缺失的依赖（如果有）
+pip install numpy pandas scikit-learn matplotlib plotly kaleido seaborn shap numba
+```
+
+```bash
+# 方法3：使用conda安装依赖（推荐在conda环境中使用）
+conda activate bioenv
+conda install -c conda-forge xgboost lightgbm catboost numpy pandas scikit-learn matplotlib plotly seaborn
+
+# 然后安装whl包（跳过依赖安装）
+pip install --no-deps assoG2P-1.0.0-py3-none-any.whl
+
+# 安装其他pip-only的依赖
+pip install kaleido shap numba
+```
+
+**错误信息示例**：
+```
+CMake Error: CMake 3.18 or higher is required. You are running version 3.16.9
+```
+如果看到类似错误，请使用上述方法之一解决。
+
+```bash
+# 方法4：清除pip缓存后重试（如果上述方法都失败）
+# 有时pip缓存中的损坏文件会导致编译问题
+conda activate bioenv
+pip cache purge  # 清除所有pip缓存
+pip install assoG2P-1.0.0-py3-none-any.whl
+```
+
+```bash
+# 方法5：创建新的conda环境重新安装（推荐用于解决复杂编译问题）
+# 确保使用符合要求的Python版本（3.8-3.12）
+conda create -n assoG2P-new python=3.10  # 使用3.10作为示例，可根据需要选择3.8-3.12
+conda activate assoG2P-new
+
+# 安装CMake和构建工具
+conda install cmake>=3.18 -c conda-forge
+conda install -c conda-forge xgboost lightgbm catboost numpy pandas scikit-learn matplotlib plotly seaborn
+
+# 安装whl包
+pip install assoG2P-1.0.0-py3-none-any.whl
+
+# 安装其他pip-only的依赖
+pip install kaleido shap numba
+
+# 验证安装
+association --version
+```
+
+**如果遇到编译器相关错误（如GCC版本不兼容、编译超时等）**：
+1. 首先尝试清除pip缓存：`pip cache purge`
+2. 如果问题持续，建议创建新的conda环境，使用符合要求的Python版本（3.8-3.12）重新安装
+3. 新环境可以避免旧环境的依赖冲突和缓存问题
+
+**Q: 安装后找不到`association`命令**
+```bash
+# 确保已激活conda环境
+conda activate bioenv
+
+# 检查Python路径
+which python
+which pip
+
+# 如果使用--user安装，确保PATH包含用户site-packages目录
+# Linux: ~/.local/bin
+# macOS: ~/Library/Python/{version}/bin
 ```
 
 安装完成后，`association` 命令会在当前环境中注册。运行 `association -h` 查看使用帮助。
@@ -324,7 +494,7 @@ association train -i preprocessed/train_data_metadata.json -m LightGBM -f 4 -o r
 
 
 ### 3. Result Visualization ###
-**功能**：生成高质量全基因组特征重要性散点图，支持 publication 级图片输出
+**功能**：生成高质量全基因组特征重要性散点图，支持图片输出
 
 **图表类型**：
 - **散点图（Scatter Plot）**：全基因组特征重要性分布图，类似曼哈顿图风格
@@ -622,10 +792,83 @@ association visualize -i rice_results/LightGBM/feature_importance.txt -o manhatt
 ### 常见问题与解决方案
 
 #### 1. 安装问题
+**Q: 安装whl包时出现"Preparing metadata (pyproject.toml) ... error"或CMake版本错误**
+这是依赖包（如xgboost）需要从源码编译，但CMake版本过低导致的。解决方法：
+
+```bash
+# 方法1：升级CMake（推荐）
+conda activate bioenv
+conda install cmake>=3.18 -c conda-forge
+pip install assoG2P-1.0.0-py3-none-any.whl
+```
+
+```bash
+# 方法2：使用预编译的依赖包
+conda activate bioenv
+pip install --prefer-binary xgboost lightgbm catboost
+pip install --no-deps assoG2P-1.0.0-py3-none-any.whl
+pip install numpy pandas scikit-learn matplotlib plotly kaleido seaborn shap numba
+```
+
+```bash
+# 方法3：使用conda安装依赖（推荐）
+conda activate bioenv
+conda install -c conda-forge xgboost lightgbm catboost numpy pandas scikit-learn matplotlib plotly seaborn
+pip install --no-deps assoG2P-1.0.0-py3-none-any.whl
+pip install kaleido shap numba
+```
+
+```bash
+# 方法4：清除pip缓存后重试（如果上述方法都失败）
+# 有时pip缓存中的损坏文件会导致编译问题
+conda activate bioenv
+pip cache purge  # 清除所有pip缓存
+pip install assoG2P-1.0.0-py3-none-any.whl
+```
+
+```bash
+# 方法5：创建新的conda环境重新安装（推荐用于解决复杂编译问题）
+# 确保使用符合要求的Python版本（3.8-3.12）
+conda create -n assoG2P-new python=3.10  # 使用3.10作为示例，可根据需要选择3.8-3.12
+conda activate assoG2P-new
+
+# 安装CMake和构建工具
+conda install cmake>=3.18 -c conda-forge
+conda install -c conda-forge xgboost lightgbm catboost numpy pandas scikit-learn matplotlib plotly seaborn
+
+# 安装whl包
+pip install assoG2P-1.0.0-py3-none-any.whl
+
+# 安装其他pip-only的依赖
+pip install kaleido shap numba
+
+# 验证安装
+association --version
+```
+
 **Q: 安装lightgbm时出现编译错误**
 ```bash
 # 解决方案：安装预编译版本
 pip install --prefer-binary lightgbm
+```
+
+**Q: 安装xgboost时出现CMake错误**
+```bash
+# 解决方案1：升级CMake
+conda install cmake>=3.18 -c conda-forge
+
+# 解决方案2：使用预编译版本
+pip install --prefer-binary xgboost
+
+# 解决方案3：清除pip缓存后重试
+pip cache purge
+pip install --prefer-binary xgboost
+
+# 解决方案4：创建新环境重新安装（如果问题持续）
+conda create -n assoG2P-new python=3.10
+conda activate assoG2P-new
+conda install cmake>=3.18 -c conda-forge
+pip install --prefer-binary xgboost
 ```
 
 #### 2. 运行时错误
