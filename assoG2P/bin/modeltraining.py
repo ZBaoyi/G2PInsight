@@ -24,6 +24,7 @@ warnings.filterwarnings('ignore')
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import KFold, StratifiedKFold, RandomizedSearchCV
+from sklearn.inspection import permutation_importance
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score, roc_auc_score,
     mean_squared_error, mean_absolute_error, r2_score
@@ -198,19 +199,9 @@ def load_preprocess_metadata(metadata_file: str) -> Dict:
     if missing_fields:
         raise ValueError(f"元数据缺失关键信息: {', '.join(missing_fields)}")
     
-    # 验证GWAS PLINK文件完整性（不抛出异常，仅记录警告，由调用方处理）
-    gwas_prefix = metadata.get("gwas_genotype_prefix")
-    if gwas_prefix:
-        required_plink = [f"{gwas_prefix}.bed", f"{gwas_prefix}.bim", f"{gwas_prefix}.fam"]
-        missing_plink = [f for f in required_plink if not Path(f).exists()]
-        if missing_plink:
-            logger.warning(f"GWAS PLINK files from metadata do not exist: {gwas_prefix}")
-            logger.warning(f"Missing files: {', '.join(missing_plink)}")
-            # 将gwas_genotype_prefix设为None，表示文件不存在
-            metadata["gwas_genotype_prefix"] = None
-            metadata["_gwas_genotype_prefix_missing"] = True
-        else:
-            logger.debug(f"GWAS PLINK files from metadata validated: {gwas_prefix}")
+    # 以前这里会验证 gwas_genotype_prefix 对应的 PLINK 文件是否存在，并在缺失时输出 warning。
+    # 目前 model training 阶段不再依赖这些中间 PLINK 文件，为避免干扰用户，这里不再做存在性检查。
+    # 如需使用 GWAS/LD 相关的 PLINK 输出，请在对应模块中单独验证路径。
     
     logger.debug(f"Loaded metadata: {len(metadata['valid_samples']):,} samples")
     return metadata
@@ -1024,11 +1015,47 @@ def calculate_feature_importance(
                 if hasattr(model, 'coef_'):
                     importances = np.abs(model.coef_[0])
                 else:
-                    logger.warning("  SVM model does not support feature importance calculation (non-linear kernel)")
-                    return pd.DataFrame()
+                    # 线性核但没有coef_，尝试使用permutation importance
+                    logger.info("  SVM linear kernel: using permutation importance as fallback")
+                    try:
+                        # 使用较小的样本集以加快计算
+                        n_samples = min(1000, len(X_train))
+                        X_sample = X_train.sample(n=n_samples, random_state=42) if len(X_train) > n_samples else X_train
+                        y_sample = y_train.loc[X_sample.index] if len(X_train) > n_samples else y_train
+                        
+                        scoring = 'roc_auc' if task_type == 'classification' else 'r2'
+                        perm_result = permutation_importance(
+                            model, X_sample, y_sample, 
+                            n_repeats=10, 
+                            random_state=42,
+                            scoring=scoring,
+                            n_jobs=1
+                        )
+                        importances = perm_result.importances_mean
+                    except Exception as e:
+                        logger.warning(f"  SVM permutation importance calculation failed: {str(e)}")
+                        return pd.DataFrame()
             else:
-                logger.warning("  SVM model does not support feature importance calculation (non-linear kernel)")
-                return pd.DataFrame()
+                # 非线性核SVM：使用permutation importance
+                logger.info("  SVM non-linear kernel: using permutation importance")
+                try:
+                    # 使用较小的样本集以加快计算
+                    n_samples = min(1000, len(X_train))
+                    X_sample = X_train.sample(n=n_samples, random_state=42) if len(X_train) > n_samples else X_train
+                    y_sample = y_train.loc[X_sample.index] if len(X_train) > n_samples else y_train
+                    
+                    scoring = 'roc_auc' if task_type == 'classification' else 'r2'
+                    perm_result = permutation_importance(
+                        model, X_sample, y_sample, 
+                        n_repeats=10, 
+                        random_state=42,
+                        scoring=scoring,
+                        n_jobs=1
+                    )
+                    importances = perm_result.importances_mean
+                except Exception as e:
+                    logger.warning(f"  SVM permutation importance calculation failed: {str(e)}")
+                    return pd.DataFrame()
         
         else:
             logger.warning(f"  {model_type} model does not support feature importance calculation")
@@ -1036,13 +1063,23 @@ def calculate_feature_importance(
         
         # 获取原始值（带正负号）用于计算正负效应
         original_values = None
-        if model_type in ["Logistic", "SVM"]:
+        if model_type == "Logistic":
             # 线性模型：使用原始系数
             if hasattr(model, 'coef_'):
                 if task_type == "classification":
                     original_values = model.coef_.mean(axis=0)
                 else:
                     original_values = model.coef_[0]
+        elif model_type == "SVM":
+            # SVM：如果是线性核且有coef_，使用原始系数；否则使用permutation importance（都是正值）
+            if hasattr(model, 'kernel') and model.kernel == 'linear' and hasattr(model, 'coef_'):
+                if task_type == "classification":
+                    original_values = model.coef_.mean(axis=0) if len(model.coef_.shape) > 1 else model.coef_[0]
+                else:
+                    original_values = model.coef_[0]
+            else:
+                # 非线性核或使用permutation importance：都是正值，正负效应设为1
+                original_values = importances
         elif model_type in ["LightGBM", "XGBoost", "CatBoost", "RandomForest"]:
             # 树模型：特征重要性通常是正数，正负效应设为1（正）
             original_values = importances  # 树模型的重要性都是正数
@@ -1251,8 +1288,34 @@ def filter_phenotype_from_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     :return: 过滤后的DataFrame
     """
     phenotype_cols = [col for col in df.columns if 'phenotype' in str(col).lower()]
+    # 兜底清理：剔除 preprocess/拼接过程中引入的 index/index.N 伪特征列
+    # 典型来源：多染色体拼接时重复列名，read_csv 会自动改名为 index.1/index.2/...
+    import re
+    index_artifact_cols = [
+        col for col in df.columns
+        if re.match(r'^index(\.\d+)?$', str(col), flags=re.IGNORECASE)
+    ]
+
+    drop_cols = []
     if phenotype_cols:
-        return df.drop(columns=phenotype_cols)
+        drop_cols.extend(phenotype_cols)
+    if index_artifact_cols:
+        drop_cols.extend(index_artifact_cols)
+
+    if drop_cols:
+        # 去重保持顺序
+        seen = set()
+        drop_cols_unique = []
+        for c in drop_cols:
+            if c not in seen:
+                seen.add(c)
+                drop_cols_unique.append(c)
+        if index_artifact_cols:
+            logger.warning(
+                f"Detected and removed index artifact columns from features: {index_artifact_cols[:5]}"
+                f"{'...' if len(index_artifact_cols) > 5 else ''}"
+            )
+        return df.drop(columns=drop_cols_unique, errors='ignore')
     return df
 
 # ======================== 可视化函数 ========================
@@ -2169,14 +2232,28 @@ def run_single_model(
     # 特征重要性计算参数（可选）
     calculate_feature_importance: bool = False,
     # 图表质量参数
-    publication_quality: bool = True
+    publication_quality: bool = True,
+    # 预加载的训练数据（可选，用于train-all中避免重复读取文件）
+    preloaded_data: Optional[Dict[str, Any]] = None,
 ) -> int:
     """
     单模型训练主函数
     说明：
     - GWAS / LD / GWAS+LD 综合过滤逻辑已经前移到 preprocess 模块
     - 训练阶段使用 preprocess 已筛选的特征，不再执行额外的特征筛选
+    - 本函数支持两种数据获取方式：
+        1) 通过 input_path 解析并读取训练文件（默认行为）
+        2) 通过 preloaded_data 直接使用预加载的训练数据（用于 train-all，避免重复读盘）
+    - 交叉验证流程调整为：先在全数据上进行一次随机搜索得到最佳超参数，再使用固定超参数做 n_folds 折交叉验证评估，不在每一折里重复做超参搜索
     """
+    # 强制要求使用 preprocess 生成的 metadata.json 作为训练入口，避免 txt 直读导致样本/任务类型/临时目录等信息不完整
+    if not str(input_path).endswith("_metadata.json"):
+        raise ValueError(
+            "训练输入必须为 preprocess 生成的元数据文件（*_metadata.json）。"
+            f"当前输入: {input_path}"
+        )
+    # 保存对calculate_feature_importance函数的引用，避免与参数名冲突
+    _calculate_feature_importance_func = globals()['calculate_feature_importance']
     start_time = time.time()
     output_dir_path = Path(output_dir)
     output_dir_path.mkdir(parents=True, exist_ok=True)
@@ -2199,109 +2276,154 @@ def run_single_model(
     preprocess_tmp_dir = None
 
     try:
-        # Step 1: 解析输入路径（核心衔接preprocess）
-        input_info = parse_train_input_path(input_path)
-        train_file = input_info["train_file"]
-        valid_samples = input_info["metadata"]["valid_samples"] if input_info["metadata"] else None
-        
-        # 如果元数据里带有 preprocess_tmp_dir（tmp_p目录），则记录（但不清理，preprocess模块执行完毕不删除）
-        if input_info["preprocess_tmp_dir"]:
-            preprocess_tmp_dir = Path(input_info["preprocess_tmp_dir"]).absolute()
-            _temp_file_manager.register_preprocess_tmp_dir(preprocess_tmp_dir)
+        # Step 1: 获取训练数据和任务类型
+        if preloaded_data is not None:
+            # 来自 train-all 预加载的数据
+            X = preloaded_data["X"]
+            y = preloaded_data["y"]
+            # 预处理阶段的临时目录（如果存在）
+            if preloaded_data.get("preprocess_tmp_dir"):
+                preprocess_tmp_dir = Path(preloaded_data["preprocess_tmp_dir"]).absolute()
+                _temp_file_manager.register_preprocess_tmp_dir(preprocess_tmp_dir)
+            # 若未显式指定 task_type，优先使用预加载中的任务类型
+            def infer_task_type_from_y(series: pd.Series) -> str:
+                values = series.values
+                unique_vals = np.unique(values)
+                is_all_int = np.all(values == np.round(values))
+                if len(unique_vals) <= 10 and is_all_int:
+                    return "classification"
+                return "regression"
 
-        # Step 2: 加载训练数据
-        logger.debug("Loading training data...")
-        X, y, snp_name_mapping = load_training_data(train_file, valid_samples)
-        logger.info(f"Dataset: {X.shape[0]:,} samples, {X.shape[1]:,} features")
-
-        # 若未提供task_type，则基于表型推断（规则与preprocess一致）
-        def infer_task_type_from_y(series: pd.Series) -> str:
-            values = series.values
-            unique_vals = np.unique(values)
-            is_all_int = np.all(values == np.round(values))
-            if len(unique_vals) <= 10 and is_all_int:
-                return "classification"
-            return "regression"
-
-        if task_type is None:
-            task_type = infer_task_type_from_y(y)
-            logger.info(f"Task type: {task_type}")
-        
-        # 初始化交叉验证
-        if task_type == "classification":
-            kf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
-            splits = list(kf.split(X, y))
+            if task_type is None:
+                task_type = preloaded_data.get("task_type") or infer_task_type_from_y(y)
+                logger.info(f"Task type: {task_type}")
         else:
-            kf = KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
-            splits = list(kf.split(X, y))
-        
-        logger.info(f"Starting {n_folds}-fold cross-validation")
+            # 通过 input_path 解析元数据并读取训练文件
+            input_info = parse_train_input_path(input_path)
+            train_file = input_info["train_file"]
+            valid_samples = input_info["metadata"]["valid_samples"] if input_info["metadata"] else None
+
+            # 如果元数据里带有 preprocess_tmp_dir（tmp_p目录），则记录（但不清理，preprocess模块执行完毕不删除）
+            if input_info["preprocess_tmp_dir"]:
+                preprocess_tmp_dir = Path(input_info["preprocess_tmp_dir"]).absolute()
+                _temp_file_manager.register_preprocess_tmp_dir(preprocess_tmp_dir)
+
+            # 加载训练数据
+            logger.debug("Loading training data...")
+            X, y, snp_name_mapping = load_training_data(train_file, valid_samples)
+
+            # 若未提供task_type，则基于表型推断（规则与preprocess一致）
+            def infer_task_type_from_y(series: pd.Series) -> str:
+                values = series.values
+                unique_vals = np.unique(values)
+                is_all_int = np.all(values == np.round(values))
+                if len(unique_vals) <= 10 and is_all_int:
+                    return "classification"
+                return "regression"
+
+            if task_type is None:
+                task_type = infer_task_type_from_y(y)
+                logger.info(f"Task type: {task_type}")
+
+        logger.info(f"Dataset: {X.shape[0]:,} samples, {X.shape[1]:,} features")
 
         # 使用全部特征（preprocess 已完成所需的特征筛选）
         X_filtered = X
 
-        # 5折交叉验证：使用进程池并行执行每一折
+        # Step 2: 先在全数据上进行一次随机搜索，确定最佳超参数（内部自带交叉验证）
+        logger.info("Starting hyperparameter search (RandomizedSearchCV)...")
+        param_grid = get_param_grid(model_type, task_type)
+        # 使用与外层相同的折数进行搜索，避免过度计算
+        best_model = perform_grid_search(
+            model_type=model_type,
+            task_type=task_type,
+            X_train=X_filtered,
+            y_train=y,
+            param_grid=param_grid,
+            n_iter=30,      # 适度的搜索次数
+            cv=n_folds,     # 与外层评估折数保持一致
+            random_state=random_state
+        )
+        best_params = best_model.get_params()
+        logger.info("Hyperparameter search completed, starting cross-validation with fixed best parameters")
+
+        # Step 3: 使用固定超参数做 n_folds 折交叉验证评估（不再在每一折内部重复做随机搜索）
+        if task_type == "classification":
+            kf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+            splits = list(kf.split(X_filtered, y))
+        else:
+            kf = KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+            splits = list(kf.split(X_filtered, y))
+
+        logger.info(f"Starting {n_folds}-fold cross-validation with fixed hyperparameters")
+
         cv_fold_metrics = []
         all_y_test = []
         all_y_pred = []
         all_y_prob = []
 
-        # 修复：在多进程环境中，确保DataFrame/Series可以被正确序列化
-        # 如果DataFrame/Series太大，序列化可能会很慢，但通常不会出错
-        # 为了安全起见，添加错误处理
-        executor = ProcessPoolExecutor(max_workers=n_folds)
-        try:
-            futures = []
-            for fold_idx, (train_idx, val_idx) in enumerate(splits, 1):
-                # 修复：确保train_idx和val_idx是numpy数组（KFold返回的已经是numpy数组）
-                # 但为了安全起见，显式转换为numpy数组
-                train_idx = np.asarray(train_idx)
-                val_idx = np.asarray(val_idx)
-                
-                futures.append(
-                    executor.submit(
-                        _run_single_fold_cv,
-                        fold_idx,
-                        train_idx,
-                        val_idx,
-                        X_filtered,
-                        y,
-                        model_type,
-                        task_type,
-                        random_state
-                    )
-                )
+        for fold_idx, (train_idx, val_idx) in enumerate(splits, 1):
+            train_idx = np.asarray(train_idx)
+            val_idx = np.asarray(val_idx)
 
-            for future in futures:
-                try:
-                    fold_idx, fold_metrics, y_val_fold, y_pred_fold, y_prob_fold = future.result()
-                    cv_fold_metrics.append(fold_metrics)
-                except Exception as e:
-                    logger.error(f"  Fold {fold_idx} failed: {str(e)}", exc_info=True)
-                    # 如果某一折失败，记录错误但继续处理其他折
-                    # 添加一个空的metrics字典，避免后续计算平均指标时出错
-                    cv_fold_metrics.append({})
-                    continue
+            X_train_fold = X_filtered.iloc[train_idx].copy()
+            X_val_fold = X_filtered.iloc[val_idx].copy()
+            y_train_fold = y.iloc[train_idx].copy()
+            y_val_fold = y.iloc[val_idx].copy()
 
-                # 日志输出每折关键指标
-                if task_type == "regression":
-                    corr = fold_metrics.get("pearson_correlation", "N/A")
-                    logger.info(f"[{fold_idx}/{n_folds}] Pearson correlation: {corr}")
-                else:
-                    acc = fold_metrics.get("accuracy", "N/A")
-                    auc = fold_metrics.get("auc", "N/A")
-                    logger.info(f"[{fold_idx}/{n_folds}] Accuracy: {acc}, AUC: {auc}")
+            # 使用最佳超参数初始化模型（不做搜索，只做一次拟合）
+            model_fold = init_model(model_type, task_type, random_state=random_state)
+            try:
+                model_fold.set_params(**best_params)
+            except ValueError as e:
+                # 如果存在不兼容的参数（极少数情况），记录警告并继续使用默认参数
+                logger.warning(f"[Fold {fold_idx}] Failed to apply best_params to model: {e}")
 
-                all_y_test.append(y_val_fold)
-                all_y_pred.append(y_pred_fold)
-                if y_prob_fold is not None:
-                    all_y_prob.append(y_prob_fold)
-        finally:
-            # 显式关闭executor，确保所有资源被正确清理
-            executor.shutdown(wait=True)
+            y_pred_fold = None
+            y_prob_fold = None
+            try:
+                model_fold.fit(X_train_fold, y_train_fold)
+                y_pred_fold = model_fold.predict(X_val_fold)
+                if task_type == "classification":
+                    try:
+                        if hasattr(model_fold, "predict_proba"):
+                            y_prob_fold = model_fold.predict_proba(X_val_fold)
+                        elif hasattr(model_fold, "decision_function"):
+                            decision_scores = model_fold.decision_function(X_val_fold)
+                            from sklearn.utils.extmath import softmax
+                            if len(decision_scores.shape) == 1:
+                                prob_neg = 1 / (1 + np.exp(decision_scores))
+                                prob_pos = 1 - prob_neg
+                                y_prob_fold = np.column_stack([prob_neg, prob_pos])
+                            else:
+                                y_prob_fold = softmax(decision_scores)
+                    except Exception as e:
+                        logger.warning(f"[Fold {fold_idx}] Failed to obtain prediction probabilities: {str(e)}")
+            except Exception as e:
+                logger.error(f"[Fold {fold_idx}] Error during training/evaluation: {str(e)}", exc_info=True)
+                cv_fold_metrics.append({})
+                continue
+
+            fold_metrics = evaluate_model(y_val_fold, y_pred_fold, y_prob_fold, task_type)
+
+            # 日志输出每折关键指标
+            if task_type == "regression":
+                corr = fold_metrics.get("pearson_correlation", "N/A")
+                logger.info(f"[{fold_idx}/{n_folds}] Pearson correlation: {corr}")
+            else:
+                acc = fold_metrics.get("accuracy", "N/A")
+                auc = fold_metrics.get("auc", "N/A")
+                logger.info(f"[{fold_idx}/{n_folds}] Accuracy: {acc}, AUC: {auc}")
+
+            cv_fold_metrics.append(fold_metrics)
+            all_y_test.append(y_val_fold)
+            all_y_pred.append(y_pred_fold)
+            if y_prob_fold is not None:
+                all_y_prob.append(y_prob_fold)
+
         # 计算平均指标
         logger.info(f"{n_folds}-fold cross-validation average results:")
-        
+
         avg_metrics = {}
         if task_type == "regression":
             pearson_corrs = [m.get('pearson_correlation', 0) for m in cv_fold_metrics 
@@ -2400,7 +2522,7 @@ def run_single_model(
             logger.debug("Calculating feature importance...")
             feature_cols = filter_phenotype_columns(X_filtered.columns.tolist())
             
-            feature_importance_df = calculate_feature_importance(
+            feature_importance_df = _calculate_feature_importance_func(
                 model=final_model,
                 model_type=model_type,
                 feature_names=feature_cols,
@@ -2426,6 +2548,38 @@ def run_single_model(
             logger.info("SHAP values calculation completed")
         else:
             logger.warning("  SHAP values calculation failed or returned empty results")
+            # 如果SHAP值计算失败，使用feature importance作为替代
+            if feature_importance_df is not None and not feature_importance_df.empty:
+                logger.info("  Using feature importance as alternative to SHAP values")
+                # 将feature importance转换为SHAP格式
+                shap_df = feature_importance_df.copy()
+                shap_df = shap_df.rename(columns={'importance_abs': 'shap_abs'})
+                # 确保列顺序正确：feature, shap_abs, effect
+                shap_df = shap_df[['feature', 'shap_abs', 'effect']]
+                logger.info("  Feature importance converted to SHAP format as fallback")
+            else:
+                # 如果feature importance也没有计算，尝试计算它
+                logger.info("  Attempting to calculate feature importance as fallback for SHAP values")
+                feature_importance_fallback = _calculate_feature_importance_func(
+                    model=final_model,
+                    model_type=model_type,
+                    feature_names=feature_cols,
+                    X_train=X_filtered[feature_cols] if feature_cols else X_filtered,
+                    y_train=y,
+                    task_type=task_type
+                )
+                if not feature_importance_fallback.empty:
+                    logger.info("  Feature importance calculated successfully, using as SHAP alternative")
+                    # 将feature importance转换为SHAP格式
+                    shap_df = feature_importance_fallback.copy()
+                    shap_df = shap_df.rename(columns={'importance_abs': 'shap_abs'})
+                    # 确保列顺序正确：feature, shap_abs, effect
+                    shap_df = shap_df[['feature', 'shap_abs', 'effect']]
+                    # 同时更新feature_importance_df，以便后续保存
+                    if feature_importance_df is None:
+                        feature_importance_df = feature_importance_fallback
+                else:
+                    logger.warning("  Both SHAP values and feature importance calculation failed")
 
         # Step 11: 保存结果
         logger.debug("Saving results...")
@@ -2573,14 +2727,38 @@ def run_all_models(
     publication_quality: bool = True
 ) -> int:
     """训练所有支持的模型，并生成对比报告"""
-    # 首先解析输入路径，获取task_type默认值
+    # 强制要求使用 preprocess 生成的 metadata.json 作为训练入口
+    if not str(input_path).endswith("_metadata.json"):
+        raise ValueError(
+            "训练输入必须为 preprocess 生成的元数据文件（*_metadata.json）。"
+            f"当前输入: {input_path}"
+        )
+    # 首先解析输入路径，获取task_type默认值，并预先加载训练数据，避免每个模型子进程重复读盘
     input_info = parse_train_input_path(input_path)
     if task_type is None:
         task_type = input_info.get("task_type") or "regression"
         if not input_info.get("task_type"):
-            logger.warning(f"  task_type not specified and no task_type information in metadata, using default: regression")
+            logger.warning(
+                "  task_type not specified and no task_type information in metadata, using default: regression"
+            )
     else:
         pass
+
+    # 预先加载训练数据（在主进程中执行一次）
+    train_file = input_info["train_file"]
+    valid_samples = input_info["metadata"]["valid_samples"] if input_info["metadata"] else None
+    logger.debug("Pre-loading training data for all models...")
+    X, y, snp_name_mapping = load_training_data(train_file, valid_samples)
+
+    preloaded_data = {
+        "X": X,
+        "y": y,
+        "train_file": train_file,
+        "valid_samples": valid_samples,
+        "metadata": input_info["metadata"],
+        "preprocess_tmp_dir": input_info.get("preprocess_tmp_dir"),
+        "task_type": task_type,
+    }
     
     supported_models = ["LightGBM", "RandomForest", "XGBoost", "SVM", "CatBoost", "Logistic"]
     results = {}
@@ -2599,39 +2777,54 @@ def run_all_models(
         # 说明：
         # - 每个模型类型在一个独立的进程中调用 run_single_model 进行完整训练（含CV、特征重要性、SHAP等）
         # - 进程池大小根据模型个数和CPU核数自动设置，避免资源过载
-        import os
+        # - 为减少训练过程中的冗长日志输出，这里临时将日志级别提升到WARNING，仅在结束时输出性能汇总
         max_workers = len(supported_models)
         cpu_count = os.cpu_count() or max_workers
         max_workers = min(max_workers, cpu_count)
-        logger.info(f"Running all-models training in parallel: {len(supported_models)} models, max_workers={max_workers}")
-
+        
         from concurrent.futures import ProcessPoolExecutor
-
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = {}
-            for model_type in supported_models:
-                logger.info(f"[train-all] Submitting model training task: {model_type}")
-                future = executor.submit(
-                    run_single_model,
-                    input_path,
-                    model_type,
-                    output_dir,
-                    task_type,
-                    n_folds,
-                    random_state,
-                    calculate_feature_importance,
-                    publication_quality,
-                )
-                futures[future] = model_type
-
-            # 收集各模型的退出码
-            for future, model_type in futures.items():
-                try:
-                    ret_code = future.result()
-                except Exception as e:
-                    logger.error(f"[train-all] Model {model_type} training failed with exception: {e}", exc_info=True)
-                    ret_code = 1
-                results[model_type] = "成功" if ret_code == 0 else "失败"
+        
+        # 记录当前日志级别，并临时提高到WARNING，减少训练时的信息输出
+        import logging as _logging
+        root_logger = _logging.getLogger()
+        orig_root_level = root_logger.level
+        orig_module_level = logger.level
+        root_logger.setLevel(_logging.WARNING)
+        logger.setLevel(_logging.WARNING)
+        
+        try:
+            logger.info(f"Running all-models training in parallel: {len(supported_models)} models, max_workers={max_workers}")
+            
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                futures = {}
+                for model_type in supported_models:
+                    # 提交子任务（子进程会继承当前较高的日志级别，从而抑制详细日志）
+                    future = executor.submit(
+                        run_single_model,
+                        input_path,
+                        model_type,
+                        output_dir,
+                        task_type,
+                        n_folds,
+                        random_state,
+                        calculate_feature_importance,
+                        publication_quality,
+                        preloaded_data,
+                    )
+                    futures[future] = model_type
+                
+                # 收集各模型的退出码
+                for future, model_type in futures.items():
+                    try:
+                        ret_code = future.result()
+                    except Exception as e:
+                        logger.error(f"[train-all] Model {model_type} training failed with exception: {e}", exc_info=True)
+                        ret_code = 1
+                    results[model_type] = "成功" if ret_code == 0 else "失败"
+        finally:
+            # 恢复原日志级别，确保后续的性能汇总信息可以正常输出
+            root_logger.setLevel(orig_root_level)
+            logger.setLevel(orig_module_level)
 
         # ======================== 新增：读取各模型评估指标，打印性能并选择最佳模型 ========================
         # 说明：
@@ -2736,6 +2929,19 @@ def run_all_models(
                 logger.warning(
                     f"  Best model file not found for model {best_model_type}: {best_model_src}"
                 )
+            
+            # 根据用户需求：仅保留性能最优模型，删除其它模型目录
+            for model_type in supported_models:
+                if model_type == best_model_type:
+                    continue
+                model_dir = output_dir_path / model_type
+                if model_dir.exists():
+                    try:
+                        import shutil
+                        shutil.rmtree(model_dir, ignore_errors=True)
+                        logger.info(f"  Removed model directory for non-best model: {model_type}")
+                    except Exception as e:
+                        logger.warning(f"  Failed to remove model directory {model_dir}: {e}")
         else:
             logger.warning("  No valid metrics found to select the best model.")
 
@@ -3138,7 +3344,7 @@ if __name__ == "__main__":
 
     # 单模型训练（新增LD过滤参数）
     train_parser = subparsers.add_parser("train", help="Train single model")
-    train_parser.add_argument("-i", "--input", required=True, help="训练文件/元数据文件路径")
+    train_parser.add_argument("-j", "--json", required=True, help="preprocess 生成的元数据文件（*_metadata.json，必填）")
     train_parser.add_argument("-m", "--model", required=True, choices=["LightGBM", "RandomForest", "XGBoost", "SVM", "CatBoost", "Logistic"])
     train_parser.add_argument("-o", "--output_dir", required=True, help="输出目录")
     train_parser.add_argument("--task_type", required=False, choices=["classification", "regression"],
@@ -3147,7 +3353,7 @@ if __name__ == "__main__":
     train_parser.add_argument("--random_state", type=int, default=42)
     # 全模型训练
     train_all_parser = subparsers.add_parser("train-all", help="Train all models")
-    train_all_parser.add_argument("-i", "--input", required=True)
+    train_all_parser.add_argument("-j", "--json", required=True, help="preprocess 生成的元数据文件（*_metadata.json，必填）")
     train_all_parser.add_argument("-o", "--output_dir", required=True)
     train_all_parser.add_argument("--task_type", required=False, choices=["classification", "regression"],
                                  help="任务类型（可选，如未指定将从元数据读取或默认regression）")
@@ -3169,7 +3375,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.command == "train":
         sys.exit(run_single_model(
-            input_path=args.input,
+            input_path=args.json,
             model_type=args.model,
             output_dir=args.output_dir,
             task_type=args.task_type,
@@ -3179,7 +3385,7 @@ if __name__ == "__main__":
         ))
     elif args.command == "train-all":
         sys.exit(run_all_models(
-            input_path=args.input,
+            input_path=args.json,
             output_dir=args.output_dir,
             task_type=args.task_type,
             n_folds=args.n_folds,

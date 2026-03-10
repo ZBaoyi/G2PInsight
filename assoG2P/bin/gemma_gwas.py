@@ -102,9 +102,22 @@ def run_shell_command(cmd: list, step_name: str) -> None:
     if result.stdout:
         logger.info(f"标准输出：{result.stdout[:1000]}")
     
-    # 处理标准错误输出：区分真正的错误和信息性消息
+    # 处理标准错误输出：区分真正的错误和信息性消息，并过滤掉GEMMA的进度条
     if result.stderr:
         stderr_content = result.stderr[:1000]
+        # GEMMA 在stderr中用类似“空格 + = + 百分比”的形式打印进度条，
+        # 直接记录到日志会变成多行噪声，这里先按行过滤掉这类仅含进度条的行。
+        lines = stderr_content.splitlines()
+        filtered_lines = []
+        for line in lines:
+            # 去掉左右空白后，如果只剩下 0-9、% 和 =，视为进度条行，丢弃
+            stripped = line.strip()
+            if stripped and all(ch in "=%0123456789" for ch in stripped):
+                continue
+            filtered_lines.append(line)
+        stderr_content = "\n".join(filtered_lines).strip()
+    
+    if stderr_content:
         # GEMMA 会将信息性消息（如 "**** INFO: Done."）输出到 stderr
         # 如果命令成功执行（returncode == 0），且 stderr 中只包含 INFO/Done 等关键词，则记录为 info 级别
         if result.returncode == 0:

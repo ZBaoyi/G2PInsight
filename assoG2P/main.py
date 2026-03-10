@@ -100,7 +100,7 @@ def run_training(args) -> int:
         
         # GWAS/LD特征筛选已在preprocess模块完成，训练阶段不再执行筛选
         return run_single_model(
-            input_path=args.input,
+            input_path=args.json,
             model_type=args.model,
             output_dir=args.output_dir,
             task_type=args.task_type,
@@ -122,7 +122,7 @@ def run_train_all(args) -> int:
         
         # GWAS/LD特征筛选已在preprocess模块完成，训练阶段不再执行筛选
         return run_all_models(
-            input_path=args.input,
+            input_path=args.json,
             output_dir=args.output_dir,
             task_type=args.task_type,
             n_folds=args.n_folds,
@@ -421,7 +421,12 @@ For more details, use: association [command] -h
         "train",
         help="Single model training (GWAS/LD filtering should be done in preprocess stage)"
     )
-    train_parser.add_argument("-i", "--input", required=True, help="Training data file (e.g., preprocess output directory/train_data.txt) or preprocess metadata file (*_metadata.json)")
+    train_parser.add_argument(
+        "-j",
+        "--json",
+        required=True,
+        help="Preprocess metadata JSON file (*_metadata.json). Training is metadata-driven; direct .txt input is not supported."
+    )
     train_parser.add_argument("-m", "--model", required=True, 
                              choices=["LightGBM", "RandomForest", "XGBoost", "SVM", "CatBoost", "Logistic"],help="Select a model")
     train_parser.add_argument("--task_type", required=False,
@@ -442,7 +447,12 @@ For more details, use: association [command] -h
         "train-all",
         help="Train all models and compare performance (GWAS/LD filtering should be done in preprocess stage)"
     )
-    train_all_parser.add_argument("-i", "--input", required=True, help="Training data file (e.g., preprocess output directory/train_data.txt) or preprocess metadata file (*_metadata.json)")
+    train_all_parser.add_argument(
+        "-j",
+        "--json",
+        required=True,
+        help="Preprocess metadata JSON file (*_metadata.json). Training is metadata-driven; direct .txt input is not supported."
+    )
     train_all_parser.add_argument("--task_type", required=False,
                                  choices=["classification", "regression"],
                                  help="Task type (classification/regression). If not specified, will be automatically read from metadata or default to 'regression'")

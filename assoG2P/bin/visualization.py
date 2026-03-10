@@ -160,16 +160,18 @@ class EnhancedGenomeVisualizer:
             return feature_col, abs_col, effect_col
         
         # 否则，尝试智能检测
-        # 检测特征列（通常包含染色体_位置格式或名为feature）
+        # 检测特征列（通常包含染色体_位置格式或名为feature，支持1_12345或chr1_12345）
         feature_col = None
         for col in columns:
             if 'feature' in col.lower():
                 feature_col = col
                 break
         if feature_col is None:
-            # 检查第一列是否包含染色体_位置格式
-            first_col_sample = sample_df[columns[0]].dropna().head(10)
-            if first_col_sample.str.contains(r'^\d+_\d+$', na=False).any():
+            # 检查第一列是否包含染色体_位置格式（支持可选chr前缀）
+            first_col_sample = sample_df[columns[0]].dropna().astype(str).head(10)
+            # 去掉可选的chr/CHR前缀后再判断是否为 数字_位置 格式
+            first_col_clean = first_col_sample.str.replace(r'^chr', '', case=False, regex=True)
+            if first_col_clean.str.contains(r'^\d+_\d+$', na=False).any():
                 feature_col = columns[0]
             else:
                 feature_col = columns[0]  # 默认使用第一列
@@ -259,14 +261,48 @@ class EnhancedGenomeVisualizer:
         # 抽样功能已取消，使用全部数据
         logger.info(f"Loading all data points: {len(df):,} features")
 
-        # 基因组位置解析
-        chrom_pos = df[self.feature_col].str.extract(r'^(?P<chrom>\d+)_(?P<pos>\d+)$')
-        if chrom_pos.isna().any().any():
-            invalid_samples = df.loc[chrom_pos.isna().any(axis=1), self.feature_col].head(3).tolist()
-            raise ValueError(
-                f"特征列格式应为'染色体_位置'(如1_12345)\n"
-                f"无效样本示例: {invalid_samples}"
+        # 基因组位置解析（放宽格式：支持1_12345/chr1_12345/1A_12345/chr1A_12345/1:12345等）
+        snp_series = df[self.feature_col].astype(str)
+        # 去掉可选的chr/CHR前缀，便于统一解析
+        snp_clean = snp_series.str.replace(r'^chr', '', case=False, regex=True)
+        # 支持下划线或冒号作为分隔符；染色体部分允许数字+字母（适配多倍体，如1A、1B等）
+        chrom_pos = snp_clean.str.extract(r'^(?P<chrom>[0-9A-Za-z]+)[_:](?P<pos>\d+)$')
+        # 将多倍体染色体名映射为数值编号，便于排序；
+        # 规则：
+        #   - 纯数字或以数字开头（如1、2、1A、1B、1D）：按数字部分排序（多倍体亚基因组共享同一数字顺序）
+        #   - 任何不以数字开头的染色体名称（包括X/Y/MT等）：统一排在所有数字染色体之后
+        def _to_chrom_num(c: Any) -> Optional[int]:
+            import re
+            c_str = str(c).upper()
+            # 先尝试提取数字前缀（适配1A、1B、1D等多倍体标记）
+            m = re.match(r'^(\d+)', c_str)
+            if m:
+                try:
+                    return int(m.group(1))
+                except ValueError:
+                    pass
+            # 所有不以数字开头的染色体名称（包括X/Y/MT/contig等）统一排在最后
+            # 这里使用一个较大的常数，确保它们在排序中位于数字染色体之后
+            return 10**6
+        
+        chrom_num_series = chrom_pos['chrom'].apply(_to_chrom_num)
+        invalid_mask = chrom_num_series.isna() | chrom_pos['pos'].isna()
+        if invalid_mask.any():
+            invalid_count = int(invalid_mask.sum())
+            invalid_samples = df.loc[invalid_mask, self.feature_col].head(3).tolist()
+            # 不直接失败：自动过滤无效特征，避免少量脏数据导致全流程崩溃
+            logger.warning(
+                "Detected invalid feature name(s) that do not match 'chrom_pos' format; "
+                f"will be dropped. invalid={invalid_count:,}/{len(df):,}, samples={invalid_samples}"
             )
+            df = df.loc[~invalid_mask].copy()
+            chrom_pos = chrom_pos.loc[~invalid_mask]
+            chrom_num_series = chrom_num_series.loc[~invalid_mask]
+            if len(df) == 0:
+                raise ValueError(
+                    f"特征列格式应为'染色体_位置'(如1_12345或chr1_12345等)，但过滤无效特征后数据为空。\n"
+                    f"无效样本示例: {invalid_samples}"
+                )
 
         # 数据增强（适应三列格式：特征名、绝对值、正负效应）
         # 如果存在effect列，使用它来确定正负效应；否则从绝对值列推断
@@ -274,9 +310,10 @@ class EnhancedGenomeVisualizer:
             # 使用effect列（1或-1）确定正负效应
             # 第二列已经是绝对值，需要与effect列相乘得到带正负的值用于绘图
             df = df.assign(
-                chrom_num=chrom_pos['chrom'].astype('uint8'),
+                # 使用有符号整型，避免多倍体或特殊染色体编号溢出
+                chrom_num=chrom_num_series.astype('int32'),
                 position=chrom_pos['pos'].astype('uint32'),
-                chrom_label="Chr" + chrom_pos['chrom'],
+                chrom_label="Chr" + chrom_pos['chrom'].astype(str),
                 value_sign=np.where(df[self.effect_col] >= 0, 'Positive', 'Negative'),
                 value_abs=df[self.value_col],  # 第二列已经是绝对值，不需要再计算
                 value_signed=df[self.value_col] * df[self.effect_col]  # 用于绘图：绝对值 * 效应方向
@@ -284,9 +321,9 @@ class EnhancedGenomeVisualizer:
         else:
             # 兼容旧格式：从数值列推断（如果数值可能为负）
             df = df.assign(
-                chrom_num=chrom_pos['chrom'].astype('uint8'),
+                chrom_num=chrom_num_series.astype('int32'),
                 position=chrom_pos['pos'].astype('uint32'),
-                chrom_label="Chr" + chrom_pos['chrom'],
+                chrom_label="Chr" + chrom_pos['chrom'].astype(str),
                 value_sign=np.where(df[self.value_col] >= 0, 'Positive', 'Negative'),
                 value_abs=df[self.value_col].abs(),
                 value_signed=df[self.value_col]  # 旧格式中value_col已经包含正负
@@ -297,10 +334,39 @@ class EnhancedGenomeVisualizer:
         return df
 
     def _calculate_genomic_positions(self, df: pd.DataFrame) -> np.ndarray:
-        """计算基因组坐标"""
-        chrom_sizes = df.groupby('chrom_num').size()
-        offsets = chrom_sizes.cumsum().shift(1, fill_value=0)
-        return df.groupby('chrom_num').cumcount() + offsets[df['chrom_num']].values
+        """
+        计算基因组坐标（按染色体等宽显示）
+        
+        设计目标：
+        - 每条“染色体标签”（如 1A、1B、1D、2A、X 等）在横轴上占用相同宽度的区间（例如 [0,1], [1,2], [2,3], ...）
+        - 染色体内的SNP按相对顺序在该区间内均匀分布
+        - 染色体整体顺序：
+            * 先按数字前缀（chrom_num）升序
+            * 同一数字组内（如1A/1B/1D）按 chrom_label 排序区分
+            * 所有“不以数字开头”的染色体（chrom_num 为大常数）排在最后
+        """
+        # 1. 按 (chrom_num, chrom_label) 确定每个“染色体标签”的顺序
+        chrom_info = df[['chrom_num', 'chrom_label']].drop_duplicates()
+        numeric_mask = chrom_info['chrom_num'] < 10**6  # 数字前缀的染色体
+        chrom_info_numeric = chrom_info[numeric_mask].sort_values(['chrom_num', 'chrom_label'])
+        chrom_info_other = chrom_info[~numeric_mask].sort_values(['chrom_label'])
+        chrom_info_sorted = pd.concat([chrom_info_numeric, chrom_info_other], ignore_index=True)
+        label_to_base = {label: idx for idx, label in enumerate(chrom_info_sorted['chrom_label'])}
+        
+        # 2. 每个染色体标签对应一个基准整数位置（等宽区间的起点）
+        base_pos = df['chrom_label'].map(label_to_base).astype(float)
+        
+        # 3. 染色体内位置归一化：根据在本染色体内的顺序，将点分布到 [0,1] 区间
+        within_index = df.groupby('chrom_label').cumcount()
+        group_sizes = df.groupby('chrom_label')['chrom_label'].transform('size')
+        
+        # 对于至少有2个点的染色体：使用 [0, 1] 间等间距；只有1个点时放在区间中点0.5
+        denom = (group_sizes - 1).replace(0, 1)
+        within_norm = within_index / denom
+        within_norm = np.where(group_sizes == 1, 0.5, within_norm)
+        
+        # 4. 最终横坐标 = 染色体基准位置 + 染色体内部归一化位置
+        return base_pos.values + within_norm
 
     def _calculate_threshold(self, percentile: float = 99) -> float:
         """计算显著性阈值"""
@@ -470,6 +536,8 @@ class EnhancedGenomeVisualizer:
         """格式化交互图表布局（与静态图保持一致）"""
         # 计算染色体刻度位置（与静态图一致）
         chrom_ticks = self.df.groupby('chrom_label')['x_pos'].median()
+        # 按基因组坐标排序刻度，确保从左到右与物理顺序一致（包括多倍体与非数字染色体）
+        chrom_ticks = chrom_ticks.sort_values()
         
         # 计算Y轴范围：从0开始，所有点都在横轴上方
         y_max = self.df['value_abs'].max()
@@ -531,6 +599,7 @@ class EnhancedGenomeVisualizer:
         """格式化坐标轴"""
         # 染色体刻度
         chrom_ticks = self.df.groupby('chrom_label')['x_pos'].median()
+        chrom_ticks = chrom_ticks.sort_values()
         ax.set_xticks(chrom_ticks.values)
         ax.set_xticklabels(chrom_ticks.index, rotation=45, ha='right', fontsize=16)
         ax.set_xlabel("Genomic Position", fontsize=16)

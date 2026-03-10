@@ -716,6 +716,7 @@ def get_snp_chr_pos_mapping_optimized(bim_file: str, chr_num: Optional[str] = No
             pos_val = str(row["physical_pos"])
             a1_val = str(row["a1"])
             a2_val = str(row["a2"])
+            snp_id = str(row["snp_id"])
             new_name = f"{chr_val}_{pos_val}"
             
             # PLINK可能使用的格式
@@ -725,7 +726,16 @@ def get_snp_chr_pos_mapping_optimized(bim_file: str, chr_num: Optional[str] = No
                 f"{chr_val}:{pos_val}"
             ]
             
-            for fmt in plink_formats:
+            # 添加rs_allele格式的映射（如rs123_A, rs123_G等）
+            # 支持所有可能的等位基因格式
+            rs_allele_formats = [
+                f"{snp_id}_{a1_val}",
+                f"{snp_id}_{a2_val}",
+                f"{snp_id}_{a1_val}/{a2_val}",  # 如rs123_A/G
+                f"{snp_id}_{a2_val}/{a1_val}",  # 如rs123_G/A
+            ]
+            
+            for fmt in plink_formats + rs_allele_formats:
                 snp_mapping[fmt] = new_name
         
         return snp_mapping
@@ -779,10 +789,95 @@ def get_snp_chr_pos_mapping(bim_file: str, chr_num: Optional[str] = None) -> dic
                 f"{chr_val}:{pos_val}"
             ]
             
-            for fmt in plink_formats:
+            # 添加rs_allele格式的映射（如rs123_A, rs123_G等）
+            # 支持所有可能的等位基因格式
+            rs_allele_formats = [
+                f"{snp_id}_{a1_val}",
+                f"{snp_id}_{a2_val}",
+                f"{snp_id}_{a1_val}/{a2_val}",  # 如rs123_A/G
+                f"{snp_id}_{a2_val}/{a1_val}",  # 如rs123_G/A
+            ]
+            
+            for fmt in plink_formats + rs_allele_formats:
                 snp_mapping[fmt] = new_name
     
     return snp_mapping
+
+
+def standardize_snp_column_names(
+    df: pd.DataFrame,
+    bim_file: str,
+    pheno_columns: Optional[List[str]] = None,
+) -> pd.DataFrame:
+    """
+    统一训练矩阵中的 SNP 列名为 chr_position 格式（例如: chr1_12345）
+    
+    设计目的：
+    - 有些情况下 .raw 头信息的列名格式可能与预期不完全一致，导致前面在解析阶段的重命名未完全生效；
+    - 这里在「所有染色体合并完成后、写出 train_data.txt 之前」做一道兜底重命名。
+    
+    规则：
+    - 只对「非表型列」尝试重命名；
+    - 优先使用 .bim 生成的 snp_id/PLINK 列名 -> chr_pos 映射；
+    - 若映射中无对应键，则尝试从 'chr:pos_allele' 形式解析为 'chr_pos'；
+    - 未能识别的列名保持不变。
+    """
+    if df.empty:
+        return df
+    
+    bim_file = str(Path(bim_file).absolute())
+    if not Path(bim_file).exists():
+        logger.warning(f"standardize_snp_column_names: .bim file not found, skip renaming: {bim_file}")
+        return df
+    
+    # 确定表型列，避免误改
+    pheno_cols: set = set(pheno_columns or [])
+    # 常见表型列名兜底
+    pheno_cols.update({"phenotype"})
+    
+    # 构建 SNP 映射（不按染色体拆分）
+    try:
+        snp_mapping = get_snp_chr_pos_mapping_optimized(bim_file, chr_num=None)
+    except Exception as e:
+        logger.warning(f"standardize_snp_column_names: failed to build SNP mapping from .bim: {e}")
+        return df
+    
+    rename_dict: Dict[str, str] = {}
+    
+    # 正则：解析 'chr:pos_allele' 形式
+    pattern_plink = re.compile(r'^([^:]+):([^_]+)_[^_]+$')
+    
+    for col in df.columns:
+        # 跳过明显的表型列
+        if col in pheno_cols or any(str(col).lower().startswith(str(p).lower()) for p in pheno_cols):
+            continue
+        
+        col_str = str(col)
+        new_name = None
+        
+        # 1) 优先使用 .bim 提供的映射
+        if col_str in snp_mapping:
+            new_name = snp_mapping[col_str]
+        else:
+            # 2) 尝试从 'chr:pos_allele' 解析
+            m = pattern_plink.match(col_str)
+            if m:
+                chr_part, pos_part = m.group(1), m.group(2)
+                new_name = f"{chr_part}_{pos_part}"
+        
+        if new_name and new_name != col_str:
+            rename_dict[col] = new_name
+    
+    if rename_dict:
+        logger.info(
+            f"Standardizing SNP column names using .bim mapping: "
+            f"{len(rename_dict)} / {len(df.columns)} columns will be renamed to chr_pos format"
+        )
+        df = df.rename(columns=rename_dict)
+    else:
+        logger.debug("standardize_snp_column_names: no SNP columns to rename (mapping empty)")
+    
+    return df
 
 def get_plink_path() -> str:
     """自动定位PLINK1.9可执行文件"""
@@ -1104,7 +1199,31 @@ def process_single_chromosome_optimized(
             cached_result = GLOBAL_CACHE.get(cache_key)
             if cached_result is not None:
                 logger.debug(f"Loading chromosome {chr_num} result from cache (key={cache_key[:32]}...)")
-                return (chr_num, cached_result)
+                # 兼容旧缓存：历史版本可能把 phenotype/index 等列 merge 进来了
+                try:
+                    df_cached = cached_result
+                    # 只保留基因型列（删除 phenotype 及其重复列、以及 index/index.N 伪列）
+                    drop_cols = []
+                    for c in df_cached.columns:
+                        c_str = str(c).lower()
+                        if 'phenotype' in c_str:
+                            drop_cols.append(c)
+                        # pandas read_csv 对重复列会生成 index.1/index.2...，这里统一过滤
+                        if c_str == 'index' or c_str.startswith('index.'):
+                            drop_cols.append(c)
+                    if drop_cols:
+                        df_cached = df_cached.drop(columns=list(dict.fromkeys(drop_cols)), errors='ignore')
+
+                    # 仍然做一次样本交集过滤，确保与表型样本一致
+                    if 'sample' in pheno_df.columns and pheno_df.index.name != 'sample':
+                        pheno_df = pheno_df.set_index('sample')
+                    elif pheno_df.index.name is None and 'sample' not in pheno_df.columns:
+                        pheno_df = pheno_df.copy()
+                        pheno_df.index.name = 'sample'
+                    df_cached = df_cached.loc[df_cached.index.intersection(pheno_df.index)]
+                    return (chr_num, df_cached)
+                except Exception:
+                    return (chr_num, cached_result)
         
         logger.info(f"Processing chromosome {chr_num}")
 
@@ -1167,17 +1286,21 @@ def process_single_chromosome_optimized(
             return (chr_num, None)
         
         # 步骤6: 合并表型
-        # 确保pheno_df以sample为索引
+        # 重要：这里不要把表型列 merge 进每条染色体的基因型矩阵里，
+        # 否则在多染色体按列 concat 时会产生大量重复的 phenotype/index 列，
+        # 后续 read_csv 会自动“列名去重”生成 index.1/index.2/... 之类伪特征。
+        # 我们只在这里做样本交集过滤，表型列在全染色体合并完成后再追加一次。
+        #
+        # 确保 pheno_df 以 sample 为索引，用于过滤样本
         if 'sample' in pheno_df.columns and pheno_df.index.name != 'sample':
             pheno_df = pheno_df.set_index('sample')
-        
-        # 向量化合并
-        chr_geno_df = chr_geno_df.merge(
-            pheno_df,
-            left_index=True,
-            right_index=True,
-            how="inner"
-        )
+        elif pheno_df.index.name is None and 'sample' not in pheno_df.columns:
+            # 兜底：如果 sample 存在于索引但索引未命名，则将其视为 sample
+            pheno_df = pheno_df.copy()
+            pheno_df.index.name = 'sample'
+
+        common_index = chr_geno_df.index.intersection(pheno_df.index)
+        chr_geno_df = chr_geno_df.loc[common_index]
         
         # 步骤7: 清理临时文件
         if cleanup_recode_files:
@@ -1273,8 +1396,22 @@ def plink_to_training_data_optimized(
     # 将pheno_df保存为临时文件（避免在函数间传递）
     temp_pheno_file = str(tmp_base / "temp_pheno.feather")
     try:
-        pheno_df.reset_index().to_feather(temp_pheno_file)
-        pheno_df_loaded = pd.read_feather(temp_pheno_file).set_index('sample')
+        # 不要引入额外的“index”列：reset_index(drop=True) 或直接保存列即可
+        pheno_for_save = pheno_df.copy()
+        if 'sample' not in pheno_for_save.columns:
+            # 如果 sample 在索引里（命名或未命名），转成列并确保列名为 sample
+            pheno_for_save = pheno_for_save.reset_index()
+            if 'sample' not in pheno_for_save.columns and 'index' in pheno_for_save.columns:
+                pheno_for_save = pheno_for_save.rename(columns={'index': 'sample'})
+        else:
+            # 丢弃 RangeIndex，避免生成“index”列
+            pheno_for_save = pheno_for_save.reset_index(drop=True)
+
+        pheno_for_save.to_feather(temp_pheno_file)
+        pheno_df_loaded = pd.read_feather(temp_pheno_file)
+        if 'sample' not in pheno_df_loaded.columns:
+            raise ValueError("Phenotype data missing required 'sample' column after serialization")
+        pheno_df_loaded = pheno_df_loaded.set_index('sample')
     except Exception as e:
         logger.warning(f"Cannot use feather format, using pickle: {e}")
         temp_pheno_file = str(tmp_base / "temp_pheno.pkl")
@@ -1430,6 +1567,15 @@ def plink_to_training_data_optimized(
                         chr_df = pd.read_feather(chr_file).set_index('sample')
                     else:
                         chr_df = pd.read_pickle(chr_file)
+                    # 兼容旧流程产生的重复列：去掉 phenotype 与 index/index.N
+                    if chr_df is not None and not chr_df.empty:
+                        cols_lower = [str(c).lower() for c in chr_df.columns]
+                        drop_cols = [
+                            c for c, cl in zip(chr_df.columns, cols_lower)
+                            if ('phenotype' in cl) or (cl == 'index') or cl.startswith('index.')
+                        ]
+                        if drop_cols:
+                            chr_df = chr_df.drop(columns=drop_cols, errors='ignore')
                     batch_dfs.append(chr_df)
                 except Exception as e:
                     logger.warning(f"Failed to load chromosome {chr_num} data: {e}")
@@ -1454,7 +1600,7 @@ def plink_to_training_data_optimized(
                 del batch_dfs, batch_merged
                 gc.collect()
         
-        # 合并所有批次
+        # 合并所有批次（此时还没有 phenotype 列，避免重复列污染）
         if len(all_batches) == 1:
             final_train_df = all_batches[0]
         else:
@@ -1466,6 +1612,32 @@ def plink_to_training_data_optimized(
             # 只保留共有样本
             all_batches = [batch.loc[common_index] for batch in all_batches]
             final_train_df = pd.concat(all_batches, axis=1, join='inner')
+
+        # 步骤5.2: 合并完成后再追加一次 phenotype（避免在每条染色体重复）
+        if 'phenotype' in pheno_df_loaded.columns:
+            # 保证样本一致（inner join）
+            final_train_df = final_train_df.merge(
+                pheno_df_loaded[['phenotype']],
+                left_index=True,
+                right_index=True,
+                how='inner'
+            )
+        else:
+            raise ValueError("Phenotype column 'phenotype' not found in phenotype data")
+        
+        # 步骤5.5: 兜底统一 SNP 列名为 chr_position 格式
+        try:
+            # .bim 文件与 final_plink_prefix 对应
+            bim_file = f"{Path(final_plink_prefix).absolute().as_posix()}.bim"
+            # 使用在本函数开头加载的 pheno_df_loaded 的列名作为表型列集合
+            pheno_columns = list(pheno_df_loaded.columns) if 'pheno_df_loaded' in locals() else None
+            final_train_df = standardize_snp_column_names(
+                final_train_df,
+                bim_file=bim_file,
+                pheno_columns=pheno_columns,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to standardize SNP column names to chr_pos format (ignored): {e}")
         
         # 步骤6: 保存最终训练数据
         # 确保输出文件有.txt后缀
@@ -2607,7 +2779,9 @@ def generate_metadata(
         "snp_naming_rule": "染色体_物理位置（如'1_123456'）",
         "plink_executable": PLINK_EXECUTABLE,
         "plink_recode_param": "--recodeA",
-        "gwas_genotype_prefix": str(Path(plink_prefix).absolute()),  # 保存PLINK二进制文件前缀（绝对路径），供GWAS/LD使用
+        # 为简化后续流程并避免依赖 tmp 目录的 PLINK 中间文件，不再在元数据中记录 gwas_genotype_prefix
+        # 如有需要，可在GWAS/LD模块内部根据实际路径重新指定
+        "gwas_genotype_prefix": None,
         "preprocess_tmp_dir": str(Path(preprocess_tmp_dir).absolute()) if preprocess_tmp_dir else None,
         "snp_filtering": {
             "filtered": filter_snps,
