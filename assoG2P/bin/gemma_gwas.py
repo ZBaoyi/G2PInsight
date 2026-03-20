@@ -400,18 +400,3 @@ def run_complete_gwas_pipeline(
     run_gemma_gwas(filtered_geno_prefix, kinship_file, cov_file, output_prefix)
     
     logger.info("GWAS流程执行完成！")
-
-if __name__ == "__main__":
-    # 基础调用逻辑
-    if len(sys.argv) != 4:
-        print("使用方式：python gwas_module.py <输入PLINK前缀> <表型文件> <输出前缀>")
-        sys.exit(1)
-    
-    try:
-        input_plink_prefix = sys.argv[1]
-        phenotype_file = sys.argv[2]
-        output_prefix = sys.argv[3]
-        run_complete_gwas_pipeline(input_plink_prefix, phenotype_file, output_prefix)
-    except Exception as e:
-        logger.error(f"流程执行失败：{str(e)}")
-        sys.exit(1)

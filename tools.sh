@@ -646,11 +646,11 @@ install_python_package() {
         echo -e "${GREEN}>>> assoG2P Python 包安装成功${NC}"
         
         # 验证安装
-        if command -v association &>/dev/null; then
-            local version=$(association --version 2>/dev/null || echo "未知")
-            echo -e "${GREEN}>>> 验证安装: association 命令可用，版本: ${version}${NC}"
+        if command -v assog2p &>/dev/null; then
+            local version=$(assog2p --version 2>/dev/null || echo "未知")
+            echo -e "${GREEN}>>> 验证安装: assog2p 命令可用，版本: ${version}${NC}"
         else
-            echo -e "${YELLOW}>>> 警告: association 命令未找到，可能需要重新激活环境${NC}"
+            echo -e "${YELLOW}>>> 警告: assog2p 命令未找到，可能需要重新激活环境${NC}"
         fi
         return 0
     else

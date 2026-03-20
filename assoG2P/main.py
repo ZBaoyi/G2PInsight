@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Genotype-phenotype association analysis tool
+Genotype-phenotype assog2p analysis tool
 
 Usage:
-    association [command] [options]
+    assog2p [command] [options]
 
 Commands:
     preprocess    Data preprocessing (with optional GWAS/LD filtering)
@@ -13,11 +13,11 @@ Commands:
     visualize     Result visualization
 
 Examples:
-    association preprocess -h
-    association train -h
-    association train-all -h
-    association predict -h
-    association visualize -h
+    assog2p preprocess -h
+    assog2p train -h
+    assog2p train-all -h
+    assog2p predict -h
+    assog2p visualize -h
 """
 
 import argparse
@@ -65,7 +65,8 @@ def run_preprocess(args) -> int:
         gwas_pvalue = getattr(args, 'gwas_pvalue', 0.01)
         # LD三合一配置，格式: \"<window_kb>,<window_variants>,<r2_threshold>\"
         ld_config = getattr(args, 'ld_config', None) or "50,5,0.2"
-        use_cache = not getattr(args, 'no_cache', False)
+        # `--no-cache` 参数已移除，缓存逻辑使用默认行为（启用缓存）
+        use_cache = True
         
         return preprocess_func(
             genotype_file=args.genotype,
@@ -161,49 +162,6 @@ def run_predict(args) -> int:
         
     except Exception as e:
         logger.error(f"Prediction failed: {str(e)}")
-        return 1
-
-def run_performance_visualization(args) -> int:
-    """Perform model performance curves visualization"""
-    try:
-        from assoG2P.bin.visualization import plot_model_performance_from_file
-        from pathlib import Path
-        
-        # 确定plotting_data.npz文件路径
-        plotting_data_file = None
-        if args.file:
-            plotting_data_file = Path(args.file)
-        elif args.model_dir:
-            plotting_data_file = Path(args.model_dir) / "plotting_data.npz"
-        else:
-            logger.error("必须指定 --file 或 --model-dir 参数")
-            return 1
-        
-        if not plotting_data_file.exists():
-            logger.error(f"绘图数据文件不存在: {plotting_data_file}")
-            return 2
-        
-        # 确定输出目录
-        output_dir = None
-        if args.output_dir:
-            output_dir = Path(args.output_dir)
-        elif args.model_dir:
-            output_dir = Path(args.model_dir)
-        elif args.file:
-            output_dir = Path(args.file).parent
-        
-        # 确定publication_quality
-        publication_quality = args.publication_quality if hasattr(args, 'publication_quality') else None
-        
-        logger.info(f"从文件读取绘图数据: {plotting_data_file}")
-        return plot_model_performance_from_file(
-            plotting_data_file=plotting_data_file,
-            output_dir=output_dir,
-            publication_quality=publication_quality
-        )
-        
-    except Exception as e:
-        logger.error(f"性能可视化失败: {str(e)}")
         return 1
 
 def run_unified_visualization(args) -> int:
@@ -310,54 +268,6 @@ def run_unified_visualization(args) -> int:
     
     return result_code
 
-def run_visualization(args) -> int:
-    """Perform scatter plot visualization - static / interactive can be generated separately"""
-    try:
-        from assoG2P.bin.visualization import EnhancedGenomeVisualizer
-        
-        if not Path(args.input).exists():
-            raise FileNotFoundError(f"Input file not found: {args.input}")
-            
-        # 创建可视化器实例
-        visualizer = EnhancedGenomeVisualizer(
-            input_file=args.input,
-            feature_col=args.feature_col,
-            value_col=getattr(args, 'value_col', None) or getattr(args, 'shap_col', None)  # 兼容旧参数名
-        )
-        
-        # 根据参数决定生成哪种图
-        generate_static = True
-        generate_interactive = True
-        if getattr(args, "static_only", False) and not getattr(args, "interactive_only", False):
-            generate_interactive = False
-        elif getattr(args, "interactive_only", False) and not getattr(args, "static_only", False):
-            generate_static = False
-
-        static_output = None
-        interactive_output = None
-
-        if generate_static:
-            static_output = f"{args.output}_static.png"
-            visualizer.plot_static_scatter(
-                output_file=static_output,
-                dpi=args.dpi
-            )
-        if generate_interactive:
-            interactive_output = f"{args.output}_interactive.html"
-            visualizer.plot_interactive_scatter(
-                output_file=interactive_output
-            )
-
-        return 0
-        
-    except ImportError as e:
-        logger.error(f"Module import error: {str(e)}")
-        logger.error("For interactive plots, install required dependencies: pip install plotly kaleido")
-        return 1
-    except Exception as e:
-        logger.error(f"Visualization failed: {str(e)}")
-        return 1
-
 def print_banner() -> None:
     print("=" * 50)
     print("assocG2P Genomic analysis platform v1.0.0")
@@ -365,18 +275,17 @@ def print_banner() -> None:
 
 def setup_argparse() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Genotype-phenotype machine learning association analysis tool",
+        description="Genotype-phenotype machine learning assog2p analysis tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  association preprocess -g genotype.vcf -p phenotype.csv -o preprocessed_data
-  association train -i preprocessed_data/train_data.txt -m LightGBM -f 1 -o results
-  association predict -i new_data.csv -m LightGBM -o predictions
-  association visualize -i feature_importance.csv -o plot
-  association visualize -f results/LightGBM/plotting_data.npz
-  association visualize -i feature_importance.csv -o plot -d results/LightGBM
+  assog2p preprocess -g genotype.vcf -p phenotype.csv -o preprocessed_data
+  assog2p train -j preprocessed_data/*_metadata.json -m LightGBM -o results
+  assog2p predict -i new_data.txt -m results/train/LightGBM/LightGBM_model.pkl -o predictions
+  assog2p visualize -i feature_importance.txt -o results/plot
+  assog2p visualize -I results/train/LightGBM/LightGBM_plotting_data.npz -o results/plot
 
-For more details, use: association [command] -h
+For more details, use: assog2p [command] -h
         """
     )
     
@@ -395,7 +304,6 @@ For more details, use: association [command] -h
     preprocess_parser.add_argument("-p", "--phenotype", required=True, help="Phenotypic data")
     preprocess_parser.add_argument("-o", "--output", required=True, help="Output file path")
     preprocess_parser.add_argument("--no-filter-snps", action="store_true", help="不进行SNP质量过滤")
-    preprocess_parser.add_argument("--no-cache", action="store_true", help="禁用缓存")
     
     # GWAS/LD特征筛选参数（在preprocess阶段执行, LD参数已三合一）
     preprocess_parser.add_argument("-f", "--feature_selection_mode", type=int, default=1, choices=[1, 2, 3, 4],
@@ -526,7 +434,7 @@ def format_runtime(start_time: float) -> str:
 
 def main() -> None:
     start_time = time.time()
-    init_logging(Path("association.log"))
+    init_logging(Path("assog2p.log"))
     print_banner()
     
     parser = setup_argparse()

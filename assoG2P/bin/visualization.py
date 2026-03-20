@@ -323,15 +323,9 @@ class EnhancedGenomeVisualizer:
                 value_signed=df[self.value_col] * df[self.effect_col]  # 用于绘图：绝对值 * 效应方向
             ).sort_values(['chrom_num', 'position'])
         else:
-            # 兼容旧格式：从数值列推断（如果数值可能为负）
-            df = df.assign(
-                chrom_num=chrom_num_series.astype('int32'),
-                position=chrom_pos['pos'].astype('uint32'),
-                chrom_label="Chr" + chrom_pos['chrom'].astype(str),
-                value_sign=np.where(df[self.value_col] >= 0, 'Positive', 'Negative'),
-                value_abs=df[self.value_col].abs(),
-                value_signed=df[self.value_col]  # 旧格式中value_col已经包含正负
-            ).sort_values(['chrom_num', 'position'])
+            raise ValueError(
+                "输入文件缺少正负效应列(effect)，当前只支持三列格式：feature、importance_abs、effect（effect 取 1/-1）。"
+            )
 
         # 计算基因组坐标
         df['x_pos'] = self._calculate_genomic_positions(df)
@@ -1716,15 +1710,15 @@ def plot_model_performance_from_file(
             output_dir.mkdir(parents=True, exist_ok=True)
 
         # 规范化输出文件命名（standardized）
-        # - 若提供 output_prefix，则所有生成图片均以该前缀命名
-        # - 否则使用默认文件名（兼容旧行为）
-        output_prefix_path: Optional[Path] = None
-        if output_prefix is not None:
-            output_prefix_path = Path(output_prefix)
-            if not output_prefix_path.parent or str(output_prefix_path.parent) == ".":
-                output_prefix_path = output_dir / output_prefix_path.name
-            # 强制输出目录与 output_dir 一致，避免前缀带其他目录导致混乱
+        # 仅支持使用 output_prefix，避免依赖旧版默认文件名逻辑。
+        if output_prefix is None:
+            raise ValueError("output_prefix is required for plot_model_performance_from_file")
+
+        output_prefix_path = Path(output_prefix)
+        if not output_prefix_path.parent or str(output_prefix_path.parent) == ".":
             output_prefix_path = output_dir / output_prefix_path.name
+        # 强制输出目录与 output_dir 一致，避免前缀带其他目录导致混乱
+        output_prefix_path = output_dir / output_prefix_path.name
         
         # 确定publication_quality
         if publication_quality is None:
@@ -1742,10 +1736,7 @@ def plot_model_performance_from_file(
                 publication_quality,
                 output_prefix=output_prefix_path
             )
-            if output_prefix_path is not None:
-                logger.info(f"Performance evaluation curves generated: {output_prefix_path}_performance_curves.png")
-            else:
-                logger.info(f"Performance evaluation curves generated: {output_dir / 'performance_curves.png'}")
+            logger.info(f"Performance evaluation curves generated: {output_prefix_path}_performance_curves.png")
         
         # 绘制交叉验证曲线
         if plotting_data['cv_results'] is not None:
@@ -1756,10 +1747,7 @@ def plot_model_performance_from_file(
                 plotting_data['task_type'],
                 output_prefix=output_prefix_path
             )
-            if output_prefix_path is not None:
-                logger.info(f"Cross-validation curves generated: {output_prefix_path}_cv_training_curves.png")
-            else:
-                logger.info(f"Cross-validation curves generated: {output_dir / 'cv_training_curves.png'}")
+            logger.info(f"Cross-validation curves generated: {output_prefix_path}_cv_training_curves.png")
         
         return 0
         
@@ -1769,25 +1757,3 @@ def plot_model_performance_from_file(
     except Exception as e:
         logger.error(f"Plotting failed: {str(e)}", exc_info=True)
         return 1
-
-if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s"
-    )
-    
-    parser = argparse.ArgumentParser(
-        description="基因组数据散点图可视化工具",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
-    parser.add_argument("-i", "--input", required=True, help="输入文件路径")
-    parser.add_argument("-o", "--output", required=True, help="输出文件前缀")
-    parser.add_argument("--feature-col", help="特征列名")
-    parser.add_argument("--value-col", help="数值列名")
-    parser.add_argument("--dpi", type=int, default=1200, help="静态图像分辨率")
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("--static-only", action="store_true", help="仅生成静态散点图（PNG）")
-    group.add_argument("--interactive-only", action="store_true", help="仅生成交互式散点图（HTML）")
-    
-    args = parser.parse_args()
-    sys.exit(run_visualization(**vars(args)))

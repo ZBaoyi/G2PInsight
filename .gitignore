@@ -20,7 +20,7 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
-
+!README.md
 # 虚拟环境
 venv/
 env/
@@ -45,7 +45,10 @@ htmlcov/
 .install_progress
 *.log
 *.tmp
-
+*.bed
+*.bim
+*.fam
+*.nosex
 # 操作系统
 .DS_Store
 Thumbs.db

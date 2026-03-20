@@ -1168,21 +1168,8 @@ def process_single_chromosome_optimized(
         if use_cache:
             cached_result = GLOBAL_CACHE.get(cache_key)
             if cached_result is not None:
-                # 兼容旧缓存：历史版本可能把 phenotype/index 等列 merge 进来了
                 try:
                     df_cached = cached_result
-                    # 只保留基因型列（删除 phenotype 及其重复列、以及 index/index.N 伪列）
-                    drop_cols = []
-                    for c in df_cached.columns:
-                        c_str = str(c).lower()
-                        if 'phenotype' in c_str:
-                            drop_cols.append(c)
-                        # pandas read_csv 对重复列会生成 index.1/index.2...，这里统一过滤
-                        if c_str == 'index' or c_str.startswith('index.'):
-                            drop_cols.append(c)
-                    if drop_cols:
-                        df_cached = df_cached.drop(columns=list(dict.fromkeys(drop_cols)), errors='ignore')
-
                     # 仍然做一次样本交集过滤，确保与表型样本一致
                     if 'sample' in pheno_df.columns and pheno_df.index.name != 'sample':
                         pheno_df = pheno_df.set_index('sample')
@@ -1534,15 +1521,6 @@ def plink_to_training_data_optimized(
                         chr_df = pd.read_feather(chr_file).set_index('sample')
                     else:
                         chr_df = pd.read_pickle(chr_file)
-                    # 兼容旧流程产生的重复列：去掉 phenotype 与 index/index.N
-                    if chr_df is not None and not chr_df.empty:
-                        cols_lower = [str(c).lower() for c in chr_df.columns]
-                        drop_cols = [
-                            c for c, cl in zip(chr_df.columns, cols_lower)
-                            if ('phenotype' in cl) or (cl == 'index') or cl.startswith('index.')
-                        ]
-                        if drop_cols:
-                            chr_df = chr_df.drop(columns=drop_cols, errors='ignore')
                     batch_dfs.append(chr_df)
                 except Exception as e:
                     logger.warning(f"Failed to load chromosome {chr_num} data: {e}")
@@ -1670,7 +1648,6 @@ def run_preprocess(
     feature_selection_mode: int = 1,
     gwas_pvalue: float = 0.01,
     ld_config: str = "50,5,0.2",
-    keep_temp_files: bool = False,
 ) -> int:
     """
     优化的预处理主函数
@@ -1686,11 +1663,7 @@ def run_preprocess(
     temp_prefixes: List[str] = []
     
     def cleanup_current_run():
-        """清理当前运行生成的临时文件（仅在 keep_temp_files=False 时生效）"""
-        if keep_temp_files:
-            # 用户显式要求保留临时文件，用于调试或复现
-            return
-        
+        """清理当前运行生成的临时文件（等价于原 keep_temp_files=False 行为）"""
         # 1) 按前缀批量删除典型 PLINK 中间文件
         for prefix in temp_prefixes:
             delete_temp_files(prefix, [".bed", ".bim", ".fam", ".log", ".nosex", ".raw", ".map", ".ped"])
@@ -1895,7 +1868,6 @@ def run_preprocess(
                         pvalue_threshold=gwas_pvalue,
                         # 关键：当用户指定 --no-filter-snps 时，同时关闭GWAS阶段的PLINK质控
                         perform_plink_qc=filter_snps,
-                        keep_temp_files=keep_temp_files,
                     )
                     if not significant_snps:
                         logger.warning("No significant SNPs found by GWAS; feature selection will be skipped.")
@@ -1937,7 +1909,8 @@ def run_preprocess(
                             ld_window_kb=ld_window_kb,
                             ld_window=ld_window,
                             ld_window_r2=ld_window_r2,
-                            keep_intermediate=keep_temp_files,
+                            # 始终保持与“keep_temp_files=False”一致：不保留中间文件
+                            keep_intermediate=False,
                             keep_samples_file=None,
                             extract_snps_file=extract_snps_file
                         )
@@ -2009,7 +1982,7 @@ def run_preprocess(
         # 最终内存清理
         gc.collect()
         
-        # 预处理成功结束后，根据 keep_temp_files 选项清理临时文件
+        # 预处理成功结束后清理临时文件
         cleanup_current_run()
         
         return 0
@@ -2647,7 +2620,6 @@ def run_gwas_preprocess(
     tmp_dir: Union[str, Path],
     pvalue_threshold: float = 0.01,
     perform_plink_qc: bool = True,
-    keep_temp_files: bool = False,
 ) -> List[str]:
     """
     预处理阶段运行GWAS，返回显著SNP列表（使用原始SNP ID或rsID）
@@ -2750,46 +2722,45 @@ def run_gwas_preprocess(
     logger.info(f"GWAS in preprocess completed: {len(significant_snps):,} significant SNPs (p < {pvalue_threshold})")
 
     # 5. 清理GWAS产生的所有临时文件和目录（包括output目录）
-    if not keep_temp_files:
-        try:
-            logger.info("开始清理GWAS临时文件...")
-            import shutil
-            # 以 gwas_output_prefix 作为基础前缀
-            gwas_prefix_base = str(Path(gwas_output_prefix_abs))
-            # 1）PLINK 质控及过滤产生的中间PLINK文件
-            delete_temp_files(f"{gwas_prefix_base}_clean_geno", [".bed", ".bim", ".fam", ".log", ".nosex"])
-            delete_temp_files(f"{gwas_prefix_base}_clean_geno_filtered", [".bed", ".bim", ".fam", ".log", ".nosex"])
-            # 2）PCA 相关文件
-            delete_temp_files(f"{gwas_prefix_base}_geno_pca", [".eigenvec", ".eigenval", ".log"])
-            delete_temp_files(f"{gwas_prefix_base}_geno_pca_filtered", [".eigenvec"])
-            # 3）样本列表和协变量文件
-            delete_temp_files(gwas_prefix_base, ["_valid_samples.txt"])
-            delete_temp_files(gwas_prefix_base, ["_covariates_filtered.txt"])
-            # 4）删除整个 output 目录（包含所有GWAS结果文件，包括assoc结果文件）
-            output_subdir = output_dir_path / "output"
-            if output_subdir.exists():
-                try:
-                    shutil.rmtree(output_subdir, ignore_errors=True)
-                except Exception as e:
-                    pass
-            # 5）删除GWAS输出前缀相关的所有文件
-            gwas_prefix_path = Path(gwas_output_prefix_abs)
-            if gwas_prefix_path.parent.exists():
-                for fp in gwas_prefix_path.parent.glob(f"{gwas_prefix_path.name}*"):
-                    try:
-                        if fp.is_file():
-                            fp.unlink()
-                    except Exception:
-                        pass
-            # 6）GWAS 工作子目录（仅存放表型临时文件）
+    try:
+        logger.info("开始清理GWAS临时文件...")
+        import shutil
+        # 以 gwas_output_prefix 作为基础前缀
+        gwas_prefix_base = str(Path(gwas_output_prefix_abs))
+        # 1）PLINK 质控及过滤产生的中间PLINK文件
+        delete_temp_files(f"{gwas_prefix_base}_clean_geno", [".bed", ".bim", ".fam", ".log", ".nosex"])
+        delete_temp_files(f"{gwas_prefix_base}_clean_geno_filtered", [".bed", ".bim", ".fam", ".log", ".nosex"])
+        # 2）PCA 相关文件
+        delete_temp_files(f"{gwas_prefix_base}_geno_pca", [".eigenvec", ".eigenval", ".log"])
+        delete_temp_files(f"{gwas_prefix_base}_geno_pca_filtered", [".eigenvec"])
+        # 3）样本列表和协变量文件
+        delete_temp_files(gwas_prefix_base, ["_valid_samples.txt"])
+        delete_temp_files(gwas_prefix_base, ["_covariates_filtered.txt"])
+        # 4）删除整个 output 目录（包含所有GWAS结果文件，包括assoc结果文件）
+        output_subdir = output_dir_path / "output"
+        if output_subdir.exists():
             try:
-                if gwas_work_dir.exists():
-                    shutil.rmtree(gwas_work_dir, ignore_errors=True)
+                shutil.rmtree(output_subdir, ignore_errors=True)
             except Exception:
                 pass
-            logger.info("GWAS临时文件清理完成")
-        except Exception as e:
-            logger.warning(f"清理GWAS中间文件时发生异常，但不影响主流程：{e}")
+        # 5）删除GWAS输出前缀相关的所有文件
+        gwas_prefix_path = Path(gwas_output_prefix_abs)
+        if gwas_prefix_path.parent.exists():
+            for fp in gwas_prefix_path.parent.glob(f"{gwas_prefix_path.name}*"):
+                try:
+                    if fp.is_file():
+                        fp.unlink()
+                except Exception:
+                    pass
+        # 6）GWAS 工作子目录（仅存放表型临时文件）
+        try:
+            if gwas_work_dir.exists():
+                shutil.rmtree(gwas_work_dir, ignore_errors=True)
+        except Exception:
+            pass
+        logger.info("GWAS临时文件清理完成")
+    except Exception as e:
+        logger.warning(f"清理GWAS中间文件时发生异常，但不影响主流程：{e}")
 
     return significant_snps
 
@@ -3028,57 +2999,3 @@ def get_snp_chr_pos_mapping_cached(bim_file: str, chr_num: Optional[str] = None)
     
     return mapping
 
-
-# ======================== 10. 命令行入口 ========================
-
-if __name__ == "__main__":
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="优化的预处理模块（第一层优化）")
-    parser.add_argument("-g", "--genotype", required=True, help="基因型文件（VCF/PLINK二进制/文本前缀）")
-    parser.add_argument("-p", "--phenotype", required=True, help="表型文件（无表头2列）")
-    parser.add_argument("-o", "--output", required=True, help="输出目录或文件路径")
-    parser.add_argument("--mem-limit", type=int, default=10000, help="（兼容参数）PLINK内存限制")
-    parser.add_argument("--pheno-col", help="兼容参数，无实际作用")
-    parser.add_argument("--no-filter-snps", action="store_true", help="不进行SNP质量过滤")
-    parser.add_argument("--no-cache", action="store_true", help="禁用缓存")
-    parser.add_argument(
-        "--feature-selection-mode",
-        type=int,
-        default=1,
-        choices=[1, 2, 3, 4],
-        help="特征筛选模式: 1=不做GWAS/LD; 2=仅GWAS; 3=仅LD; 4=GWAS+LD(先GWAS再LD)"
-    )
-    parser.add_argument(
-        "--gwas-pvalue",
-        type=float,
-        default=0.01,
-        help="GWAS显著性阈值（用于模式2和4），默认0.01"
-    )
-    parser.add_argument(
-        "--ld-config",
-        type=str,
-        default="50,5,0.2",
-        help=(
-            "LD三合一配置参数 (standardized): "
-            "\"<window_kb>,<window_variants>,<r2_threshold>\", "
-            "例如 \"50,5,0.2\" 表示窗口50KB、窗口内5个变体、r²阈值0.2；"
-            "仅在特征筛选模式为3或4时使用"
-        ),
-    )
-
-    
-    args = parser.parse_args()
-    
-    # 执行优化的预处理
-    sys.exit(run_preprocess(
-        genotype_file=args.genotype,
-        phenotype_file=args.phenotype,
-        output_file=args.output,
-        pheno_col=args.pheno_col,
-        filter_snps=not args.no_filter_snps,
-        use_cache=not args.no_cache,
-        feature_selection_mode=args.feature_selection_mode,
-        gwas_pvalue=args.gwas_pvalue,
-        ld_config=args.ld_config,
-    ))

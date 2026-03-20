@@ -24,7 +24,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "association=assoG2P.main:main",
+            "assog2p=assoG2P.main:main",
         ],
     },
 )

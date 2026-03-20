@@ -434,6 +434,3 @@ def run_ld_filtering(
         logger.error(traceback.format_exc())
         return 1
         
-if __name__ == "__main__":
-    logger.error("This module cannot be run independently, please call through model training module!")
-    sys.exit(1)

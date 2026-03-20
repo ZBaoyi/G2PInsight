@@ -31,7 +31,6 @@
   - 自动检测SNP位置和样本ID
   - 缺失值处理（支持删除或填充）
   - 基因型编码转换（0|0→0, 0|1/1|0→1, 1|1→2）
-  - 大型数据集抽样支持（默认50万点上限）
 
 ### 2. Model Training
 - **功能**：通过机器学习算法识别与表型相关的遗传变异
@@ -340,7 +339,7 @@ assog2p preprocess \
   [--gwas_pvalue <threshold>] \
   [--ld-config "<window_kb>,<window_variants>,<r2_threshold>"] \
   [--no-filter-snps] \
-  [--no-cache]
+  
 ```
 
 **参数说明**：
@@ -353,7 +352,6 @@ assog2p preprocess \
 | `--gwas_pvalue` | 可选 | 0.01 | GWAS P值阈值（`-f` 为 2 或 4 时生效） |
 | `--ld-config` | 可选 | "50,5,0.2" | LD配置（`window_kb,window_variants,r2_threshold`，`-f` 为 3 或 4 时生效） |
 | `--no-filter-snps` | 可选 | False | 关闭预处理阶段的SNP质量过滤 |
-| `--no-cache` | 可选 | False | 禁用缓存 |
 
 **输出文件格式**：
 首行为表头，包含样本ID、所有SNP名称和表型列：
@@ -496,8 +494,7 @@ assog2p visualize \
 - 列1：特征名（格式：染色体_位置，如`1_123456`）
 - 列2：重要性绝对值（importance_abs或importance）
 - 列3：正负效应（effect，值为1或-1）
-
-也支持两列格式（特征名和重要性值，从数值推断正负）。
+目前仅支持三列格式：请确保输入文件包含 `effect` 列（1/-1）。
 
 **交互式图表功能**：
 - 鼠标悬停显示详细信息（染色体、位置、重要性值）
