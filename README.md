@@ -150,7 +150,7 @@ pip install .
 安装完成后验证环境：
 ```bash
 conda activate bioenv
-association --version
+assog2p --version
 # 应显示 assoG2P 1.0.0
 ```
 
@@ -182,11 +182,11 @@ Successfully installed assoG2P-1.0.0
 然后验证安装：
 ```bash
 # 检查版本
-association --version
+assog2p --version
 # 应显示：assoG2P 1.0.0
 
 # 查看帮助信息
-association -h
+assog2p -h
 ```
 
 **Q: whl包在哪里下载？**
@@ -265,7 +265,7 @@ pip install assoG2P-1.0.0-py3-none-any.whl
 pip install kaleido shap numba
 
 # 验证安装
-association --version
+assog2p --version
 ```
 
 **如果遇到编译器相关错误（如GCC版本不兼容、编译超时等）**：
@@ -273,7 +273,7 @@ association --version
 2. 如果问题持续，建议创建新的conda环境，使用符合要求的Python版本（3.8-3.12）重新安装
 3. 新环境可以避免旧环境的依赖冲突和缓存问题
 
-**Q: 安装后找不到`association`命令**
+**Q: 安装后找不到`assog2p`命令**
 ```bash
 # 确保已激活conda环境
 conda activate bioenv
@@ -287,7 +287,7 @@ which pip
 # macOS: ~/Library/Python/{version}/bin
 ```
 
-安装完成后，`association` 命令会在当前环境中注册。运行 `association -h` 查看使用帮助。
+安装完成后，`assog2p` 命令会在当前环境中注册。运行 `assog2p -h` 查看使用帮助。
 
 ---
 
@@ -296,29 +296,26 @@ which pip
 
 ```bash
 # Step 1: Data preprocessing (输出到目录，会生成train_data.txt)
-association preprocess -g genotype.vcf -p phenotype.txt -o preprocessed/
+assog2p preprocess -g genotype.vcf -p phenotype.txt -o preprocessed/
 
-# Step 2: Model training (使用preprocess输出目录下的train_data.txt)
-association train -i preprocessed/train_data.txt -m LightGBM -f 1 -o results/
+# Step 2: Model training (使用preprocess输出目录下的metadata.json)
+assog2p train -j preprocessed/train_data_metadata.json -m LightGBM -o results/
 
 # Step 3: Visualization
 # Feature importance visualization
-association visualize -i results/LightGBM/LightGBM_feature_importance.txt -o result
+assog2p visualize -i results/LightGBM/LightGBM_feature_importance.txt -o result
 
 # Model evaluation visualization (from plotting_data)
-association visualize -I results/LightGBM/LightGBM_plotting_data.npz -o result
+assog2p visualize -I results/LightGBM/LightGBM_plotting_data.npz -o result
 ```
 
 **Advanced Example with GWAS and LD Filtering**:
 ```bash
 # Preprocessing (输出到目录，会生成train_data.txt和train_data_metadata.json)
-association preprocess -g genotype.vcf -p phenotype.txt -o preprocessed/
+assog2p preprocess -g genotype.vcf -p phenotype.txt -o preprocessed/
 
-# Model training with GWAS and LD filtering (mode 4)
-# 可以使用train_data.txt或train_data_metadata.json作为输入
-association train -i preprocessed/train_data.txt -m LightGBM -f 4 -o results/ \
-  --gwas_genotype ./data/filtered_plink --gwas_pvalue 0.01 \
-  --ld-config "50,5,0.2"
+# Model training (metadata-driven)
+assog2p train -j preprocessed/train_data_metadata.json -m LightGBM -o results/
 ```
 
 ## Detailed Usage ##
@@ -335,13 +332,15 @@ association train -i preprocessed/train_data.txt -m LightGBM -f 4 -o results/ \
 
 **完整参数列表**：
 ```bash
-association preprocess \
+assog2p preprocess \
   -g <input.vcf> \
   -p <phenotype.txt> \
-  -o <output.txt> \
-  [--threads <number>] \
-  [--pheno-col <column_name>] \
-  [--serial]
+  -o <output_path> \
+  [-f <feature_selection_mode>] \
+  [--gwas_pvalue <threshold>] \
+  [--ld-config "<window_kb>,<window_variants>,<r2_threshold>"] \
+  [--no-filter-snps] \
+  [--no-cache]
 ```
 
 **参数说明**：
@@ -349,10 +348,12 @@ association preprocess \
 |------|------|--------|------|
 | `-g` | 必需 | - | 输入VCF文件路径 |
 | `-p` | 必需 | - | 表型数据文件路径 |
-| `-o` | 必需 | - | 输出文件路径 |
-| `--threads` | 可选 | 自动 | 并行进程数上限（可选参数，默认自动根据染色体数和CPU核心数智能分配，约每个进程处理2条染色体） |
-| `--pheno-col` | 可选 | - | 自定义表型列名（当表型文件表头不是'phenotype'时使用） |
-| `--serial` | 可选 | False | 强制使用串行模式（完全禁用多进程，逐染色体处理，适用于内存受限环境） |
+| `-o` | 必需 | - | 输出路径（可为文件或目录） |
+| `-f` | 可选 | 1 | 特征筛选模式（1=不筛选，2=GWAS，3=LD，4=GWAS+LD） |
+| `--gwas_pvalue` | 可选 | 0.01 | GWAS P值阈值（`-f` 为 2 或 4 时生效） |
+| `--ld-config` | 可选 | "50,5,0.2" | LD配置（`window_kb,window_variants,r2_threshold`，`-f` 为 3 或 4 时生效） |
+| `--no-filter-snps` | 可选 | False | 关闭预处理阶段的SNP质量过滤 |
+| `--no-cache` | 可选 | False | 禁用缓存 |
 
 **输出文件格式**：
 首行为表头，包含样本ID、所有SNP名称和表型列：
@@ -405,49 +406,31 @@ Sample2	2	0	...	0.78
 | CatBoost | 分类/回归 | 自动处理类别特征 | 含分类变量数据 |
 | Logistic | 分类/回归 | 简单解释性强 | 基线模型对比 |
 
-**特征筛选模式**：
-| 模式 | 说明 | 适用场景 |
-|------|------|----------|
-| 1 | 空白对照（不使用GWAS和LD） | 基线对比，使用全部特征 |
-| 2 | GWAS筛选（仅使用GWAS） | 基于GWAS显著性筛选SNP |
-| 3 | LD过滤（仅使用LD） | 基于连锁不平衡过滤SNP |
-| 4 | GWAS和LD综合过滤 | 先GWAS筛选，再对显著SNP进行LD过滤 |
+**说明**：训练阶段为 metadata 驱动，不再接收 GWAS/LD 筛选参数；特征筛选请在 `preprocess` 阶段通过 `-f/--gwas_pvalue/--ld-config` 完成。
 
 **完整参数列表**：
 ```bash
-association train \
-  -i <input.txt> \
+assog2p train \
+  -j <preprocess_metadata.json> \
   -m <algorithm> \
-  -f <feature_selection_mode> \
   -o <output_dir> \
   [--task_type <classification/regression>] \
   [--n_folds <number>] \
-  [--random_state <seed>] \
-  [--gwas_genotype <plink_prefix>] \
-  [--gwas_pvalue <threshold>] \
-  [--ld-config \"<window_kb>,<window_variants>,<r2_threshold>\"] \
-  [--ld_threads <number>]
+  [--random_state <seed>]
 ```
 
 **参数说明**：
 | 参数 | 类型 | 默认值 | 描述 |
 |------|------|--------|------|
-| `-i` | 必需 | - | 预处理后的训练数据文件（如：preprocess输出目录/train_data.txt）或元数据文件（*_metadata.json） |
+| `-j` | 必需 | - | 预处理元数据文件（`*_metadata.json`） |
 | `-m` | 必需 | - | 算法名称（见上表） |
-| `-f` | 必需 | - | 特征筛选模式（1/2/3/4） |
 | `-o` | 必需 | - | 输出目录 |
 | `--task_type` | 可选 | auto | 任务类型（自动检测或从元数据读取） |
 | `--n_folds` | 可选 | 5 | 交叉验证折数 |
 | `--random_state` | 可选 | 42 | 随机种子（重现结果） |
-| `--gwas_genotype` | 可选 | - | GWAS基因型文件前缀（模式2或4需要） |
-| `--gwas_pvalue` | 可选 | 0.01 | GWAS P值阈值（模式2或4使用） |
-| `--ld-config` | 可选 | \"50,5,0.2\" | LD三合一配置参数 (standardized)，格式为 `\"<window_kb>,<window_variants>,<r2_threshold>\"`，例如 `\"50,5,0.2\"` 表示窗口50KB、窗口内5个变体、r²阈值0.2（模式3或4使用） |
-| `--ld_threads` | 可选 | 8 | LD过滤线程数（模式3或4使用） |
 
 **输入文件格式**：
-- `-i` 参数支持两种输入：
-  1. 预处理后的训练数据文件（`.txt`格式）：通常位于preprocess输出目录下，文件名为`train_data.txt`（如果preprocess输出指定为目录）或用户指定的文件名
-  2. 元数据文件（`*_metadata.json`格式）：包含预处理信息的JSON文件，通常与训练数据文件在同一目录
+- `-j` 仅支持元数据文件（`*_metadata.json`），通常位于 preprocess 输出目录。
 
 **输出文件结构**：
 训练完成后，在输出目录下会生成以下文件：
@@ -473,23 +456,14 @@ output_dir/
 **使用示例**：
 ```bash
 # 单模型训练（空白对照，使用全部特征）
-# 假设preprocess输出目录为preprocessed/，会生成train_data.txt
-association train -i preprocessed/train_data.txt -m LightGBM -f 1 -o results/
-
-# 单模型训练（GWAS筛选）
-association train -i preprocessed/train_data.txt -m RandomForest -f 2 -o results/ \
-  --gwas_genotype ./data/filtered_plink --gwas_pvalue 0.01
-
-# 单模型训练（GWAS和LD综合筛选, 使用LD三合一配置）
-association train -i preprocessed/train_data.txt -m XGBoost -f 4 -o results/ \
-  --gwas_genotype ./data/filtered_plink --gwas_pvalue 0.01 \
-  --ld-config "50,5,0.2"
+# 假设preprocess输出目录为preprocessed/，会生成train_data_metadata.json
+assog2p train -j preprocessed/train_data_metadata.json -m LightGBM -o results/
 
 # 全模型训练（训练所有支持的模型）
-association train-all -i preprocessed/train_data.txt -f 1 -o results/
+assog2p train-all -j preprocessed/train_data_metadata.json -o results/
 
-# 也可以使用元数据文件作为输入（推荐，会自动读取相关信息）
-association train -i preprocessed/train_data_metadata.json -m LightGBM -f 4 -o results/
+# 推荐直接使用元数据文件输入
+assog2p train -j preprocessed/train_data_metadata.json -m LightGBM -o results/
 ```
 
 
@@ -504,27 +478,18 @@ association train -i preprocessed/train_data_metadata.json -m LightGBM -f 4 -o r
 
 **完整参数列表**：
 ```bash
-association visualize \
-  -i <input.txt> \
-  -o <output_prefix> \
-  [--feature-col <column_name>] \
-  [--value-col <column_name>] \
-  [--dpi <resolution>] \
-  [--static-only] \
-  [--interactive-only]
+assog2p visualize \
+  [-i <feature_importance.txt>] \
+  [-I <plotting_data.npz>] \
+  -o <output_prefix>
 ```
 
 **参数说明**：
 | 参数 | 类型 | 默认值 | 描述 |
 |------|------|--------|------|
-| `-i` | 必需 | - | 输入文件（特征重要性文件，如feature_importance.txt） |
-| `-o` | 必需 | - | 输出文件前缀（会自动添加_static.png和_interactive.html） |
-| `--feature-col` | 可选 | auto | 特征列名（默认自动检测，支持'feature'列或第一列） |
-| `--value-col` | 可选 | auto | 重要性值列名（默认自动检测，支持'importance_abs'或'importance'列） |
-| `--dpi` | 可选 | 300 | 静态图像分辨率（仅PNG格式） |
-| `--static-only` | 可选 | False | 仅生成静态PNG图 |
-| `--interactive-only` | 可选 | False | 仅生成交互式HTML图 |
-| `--shap-col` | 可选 | - | （已弃用）使用--value-col代替 |
+| `-i` | 可选 | - | 特征重要性数据文件（用于散点图） |
+| `-I` | 可选 | - | 模型评估结果文件 `plotting_data.npz`（用于性能/CV可视化） |
+| `-o` | 必需 | - | 输出文件前缀 |
 
 **输入文件格式**：
 支持三列格式的特征重要性文件：
@@ -541,17 +506,11 @@ association visualize \
 
 **使用示例**：
 ```bash
-# 生成静态和交互式图表（默认）
-association visualize -i feature_importance.txt -o plot
+# 基于特征重要性文件生成散点图
+assog2p visualize -i feature_importance.txt -o plot
 
-# 仅生成静态PNG图
-association visualize -i feature_importance.txt -o plot --static-only
-
-# 仅生成交互式HTML图
-association visualize -i feature_importance.txt -o plot --interactive-only
-
-# 指定高分辨率输出
-association visualize -i feature_importance.txt -o plot --dpi 600
+# 基于 plotting_data.npz 生成性能/CV图
+assog2p visualize -I LightGBM_plotting_data.npz -o plot
 ```
 
 
@@ -564,7 +523,7 @@ association visualize -i feature_importance.txt -o plot --dpi 600
 
 ### 1. Preprocess Output ###
 
-**命令**：`association preprocess`
+**命令**：`assog2p preprocess`
 
 **输出文件列表**：
 
@@ -582,7 +541,7 @@ association visualize -i feature_importance.txt -o plot --dpi 600
 
 **示例**：
 ```bash
-association preprocess -g genotype.vcf -p phenotype.csv -o preprocessed_data
+assog2p preprocess -g genotype.vcf -p phenotype.csv -o preprocessed_data
 ```
 输出：
 - `preprocessed_data.txt` - 训练数据
@@ -593,7 +552,7 @@ association preprocess -g genotype.vcf -p phenotype.csv -o preprocessed_data
 
 ### 2. Train Output ###
 
-**命令**：`association train`
+**命令**：`assog2p train`
 
 **输出文件结构**：
 ```
@@ -631,7 +590,7 @@ association preprocess -g genotype.vcf -p phenotype.csv -o preprocessed_data
 
 **示例**：
 ```bash
-association train -i preprocessed_data.txt -m LightGBM -f 1 -o results/
+assog2p train -j preprocessed_data_metadata.json -m LightGBM -o results/
 ```
 输出目录结构：
 ```
@@ -652,7 +611,7 @@ results/
 
 ### 3. Train-all Output ###
 
-**命令**：`association train-all`
+**命令**：`assog2p train-all`
 
 **输出文件结构**：
 ```
@@ -676,7 +635,7 @@ results/
 
 **示例**：
 ```bash
-association train-all -i preprocessed_data.txt -f 1 -o results/
+assog2p train-all -j preprocessed_data_metadata.json -o results/
 ```
 输出：6个模型目录 + 1个对比报告文件
 
@@ -684,7 +643,7 @@ association train-all -i preprocessed_data.txt -f 1 -o results/
 
 ### 4. Predict Output ###
 
-**命令**：`association predict`
+**命令**：`assog2p predict`
 
 **输出文件列表**：
 
@@ -710,7 +669,7 @@ Sample2   7.4
 
 **示例**：
 ```bash
-association predict -i new_data.csv -m LightGBM -o results/
+assog2p predict -i new_data.csv -m results/train/LightGBM/LightGBM_model.pkl -o results/
 ```
 输出：
 - `results/LightGBM/LightGBM_predictions.tsv` - 预测结果
@@ -719,7 +678,7 @@ association predict -i new_data.csv -m LightGBM -o results/
 
 ### 5. Visualize Output ###
 
-**命令**：`association visualize`
+**命令**：`assog2p visualize`
 
 **输出文件列表**：
 
@@ -734,13 +693,13 @@ association predict -i new_data.csv -m LightGBM -o results/
 - **交互式图**：HTML格式，支持鼠标悬停查看详细信息（染色体、位置、重要性值等）
 
 **控制输出**：
-- `--static-only`：仅生成静态PNG图
-- `--interactive-only`：仅生成交互式HTML图
-- 默认：同时生成两种格式
+- `-i`：输入特征重要性文件时生成散点图
+- `-I`：输入 `plotting_data.npz` 时生成模型性能/CV图
+- 同时提供 `-i` 与 `-I` 时，会在同一输出前缀下生成两类可视化结果
 
 **示例**：
 ```bash
-association visualize -i feature_importance.txt -o plot
+assog2p visualize -i feature_importance.txt -o plot
 ```
 输出：
 - `plot_static.png` - 静态散点图
@@ -773,17 +732,13 @@ gunzip genotype.vcf.gz
 #### 数据使用示例
 ```bash
 # 预处理示例（输出到目录，会生成train_data.txt）
-association preprocess -g rice4k_geno_add_del.vcf -p phenos.csv -o rice_preprocessed/ --threads 4
+assog2p preprocess -g rice4k_geno_add_del.vcf -p phenos.csv -o rice_preprocessed/
 
 # 模型训练示例（空白对照模式）
-association train -i rice_preprocessed/train_data.txt -m LightGBM -f 1 -o rice_results/
-
-# 模型训练示例（GWAS筛选模式）
-association train -i rice_preprocessed/train_data.txt -m LightGBM -f 2 -o rice_results/ \
-  --gwas_genotype ./data/filtered_plink --gwas_pvalue 0.01
+assog2p train -j rice_preprocessed/train_data_metadata.json -m LightGBM -o rice_results/
 
 # 可视化示例
-association visualize -i rice_results/LightGBM/feature_importance.txt -o manhattan
+assog2p visualize -i rice_results/LightGBM/feature_importance.txt -o manhattan
 ```
 
 ---
@@ -843,7 +798,7 @@ pip install assoG2P-1.0.0-py3-none-any.whl
 pip install kaleido shap numba
 
 # 验证安装
-association --version
+assog2p --version
 ```
 
 **Q: 安装lightgbm时出现编译错误**
@@ -874,25 +829,23 @@ pip install --prefer-binary xgboost
 #### 2. 运行时错误
 **Q: 预处理大型VCF文件时内存不足**
 ```bash
-# 解决方案：使用串行模式处理，减少内存占用
-association preprocess -g large.vcf -p pheno.txt -o out.txt --serial
+# 解决方案：先仅做基础预处理，必要时拆分VCF后分批处理
+assog2p preprocess -g large.vcf -p pheno.txt -o out.txt -f 1
 ```
 
 **Q: 模型训练时报错"特征数量超过限制"**
 ```bash
-# 解决方案：使用GWAS或LD筛选减少特征数量
-association train -i data.txt -m LightGBM -f 2 -o results/ \
-  --gwas_genotype ./data/filtered_plink --gwas_pvalue 0.01
+# 解决方案：在 preprocess 阶段使用 GWAS/LD 进行筛选，再用 metadata 训练
+assog2p preprocess -g data.vcf -p pheno.txt -o preprocessed/ -f 2 --gwas_pvalue 0.01
+assog2p train -j preprocessed/train_data_metadata.json -m LightGBM -o results/
 ```
 
-**Q: 特征筛选模式2/3/4需要基因型文件，但不知道如何提供**
+**Q: 训练阶段如何使用特征筛选？**
 ```bash
-# 解决方案1：使用preprocess生成的元数据文件（推荐）
-association train -i train_data_metadata.json -m LightGBM -f 4 -o results/
-
-# 解决方案2：手动指定GWAS基因型文件前缀
-association train -i train_data.txt -m LightGBM -f 4 -o results/ \
-  --gwas_genotype ./data/filtered_plink
+# 先在 preprocess 阶段设置筛选模式
+assog2p preprocess -g data.vcf -p pheno.txt -o preprocessed/ -f 4 --gwas_pvalue 0.01 --ld-config "50,5,0.2"
+# 再使用 metadata 进行训练
+assog2p train -j preprocessed/train_data_metadata.json -m LightGBM -o results/
 ```
 
 **Q: GWAS和LD综合筛选的流程是什么？**
@@ -910,19 +863,12 @@ association train -i train_data.txt -m LightGBM -f 4 -o results/ \
 ```
 
 #### 4. 可视化问题
-**Q: 如何只生成静态图或交互式图？**
+**Q: 可视化时应该使用哪些输入参数？**
 ```bash
-# 仅生成静态PNG图
-association visualize -i feature_importance.txt -o plot --static-only
-
-# 仅生成交互式HTML图
-association visualize -i feature_importance.txt -o plot --interactive-only
-```
-
-**Q: 可视化时提示列名检测失败**
-```bash
-# 解决方案：手动指定列名
-association visualize -i data.txt -o plot --feature-col feature --value-col importance_abs
+# 特征重要性散点图
+assog2p visualize -i feature_importance.txt -o plot
+# 模型性能/CV图
+assog2p visualize -I plotting_data.npz -o plot
 ```
 
 ---
