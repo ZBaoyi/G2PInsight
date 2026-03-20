@@ -57,7 +57,6 @@ try:
     DATATABLE_AVAILABLE = True
 except ImportError:
     DATATABLE_AVAILABLE = False
-    logger.debug("datatable not installed, will use pandas for file reading")
 
 # SNP数据类型常量
 SNP_DTYPE = np.int8
@@ -147,7 +146,6 @@ class VectorizedProcessor:
         try:
             total_elements = arr.size
             if total_elements > 50_000_000:  # 超过5000万元素，分块处理（串行，避免多进程pickling问题）
-                logger.debug(f"Large array detected ({total_elements:,} elements, {total_cols:,} columns), using chunked serial conversion")
                 chunk_size = 10_000_000  # 每块1000万元素
                 total_chunks = (total_elements + chunk_size - 1) // chunk_size
                 
@@ -161,7 +159,7 @@ class VectorizedProcessor:
                 arr_converted_list = []
                 for chunk_idx, (chunk_start, chunk_end) in enumerate(chunk_ranges):
                     if chunk_idx % 10 == 0:
-                        logger.debug(f"Processing array chunk {chunk_idx + 1}/{total_chunks}")
+                        pass
                     chunk_flat = arr.ravel()[chunk_start:chunk_end]
                     chunk_converted = VectorizedProcessor._convert_chunk(chunk_flat, is_numeric, target_dtype)
                     arr_converted_list.append(chunk_converted)
@@ -169,7 +167,6 @@ class VectorizedProcessor:
                 arr_converted = np.concatenate(arr_converted_list).reshape(arr.shape)
             else:
                 # 中小型数组：直接批量转换
-                logger.debug(f"Array conversion ({total_elements:,} elements, {total_cols:,} columns)")
                 if is_numeric:
                     # 已经是数字类型，直接转换（最快）
                     arr_converted = arr.astype(target_dtype)
@@ -193,11 +190,10 @@ class VectorizedProcessor:
             # 对于超大量列，至少分批处理以减少内存压力
             if total_cols > 1000:
                 batch_size = 1000
-                logger.debug(f"Fallback mode: column-wise processing, batch size: {batch_size} columns")
                 for i in range(0, total_cols, batch_size):
                     batch_cols = cols_to_convert[i:i+batch_size]
                     if (i // batch_size) % 10 == 0:
-                        logger.debug(f"Processing column batch {i//batch_size + 1}/{(total_cols + batch_size - 1)//batch_size}")
+                        pass
                     for col in batch_cols:
                         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(-1).astype(target_dtype)
             else:
@@ -357,7 +353,6 @@ class SmartCache:
             
             if key not in self.cache:
                 self.stats['misses'] += 1
-                logger.debug(f"Cache miss: key={key[:32]}... (not in cache, total_keys={len(self.cache)})")
                 return None
             
             cache_item = self.cache[key]
@@ -369,12 +364,10 @@ class SmartCache:
                     cached_mtime = cache_item.get('file_mtime', 0)
                     if file_mtime > cached_mtime:
                         # 文件已修改，删除缓存
-                        logger.debug(f"Cache miss: file modified (key={key[:32]}..., file={file_path})")
                         self._delete(key)
                         self.stats['misses'] += 1
                         return None
                 except (OSError, FileNotFoundError) as e:
-                    logger.debug(f"Cache miss: file check failed (key={key[:32]}..., error={e})")
                     self._delete(key)
                     self.stats['misses'] += 1
                     return None
@@ -385,7 +378,6 @@ class SmartCache:
             cache_item['access_count'] = cache_item.get('access_count', 0) + 1
             
             self.stats['hits'] += 1
-            logger.debug(f"Cache hit: key={key[:32]}... (access_count={cache_item['access_count']})")
             return cache_item['data']
     
     def set(self, key: str, data: Any, file_path: Optional[str] = None, 
@@ -488,12 +480,6 @@ class SmartCache:
     def print_stats(self):
         """打印缓存统计信息"""
         stats = self.get_stats()
-        logger.info(f"缓存统计: 命中率={stats['hit_ratio']:.2%}, "
-                   f"项数={stats['current_items']}, "
-                   f"大小={stats['size_mb']:.2f}MB, "
-                   f"命中={stats['hits']}, 未命中={stats['misses']}, "
-                   f"总请求={stats['total_requests']}, "
-                   f"淘汰={stats.get('evictions', 0)}")
 
 # 全局缓存实例
 GLOBAL_CACHE = SmartCache(max_size_mb=1024*4)  
@@ -869,13 +855,9 @@ def standardize_snp_column_names(
             rename_dict[col] = new_name
     
     if rename_dict:
-        logger.info(
-            f"Standardizing SNP column names using .bim mapping: "
-            f"{len(rename_dict)} / {len(df.columns)} columns will be renamed to chr_pos format"
-        )
         df = df.rename(columns=rename_dict)
     else:
-        logger.debug("standardize_snp_column_names: no SNP columns to rename (mapping empty)")
+        pass
     
     return df
 
@@ -971,10 +953,8 @@ def parse_raw_file_optimized_v2(
     if use_cache:
         cached_result = GLOBAL_CACHE.get(cache_key, check_file_mtime=True, file_path=raw_file_abs)
         if cached_result is not None:
-            logger.debug(f"Loading .raw file parsing result from cache: {raw_file_abs}")
             return cached_result
     
-    logger.debug(f"Starting optimized parsing of .raw file: {raw_file_abs}")
     
     # 步骤1: 使用内存映射打开文件
     with open(raw_file, 'rb') as f:
@@ -1006,7 +986,6 @@ def parse_raw_file_optimized_v2(
                     else:
                         snp_col_name_mapping[i] = col
             
-            logger.debug(f"Column structure: sample column index={sample_col_idx}, SNP column count={len(snp_col_indices)}")
             
             # 步骤3: 构建批量映射（向量化）
             batch_mapping = VectorizedProcessor.batch_parse_plink_columns(original_columns)
@@ -1035,13 +1014,11 @@ def parse_raw_file_optimized_v2(
             elif chunk_rows > 50000:
                 chunk_rows = 50000  # 最大chunk大小，避免内存溢出
             
-            logger.info(f"Using chunked accumulation with multi-core parallel processing: chunk size={chunk_rows:,} rows, parallel processes={max_workers if use_parallel else 1}")
             
             # 第一阶段：分块读取所有chunk（I/O密集型，串行）
             raw_chunks = []
             chunk_count = 0
             
-            logger.info(f"Starting chunked reading of .raw file: {raw_file}")
             for chunk in pd.read_csv(
                 mmap_file_obj,
                 sep=r'\s+',
@@ -1055,11 +1032,10 @@ def parse_raw_file_optimized_v2(
                 raw_chunks.append((chunk_count, chunk))
                 chunk_count += 1
                 
-                # 每读取10个chunk输出一次进度
+                # 每读取10个chunk输出一次进度（调试级别）
                 if chunk_count % 10 == 0:
-                    logger.info(f"Read {chunk_count} data chunks...")
+                    pass
             
-            logger.info(f"Chunked reading completed: {chunk_count} data chunks, starting parallel processing...")
             
             if not raw_chunks:
                 raise ValueError("No data read from file")
@@ -1074,7 +1050,6 @@ def parse_raw_file_optimized_v2(
                     for idx, chunk in raw_chunks
                 ]
                 
-                logger.info(f"Using multi-process parallel processing: {max_workers} processes")
                 
                 # 使用ProcessPoolExecutor进行真正的多核并行
                 with ProcessPoolExecutor(max_workers=max_workers) as executor:
@@ -1088,9 +1063,9 @@ def parse_raw_file_optimized_v2(
                             processed_chunks.append((chunk_idx, processed_chunk))
                             completed += 1
                             
-                            # 每完成10%输出一次进度
+                            # 每完成10%输出一次进度（调试级别）
                             if completed % max(1, chunk_count // 10) == 0:
-                                logger.info(f"Parallel processing progress: {completed}/{chunk_count} ({completed*100//chunk_count}%)")
+                                pass
                         except Exception as e:
                             chunk_idx = futures[future]
                             logger.error(f"Failed to process chunk {chunk_idx}: {e}")
@@ -1102,7 +1077,6 @@ def parse_raw_file_optimized_v2(
                 
             else:
                 # 串行处理（兼容模式或单chunk）
-                logger.info("Using serial processing mode")
                 chunks = []
                 for chunk_idx, chunk in raw_chunks:
                     chunk_data = (chunk_idx, chunk, batch_mapping, sample_col_idx, original_columns, dtype_obj)
@@ -1110,9 +1084,8 @@ def parse_raw_file_optimized_v2(
                     chunks.append(processed_chunk)
                     
                     if (chunk_idx + 1) % 10 == 0:
-                        logger.info(f"Processed {chunk_idx + 1}/{chunk_count} data chunks...")
+                        pass
             
-            logger.info(f"All chunks processed, starting merge...")
             
             # 第三阶段：累计合并所有chunk
             if len(chunks) == 1:
@@ -1120,7 +1093,6 @@ def parse_raw_file_optimized_v2(
             else:
                 # 分批合并，避免一次性concat导致内存峰值
                 batch_size = max(10, max_workers * 2) if use_parallel else 10
-                logger.debug(f"Batch merging chunks, batch size: {batch_size}")
                 
                 merged_batches = []
                 for i in range(0, len(chunks), batch_size):
@@ -1143,12 +1115,10 @@ def parse_raw_file_optimized_v2(
                     gc.collect()
             
             # 优化内存
-            logger.debug("Optimizing final DataFrame memory...")
             result_df = VectorizedProcessor.optimize_dataframe_memory(result_df)
             
             # 缓存结果
             if use_cache:
-                logger.debug("Saving to cache...")
                 GLOBAL_CACHE.set(cache_key, result_df, file_path=raw_file_abs, ttl_seconds=1800)
             
             logger.info(f".raw file parsing completed: shape={result_df.shape[0]:,} samples × {result_df.shape[1]:,} features")
@@ -1198,7 +1168,6 @@ def process_single_chromosome_optimized(
         if use_cache:
             cached_result = GLOBAL_CACHE.get(cache_key)
             if cached_result is not None:
-                logger.debug(f"Loading chromosome {chr_num} result from cache (key={cache_key[:32]}...)")
                 # 兼容旧缓存：历史版本可能把 phenotype/index 等列 merge 进来了
                 try:
                     df_cached = cached_result
@@ -1225,7 +1194,6 @@ def process_single_chromosome_optimized(
                 except Exception:
                     return (chr_num, cached_result)
         
-        logger.info(f"Processing chromosome {chr_num}")
 
         # 统一输出前缀（允许外部先并行生成.raw，再进入解析）
         if chr_recode_prefix is None:
@@ -1310,7 +1278,6 @@ def process_single_chromosome_optimized(
         if use_cache:
             GLOBAL_CACHE.set(cache_key, chr_geno_df, ttl_seconds=7200)  # 缓存2小时
         
-        logger.info(f"Chromosome {chr_num} processing completed: shape={chr_geno_df.shape[0]:,} samples × {chr_geno_df.shape[1]:,} features")
         
         return (chr_num, chr_geno_df)
         
@@ -1387,7 +1354,7 @@ def plink_to_training_data_optimized(
     if not chr_list:
         raise RuntimeError("No chromosomes detected")
     
-    logger.info(f"Detected {len(chr_list)} chromosome(s): {chr_list}")
+    logger.info(f"Detected {len(chr_list)} chromosome(s)")
     
     # 步骤3: 染色体级并行生成 .raw（PLINK --recodeA）
     # 说明：此处仅并行“生成raw文件”，解析与合并仍沿用原逻辑，避免内存压力过大
@@ -1627,8 +1594,9 @@ def plink_to_training_data_optimized(
         
         # 步骤5.5: 兜底统一 SNP 列名为 chr_position 格式
         try:
-            # .bim 文件与 final_plink_prefix 对应
-            bim_file = f"{Path(final_plink_prefix).absolute().as_posix()}.bim"
+            # .bim 文件与当前用于生成训练数据的 PLINK 前缀对应
+            # 在本函数内，该前缀为 plink_prefix_abs（run_preprocess 中传入的是 final_plink_prefix）
+            bim_file = f"{plink_prefix_abs}.bim"
             # 使用在本函数开头加载的 pheno_df_loaded 的列名作为表型列集合
             pheno_columns = list(pheno_df_loaded.columns) if 'pheno_df_loaded' in locals() else None
             final_train_df = standardize_snp_column_names(
@@ -1701,51 +1669,129 @@ def run_preprocess(
     use_cache: bool = True,
     feature_selection_mode: int = 1,
     gwas_pvalue: float = 0.01,
-    ld_window_kb: int = 50,
-    ld_window: int = 5,
-    ld_window_r2: float = 0.2,
+    ld_config: str = "50,5,0.2",
     keep_temp_files: bool = False,
 ) -> int:
     """
     优化的预处理主函数
     集成第一层优化
+    
+    LD参数三合一配置 (standardized):
+      - 参数名: ld_config
+      - 参数格式: \"<window_kb>,<window_variants>,<r2_threshold>\"
+      - 示例: \"50,5,0.2\" 表示 LD窗口50KB, 窗口内5个变体, r²阈值0.2
     """
     # 当前运行生成的临时文件登记
     cleanup_registry: List[str] = []
     temp_prefixes: List[str] = []
     
     def cleanup_current_run():
-        """清理当前运行生成的临时文件"""
+        """清理当前运行生成的临时文件（仅在 keep_temp_files=False 时生效）"""
+        if keep_temp_files:
+            # 用户显式要求保留临时文件，用于调试或复现
+            return
+        
+        # 1) 按前缀批量删除典型 PLINK 中间文件
         for prefix in temp_prefixes:
             delete_temp_files(prefix, [".bed", ".bim", ".fam", ".log", ".nosex", ".raw", ".map", ".ped"])
+        
+        # 2) 删除登记在册的其它临时文件
         for fp in cleanup_registry:
             try:
                 Path(fp).unlink()
-            except:
+            except Exception:
                 pass
+        
+        # 3) 清理GWAS产生的临时文件和目录（如果存在）
+        try:
+            import shutil
+            if 'stage_output_dir' in locals() or 'stage_output_dir' in globals():
+                stage_output_dir_path = Path(stage_output_dir)
+                # 删除GWAS产生的 output 目录
+                gwas_output_dir = stage_output_dir_path / "output"
+                if gwas_output_dir.exists():
+                    shutil.rmtree(gwas_output_dir, ignore_errors=True)
+                # 删除GWAS输出前缀相关的所有文件
+                gwas_prefix_pattern = stage_output_dir_path / "preprocess_gwas*"
+                for gwas_file in stage_output_dir_path.glob("preprocess_gwas*"):
+                    try:
+                        if gwas_file.is_file():
+                            gwas_file.unlink()
+                    except Exception:
+                        pass
+        except Exception as e:
+            pass
+        
+        # 4) 删除整个临时目录 tmp（包括目录本身及其所有文件和子目录，包括LD产生的文件）
+        try:
+            import shutil
+            if 'base_output_dir' in locals() or 'base_output_dir' in globals():
+                # 删除整个 tmp 目录（output_dir/tmp），而不仅仅是 tmp/preprocess 子目录
+                tmp_root_dir = base_output_dir / "tmp"
+                if tmp_root_dir.exists():
+                    shutil.rmtree(tmp_root_dir, ignore_errors=True)
+            elif 'tmp_dir' in locals() or 'tmp_dir' in globals():
+                # 如果 base_output_dir 不可用，则删除 tmp_dir 的父目录（即整个 tmp 目录）
+                tmp_dir_path = Path(tmp_dir)
+                tmp_root_dir = tmp_dir_path.parent  # 获取 tmp 目录（即 output_dir/tmp）
+                if tmp_root_dir.exists() and tmp_root_dir.name == "tmp":
+                    shutil.rmtree(tmp_root_dir, ignore_errors=True)
+        except Exception as e:
+            # 删除失败不影响主流程
+            pass
     
     try:
-        # 参数检查
+        # ======================== 参数检查与标准化 ========================
         if not Path(phenotype_file).exists():
             raise FileNotFoundError(f"表型文件不存在:{phenotype_file}")
         
-        # 处理输出路径
+        # 解析LD三合一配置参数 (standardized)
+        try:
+            ld_parts = [p.strip() for p in str(ld_config).split(",") if p.strip() != ""]
+            if len(ld_parts) != 3:
+                raise ValueError
+            ld_window_kb = int(ld_parts[0])
+            ld_window = int(ld_parts[1])
+            ld_window_r2 = float(ld_parts[2])
+        except Exception:
+            raise ValueError(
+                f"无效的LD三合一配置 ld_config={ld_config!r}; "
+                f"正确格式为 \"<window_kb>,<window_variants>,<r2_threshold>\", 例如 \"50,5,0.2\""
+            )
+        
+        # ======================== 输出目录结构规范化（standardized） ========================
+        # 新的目录结构：
+        # - 如果 -o test，则在 test 目录下创建 preprocess 子目录
+        # - 需要保存的文件放在 test/preprocess/ 中
+        # - 临时文件放在 test/tmp/ 中（与 preprocess 同级）
+        # - 阶段运行结束或异常结束时删除 test/tmp/ 目录
         output_path = Path(output_file).absolute()
+        
+        # 确定基础输出目录（-o 指定的目录）
         if output_path.is_dir() or (not output_path.suffix and not output_path.exists()):
-            output_dir = output_path
-            output_dir.mkdir(parents=True, exist_ok=True)
-            output_file_name = "train_data.txt"
-            output_file_path = output_dir / output_file_name
-            output_prefix = output_file_name.replace('.txt', '').replace('.gz', '')
+            base_output_dir = output_path
         else:
-            output_dir = output_path.parent
-            output_dir.mkdir(parents=True, exist_ok=True)
-            output_file_path = output_path
+            base_output_dir = output_path.parent
+        
+        base_output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 在基础输出目录下创建 preprocess 子目录（用于保存需要保留的文件）
+        stage_output_dir = base_output_dir / "preprocess"
+        stage_output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 在基础输出目录下创建 tmp/preprocess 子目录（用于临时文件和中间文件）
+        # 每个阶段在 tmp 下创建自己的子目录，避免不同阶段的临时文件互相干扰
+        tmp_dir = base_output_dir / "tmp" / "preprocess"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 确定输出文件路径和前缀
+        if output_path.is_dir() or (not output_path.suffix and not output_path.exists()):
+            output_prefix = base_output_dir.name
+        else:
             output_prefix = output_path.stem
         
-        # 创建统一临时目录
-        tmp_dir = output_dir / "tmp_p"
-        tmp_dir.mkdir(parents=True, exist_ok=True)
+        output_file_name = f"{output_prefix}_train_data.txt"
+        output_file_path = stage_output_dir / output_file_name
         
         # PLINK中间前缀
         temp_plink_prefix = str(tmp_dir / "temp_plink")
@@ -1762,7 +1808,7 @@ def run_preprocess(
         pheno_df = load_phenotype(phenotype_file, pheno_col)
         
         # 判断表型类型
-        task_type = determine_phenotype_type(pheno_df, output_dir)
+        task_type = determine_phenotype_type(pheno_df, stage_output_dir)
         pheno_df = convert_phenotype_dtype(pheno_df, task_type)
         
         # 回归任务剔除0值
@@ -1796,7 +1842,7 @@ def run_preprocess(
         
         # 回归任务绘制分布图
         if task_type == "regression":
-            plot_regression_phenotype_distribution(pheno_df, output_dir)
+            plot_regression_phenotype_distribution(pheno_df, stage_output_dir)
         
         # 步骤3: 样本过滤
         sample_filtered_prefix = str(tmp_dir / "sample_filtered_plink")
@@ -1821,7 +1867,7 @@ def run_preprocess(
             gwas_genotype_prefix = sample_filtered_plink
             logger.info("SNP filtering skipped")
 
-        # 步骤4.5: 预处理阶段的GWAS/LD特征筛选（可选）
+        # 步骤4.5: 预处理阶段的GWAS/LD特征筛选（可选, LD参数基于三合一配置）
         if feature_selection_mode not in [1, 2, 3, 4]:
             raise ValueError(f"feature_selection_mode must be 1, 2, 3, or 4, got: {feature_selection_mode}")
 
@@ -1844,7 +1890,7 @@ def run_preprocess(
                     significant_snps = run_gwas_preprocess(
                         plink_prefix=final_plink_prefix,
                         pheno_df=pheno_df,
-                        output_dir=output_dir,
+                        output_dir=stage_output_dir,
                         tmp_dir=tmp_dir,
                         pvalue_threshold=gwas_pvalue,
                         # 关键：当用户指定 --no-filter-snps 时，同时关闭GWAS阶段的PLINK质控
@@ -1866,7 +1912,8 @@ def run_preprocess(
                     feature_selection_mode = 1
                 else:
                     logger.info(
-                        f"Preprocess LD filtering: window_kb={ld_window_kb}, window={ld_window}, r²={ld_window_r2}"
+                        f"[LD_CONFIG] Preprocess LD filtering with three-in-one config: "
+                        f"window_kb={ld_window_kb}, window_variants={ld_window}, r²_threshold={ld_window_r2}"
                     )
                     # 确保使用绝对路径
                     ld_output_prefix = str(Path(tmp_dir / "ld_filtered_plink").absolute())
@@ -1934,7 +1981,7 @@ def run_preprocess(
         
         # 步骤6: 生成元数据
         generate_metadata(
-            output_prefix=str(output_dir / output_prefix),
+            output_prefix=str(stage_output_dir / output_prefix),
             plink_prefix=gwas_genotype_prefix,
             train_file=actual_train_file,
             valid_samples=train_df.index.tolist(),
@@ -1961,6 +2008,9 @@ def run_preprocess(
         
         # 最终内存清理
         gc.collect()
+        
+        # 预处理成功结束后，根据 keep_temp_files 选项清理临时文件
+        cleanup_current_run()
         
         return 0
         
@@ -2175,11 +2225,83 @@ def load_phenotype(pheno_path: str, pheno_col: Optional[str] = None) -> pd.DataF
     if pheno_col is not None:
         logger.warning(f"--pheno-col参数无效（表型文件无表头）")
 
-    # 自动识别分隔符
+    # 自动识别分隔符（更稳健：多行投票 + 自动跳过疑似表头行）
     def detect_separator(file_path: str) -> str:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            first_line = f.readline().strip()
-            return '\t' if '\t' in first_line else ',' if ',' in first_line else r'\s+'
+        """
+        返回值用于 pandas.read_csv 的 sep 参数：
+        - '\t'：TSV
+        - ','：CSV
+        - r'\s+'：空白分隔（一个或多个空格/Tab）
+
+        说明：
+        - 旧实现只看第一行，若第一行是带逗号的表头（如 Sample,Phenotype），但数据行用空白分隔，会误判 sep=','，
+          导致大量 phenotype 读成缺失值并被当作 abnormal value 删除。
+        - 新实现会读取多行，尽量避开表头，并按“多数行”选择能稳定切分出 >=2 列的分隔符。
+        """
+        import csv
+        candidates = ["\t", ",", r"\s+"]
+
+        def _is_header_like(line: str) -> bool:
+            # 粗略判断：同时包含字母且不包含数字的行，很可能是表头
+            s = line.strip()
+            if not s:
+                return False
+            has_alpha = any(ch.isalpha() for ch in s)
+            has_digit = any(ch.isdigit() for ch in s)
+            return has_alpha and not has_digit
+
+        # 读取若干行用于检测
+        lines: List[str] = []
+        with open(file_path, "r", encoding="utf-8") as f:
+            for _ in range(30):
+                ln = f.readline()
+                if not ln:
+                    break
+                ln = ln.strip("\n\r")
+                if ln.strip() == "":
+                    continue
+                lines.append(ln)
+
+        if not lines:
+            return r"\s+"
+
+        # 跳过疑似表头行（最多跳1行）
+        work_lines = lines[:]
+        if _is_header_like(work_lines[0]) and len(work_lines) > 1:
+            work_lines = work_lines[1:]
+
+        # 先尝试 csv.Sniffer（只对 \t 和 , 有意义；\s+ 属于正则分隔，不参与 Sniffer）
+        try:
+            sample_text = "\n".join(work_lines[:10])
+            dialect = csv.Sniffer().sniff(sample_text, delimiters="\t,")
+            sniffed = dialect.delimiter
+            if sniffed in ("\t", ","):
+                # 只有当“多数行”确实能切出 >=2 列时才采纳
+                ok = 0
+                for ln in work_lines[:20]:
+                    if len(ln.split(sniffed)) >= 2:
+                        ok += 1
+                if ok >= max(1, int(0.6 * min(20, len(work_lines)))):
+                    return sniffed
+        except Exception:
+            pass
+
+        # 多数投票：统计各分隔符在多数行上是否能切分出>=2列
+        best_sep = r"\s+"
+        best_score = -1
+        eval_lines = work_lines[:20]
+        for sep in candidates:
+            score = 0
+            for ln in eval_lines:
+                parts = re.split(sep, ln.strip()) if sep == r"\s+" else ln.split(sep)
+                parts = [p for p in parts if p != ""]
+                if len(parts) >= 2:
+                    score += 1
+            if score > best_score:
+                best_score = score
+                best_sep = sep
+
+        return best_sep
 
     sep = detect_separator(pheno_path)
 
@@ -2201,11 +2323,6 @@ def load_phenotype(pheno_path: str, pheno_col: Optional[str] = None) -> pd.DataF
 
     # 如果列数>2：默认使用第2列作为表型列，其余列忽略
     if pheno_df.shape[1] > 2:
-        logger.warning(
-            f"Phenotype file contains {pheno_df.shape[1]} columns (>=2). "
-            f"Using column 1 as sample ID and column 2 as phenotype value. "
-            f"Remaining {pheno_df.shape[1] - 2} column(s) will be ignored."
-        )
         pheno_df = pheno_df.iloc[:, [0, 1]].copy()
 
     pheno_df.columns = ["sample", "phenotype"]
@@ -2229,22 +2346,11 @@ def load_phenotype(pheno_path: str, pheno_col: Optional[str] = None) -> pd.DataF
         pheno_df = pheno_df[~abnormal_mask].reset_index(drop=True)
         remaining_count = len(pheno_df)
         
-        warning_msg = (
-            f"Phenotype file contains abnormal values, automatically removed:\n"
-            f"   - Abnormal value count: {abnormal_count}\n"
-            f"   - Original sample count: {original_count}\n"
-            f"   - Remaining after removal: {remaining_count}\n"
-            f"   - Example abnormal values (first 10):\n"
+        # 默认只输出摘要，详细样例与异常值列表降级到 debug，避免污染日志
+        logger.warning(
+            "Phenotype abnormal values removed: "
+            f"count={abnormal_count}, original={original_count}, remaining={remaining_count}"
         )
-        for i, (sample, pheno_val) in enumerate(zip(abnormal_samples, abnormal_pheno_values), 1):
-            warning_msg += f"      {i}. Sample ID: {sample}, Phenotype value: {pheno_val}\n"
-        if abnormal_count > 10:
-            warning_msg += f"      ... {abnormal_count - 10} more abnormal samples removed\n"
-        warning_msg += (
-            f"\n   Abnormal values include: {', '.join(abnormal_values)}\n"
-            f"   as well as empty values, missing values, etc.\n"
-        )
-        logger.warning(warning_msg)
         
         # 检查剔除后是否还有有效数据
         if pheno_df.empty:
@@ -2273,10 +2379,8 @@ def load_phenotype(pheno_path: str, pheno_col: Optional[str] = None) -> pd.DataF
         remaining_count_after_convert = len(pheno_df)
         
         logger.warning(
-            f"Found {nan_count} samples that cannot be converted to numeric type during phenotype conversion, automatically removed:\n"
-            f"   - Sample count before conversion: {original_count_before_convert}\n"
-            f"   - Remaining after removal: {remaining_count_after_convert}\n"
-            f"   - Example non-convertible samples (first 10): {nan_samples[:10]}\n"
+            "Phenotype non-numeric values removed: "
+            f"count={nan_count}, before={original_count_before_convert}, remaining={remaining_count_after_convert}"
         )
         
         if pheno_df.empty:
@@ -2358,11 +2462,9 @@ def convert_phenotype_dtype(pheno_df: pd.DataFrame, task_type: Literal["regressi
     if task_type == "classification":
         # 分类任务：转为 np.int32
         pheno_df["phenotype"] = pheno_df["phenotype"].astype(np.int32)
-        logger.debug("表型值已转换为 np.int32（分类任务）")
     else:
         # 回归任务：转为 np.float32（精度足够且内存减半）
         pheno_df["phenotype"] = pheno_df["phenotype"].astype(np.float32)
-        logger.debug("表型值已转换为 np.float32（回归任务）")
     
     # 显式释放 + 强制GC
     gc.collect()
@@ -2647,10 +2749,11 @@ def run_gwas_preprocess(
     significant_snps = gwas_df[gwas_df[pvalue_col] < pvalue_threshold][snp_col].dropna().astype(str).unique().tolist()
     logger.info(f"GWAS in preprocess completed: {len(significant_snps):,} significant SNPs (p < {pvalue_threshold})")
 
-    # 5. 清理GWAS中间文件（保留最终assoc结果文件）
+    # 5. 清理GWAS产生的所有临时文件和目录（包括output目录）
     if not keep_temp_files:
         try:
-            logger.info("开始清理GWAS中间文件...")
+            logger.info("开始清理GWAS临时文件...")
+            import shutil
             # 以 gwas_output_prefix 作为基础前缀
             gwas_prefix_base = str(Path(gwas_output_prefix_abs))
             # 1）PLINK 质控及过滤产生的中间PLINK文件
@@ -2662,21 +2765,29 @@ def run_gwas_preprocess(
             # 3）样本列表和协变量文件
             delete_temp_files(gwas_prefix_base, ["_valid_samples.txt"])
             delete_temp_files(gwas_prefix_base, ["_covariates_filtered.txt"])
-            # 4）亲缘矩阵及其日志（output 目录下）
-            kinship_prefix = str(output_dir_path / "output" / f"{base_prefix}_kinship")
-            delete_temp_files(kinship_prefix, [".cXX.txt", ".log.txt"])
-            # 5）GWAS 工作子目录（仅存放表型临时文件）
+            # 4）删除整个 output 目录（包含所有GWAS结果文件，包括assoc结果文件）
+            output_subdir = output_dir_path / "output"
+            if output_subdir.exists():
+                try:
+                    shutil.rmtree(output_subdir, ignore_errors=True)
+                except Exception as e:
+                    pass
+            # 5）删除GWAS输出前缀相关的所有文件
+            gwas_prefix_path = Path(gwas_output_prefix_abs)
+            if gwas_prefix_path.parent.exists():
+                for fp in gwas_prefix_path.parent.glob(f"{gwas_prefix_path.name}*"):
+                    try:
+                        if fp.is_file():
+                            fp.unlink()
+                    except Exception:
+                        pass
+            # 6）GWAS 工作子目录（仅存放表型临时文件）
             try:
                 if gwas_work_dir.exists():
-                    for fp in gwas_work_dir.glob("*"):
-                        try:
-                            fp.unlink()
-                        except Exception:
-                            pass
-                    gwas_work_dir.rmdir()
+                    shutil.rmtree(gwas_work_dir, ignore_errors=True)
             except Exception:
                 pass
-            logger.info("GWAS中间文件清理完成（保留assoc结果文件供后续检查）")
+            logger.info("GWAS临时文件清理完成")
         except Exception as e:
             logger.warning(f"清理GWAS中间文件时发生异常，但不影响主流程：{e}")
 
@@ -2850,7 +2961,6 @@ def create_keep_file(pheno_df: pd.DataFrame, output_file: str) -> str:
         for sample_id in sample_ids:
             f.write(f"{sample_id}\t{sample_id}\n")
     
-    logger.debug(f"已创建keep文件: {output_file}，包含 {len(sample_ids)} 个样本")
     return output_file
 
 def get_cache_key(bim_file: str, chr_num: Optional[str] = None) -> str:
@@ -2946,22 +3056,15 @@ if __name__ == "__main__":
         help="GWAS显著性阈值（用于模式2和4），默认0.01"
     )
     parser.add_argument(
-        "--ld-window-kb",
-        type=int,
-        default=50,
-        help="LD过滤参数：--indep-pairwise窗口大小（KB），用于模式3和4"
-    )
-    parser.add_argument(
-        "--ld-window",
-        type=int,
-        default=5,
-        help="LD过滤参数：--indep-pairwise窗口内SNP数量，用于模式3和4"
-    )
-    parser.add_argument(
-        "--ld-window-r2",
-        type=float,
-        default=0.2,
-        help="LD过滤参数：--indep-pairwise r²阈值，用于模式3和4"
+        "--ld-config",
+        type=str,
+        default="50,5,0.2",
+        help=(
+            "LD三合一配置参数 (standardized): "
+            "\"<window_kb>,<window_variants>,<r2_threshold>\", "
+            "例如 \"50,5,0.2\" 表示窗口50KB、窗口内5个变体、r²阈值0.2；"
+            "仅在特征筛选模式为3或4时使用"
+        ),
     )
 
     
@@ -2977,7 +3080,5 @@ if __name__ == "__main__":
         use_cache=not args.no_cache,
         feature_selection_mode=args.feature_selection_mode,
         gwas_pvalue=args.gwas_pvalue,
-        ld_window_kb=args.ld_window_kb,
-        ld_window=args.ld_window,
-        ld_window_r2=args.ld_window_r2,
+        ld_config=args.ld_config,
     ))

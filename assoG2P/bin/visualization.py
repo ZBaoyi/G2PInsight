@@ -33,6 +33,10 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# ======================== 绘图质量固定开关（standardized） ========================
+# 固定实现：不再通过命令行或函数参数切换；统一使用期刊质量配置。
+PUB_QUALITY_MODE: bool = True
+
 class EnhancedGenomeVisualizer:
     """
     增强型基因组数据可视化工具
@@ -824,7 +828,8 @@ def plot_performance_curves(
     output_dir: Union[str, Path], 
     model_type: str, 
     task_type: str, 
-    publication_quality: bool = True
+    publication_quality: bool = True,
+    output_prefix: Optional[Union[str, Path]] = None,
 ) -> None:
     """
     绘制性能评估指标变化曲线（分类/回归）
@@ -836,8 +841,16 @@ def plot_performance_curves(
     :param model_type: 模型类型
     :param task_type: 任务类型（classification/regression）
     :param publication_quality: 是否生成期刊发表质量图表（高分辨率、矢量格式、专业配色）
+    :param output_prefix: 输出文件前缀 (standardized)。若提供，则输出文件名使用该前缀；否则使用默认文件名。
     """
     output_dir = Path(output_dir)
+    output_prefix_path: Optional[Path] = None
+    if output_prefix is not None:
+        output_prefix_path = Path(output_prefix)
+        if not output_prefix_path.parent or str(output_prefix_path.parent) == ".":
+            output_prefix_path = output_dir / output_prefix_path.name
+        # 强制与 output_dir 对齐
+        output_prefix_path = output_dir / output_prefix_path.name
     
     # 设置matplotlib环境
     matplotlib_available, plt = _setup_matplotlib()
@@ -1048,13 +1061,20 @@ def plot_performance_curves(
         # 保存图形
         if publication_quality:
             # 期刊标准：保存为PDF（矢量格式）和PNG（高分辨率）
-            plot_file_pdf = output_dir / "performance_curves.pdf"
-            plot_file_png = output_dir / "performance_curves.png"
+            if output_prefix_path is not None:
+                plot_file_pdf = Path(f"{output_prefix_path}_performance_curves.pdf")
+                plot_file_png = Path(f"{output_prefix_path}_performance_curves.png")
+            else:
+                plot_file_pdf = output_dir / "performance_curves.pdf"
+                plot_file_png = output_dir / "performance_curves.png"
             plt.savefig(plot_file_pdf, dpi=300, bbox_inches='tight', format='pdf')
             plt.savefig(plot_file_png, dpi=300, bbox_inches='tight', format='png')
             logger.info(f"  Publication-quality plots saved: {plot_file_pdf} and {plot_file_png}")
         else:
-            plot_file = output_dir / "performance_curves.png"
+            if output_prefix_path is not None:
+                plot_file = Path(f"{output_prefix_path}_performance_curves.png")
+            else:
+                plot_file = output_dir / "performance_curves.png"
             plt.savefig(plot_file, dpi=150, bbox_inches='tight')
         plt.close()
     
@@ -1209,7 +1229,10 @@ def plot_performance_curves(
                                ha='center', va='center', transform=ax.transAxes, fontsize=12)
             
             plt.tight_layout()
-            plot_file1 = output_dir / "performance_curves.png"
+            if output_prefix_path is not None:
+                plot_file1 = Path(f"{output_prefix_path}_performance_curves.png")
+            else:
+                plot_file1 = output_dir / "performance_curves.png"
             plt.savefig(plot_file1, dpi=150, bbox_inches='tight')
             plt.close()
             
@@ -1220,7 +1243,8 @@ def plot_cv_training_curves(
     cv_results: Dict, 
     output_dir: Union[str, Path], 
     model_type: str, 
-    task_type: str
+    task_type: str,
+    output_prefix: Optional[Union[str, Path]] = None,
 ) -> None:
     """
     绘制交叉验证训练过程柱形图
@@ -1229,8 +1253,15 @@ def plot_cv_training_curves(
     :param output_dir: 输出目录
     :param model_type: 模型类型
     :param task_type: 任务类型
+    :param output_prefix: 输出文件前缀 (standardized)。若提供，则输出文件名使用该前缀；否则使用默认文件名。
     """
     output_dir = Path(output_dir)
+    output_prefix_path: Optional[Path] = None
+    if output_prefix is not None:
+        output_prefix_path = Path(output_prefix)
+        if not output_prefix_path.parent or str(output_prefix_path.parent) == ".":
+            output_prefix_path = output_dir / output_prefix_path.name
+        output_prefix_path = output_dir / output_prefix_path.name
     
     # 确保输出目录存在
     try:
@@ -1300,7 +1331,6 @@ def plot_cv_training_curves(
                 logger.warning(f"  Fold {i+1}: P-value is None")
         
         # 诊断信息：检查提取到的数据
-        logger.debug(f"  Extracted {len(pearson_corrs)} correlation values, {len(pearson_pvalues)} P-values")
         if len(pearson_pvalues) != n_folds:
             logger.warning(f"  P-value count ({len(pearson_pvalues)}) does not match number of folds ({n_folds})!")
             if len(pearson_pvalues) > 0:
@@ -1620,8 +1650,11 @@ def plot_cv_training_curves(
     try:
         plt.tight_layout()
         
-        # 保存图形
-        plot_file = output_dir / "cv_training_curves.png"
+        # 保存图形（standardized）
+        if output_prefix_path is not None:
+            plot_file = Path(f"{output_prefix_path}_cv_training_curves.png")
+        else:
+            plot_file = output_dir / "cv_training_curves.png"
         
         # 确保文件路径有效
         try:
@@ -1655,7 +1688,8 @@ def plot_cv_training_curves(
 def plot_model_performance_from_file(
     plotting_data_file: Union[str, Path],
     output_dir: Optional[Union[str, Path]] = None,
-    publication_quality: Optional[bool] = None
+    publication_quality: Optional[bool] = None,
+    output_prefix: Optional[Union[str, Path]] = None,
 ) -> int:
     """
     从plotting_data.npz文件读取数据并绘制模型性能曲线
@@ -1680,6 +1714,17 @@ def plot_model_performance_from_file(
         else:
             output_dir = Path(output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
+
+        # 规范化输出文件命名（standardized）
+        # - 若提供 output_prefix，则所有生成图片均以该前缀命名
+        # - 否则使用默认文件名（兼容旧行为）
+        output_prefix_path: Optional[Path] = None
+        if output_prefix is not None:
+            output_prefix_path = Path(output_prefix)
+            if not output_prefix_path.parent or str(output_prefix_path.parent) == ".":
+                output_prefix_path = output_dir / output_prefix_path.name
+            # 强制输出目录与 output_dir 一致，避免前缀带其他目录导致混乱
+            output_prefix_path = output_dir / output_prefix_path.name
         
         # 确定publication_quality
         if publication_quality is None:
@@ -1694,9 +1739,13 @@ def plot_model_performance_from_file(
                 output_dir,
                 plotting_data['model_type'],
                 plotting_data['task_type'],
-                publication_quality
+                publication_quality,
+                output_prefix=output_prefix_path
             )
-            logger.info(f"Performance evaluation curves generated: {output_dir / 'performance_curves.png'}")
+            if output_prefix_path is not None:
+                logger.info(f"Performance evaluation curves generated: {output_prefix_path}_performance_curves.png")
+            else:
+                logger.info(f"Performance evaluation curves generated: {output_dir / 'performance_curves.png'}")
         
         # 绘制交叉验证曲线
         if plotting_data['cv_results'] is not None:
@@ -1704,9 +1753,13 @@ def plot_model_performance_from_file(
                 plotting_data['cv_results'],
                 output_dir,
                 plotting_data['model_type'],
-                plotting_data['task_type']
+                plotting_data['task_type'],
+                output_prefix=output_prefix_path
             )
-            logger.info(f"Cross-validation curves generated: {output_dir / 'cv_training_curves.png'}")
+            if output_prefix_path is not None:
+                logger.info(f"Cross-validation curves generated: {output_prefix_path}_cv_training_curves.png")
+            else:
+                logger.info(f"Cross-validation curves generated: {output_dir / 'cv_training_curves.png'}")
         
         return 0
         

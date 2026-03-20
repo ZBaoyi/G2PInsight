@@ -6,10 +6,6 @@ requires = [
 build-backend = "setuptools.build_meta"
 
 [project]
-# 包名建议：使用小写符合 PyPI 规范
-# 选项1: assog2p (推荐，简洁且符合规范)
-# 选项2: asso-g2p (使用连字符，更易读)
-# 选项3: genome-association-toolkit (描述性更强)
 name = "assog2p"
 version = "1.0.0"
 description = "Genome-wide association analysis toolkit"

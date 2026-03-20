@@ -207,16 +207,16 @@ def run_plink_command(plink_path: str, args: list, step_name: str) -> bool:
 
 def cleanup_intermediate_files(output_prefix: str, input_type: str, input_info: Dict) -> None:
     """
-    清理所有中间文件，只保留最终的VCF文件
+    清理所有中间文件（包括prune.in，因为所有临时文件都不保留）
     
     Args:
         output_prefix: 输出文件前缀
         input_type: 输入文件类型
         input_info: 输入文件信息
     """
-    # 基础中间文件
-    # 注意：不删除 prune.in 文件，因为 modeltraining 模块需要它来读取 LD 过滤后的 SNP 列表
+    # 基础中间文件（包括prune.in，所有临时文件都不保留）
     patterns_to_delete = [
+        f"{output_prefix}.prune.in",  # 删除prune.in文件
         f"{output_prefix}.prune.out", 
         f"{output_prefix}.log",
         f"{output_prefix}_filtered.log",
@@ -363,8 +363,12 @@ def run_ld_filtering(
             prune_args.extend(["--extract", extract_snps_file])
             logger.info(f"Performing LD filtering only on specified SNP list: {extract_snps_file}")
         
-        # 确定PLINK可执行路径：优先系统PATH，其次内置软件目录
-        plink_executable = shutil.which("plink") or get_bundled_plink_path()
+        # 确定PLINK可执行路径：优先项目内集成软件，其次系统PATH（standardized）
+        bundled_plink = Path(get_bundled_plink_path())
+        if bundled_plink.exists():
+            plink_executable = str(bundled_plink)
+        else:
+            plink_executable = shutil.which("plink") or ""
         if not Path(plink_executable).exists():
             logger.error(f"PLINK executable not found, please check PATH or software directory: {plink_executable}")
             return 1
@@ -406,9 +410,16 @@ def run_ld_filtering(
             )
             logger.info(f"BED file size: {bed_file.stat().st_size / (1024*1024):.2f} MB")
             
-            # 9. 清理中间文件（保留prune.in供上层读取）
+            # 9. 清理所有中间文件（包括prune.in，因为所有临时文件都不保留）
             if not keep_intermediate:
                 cleanup_intermediate_files(output_prefix, input_type, input_info)
+                # 删除 prune.in 文件（所有临时文件都不保留）
+                prune_in_file = Path(f"{output_prefix_abs}.prune.in")
+                if prune_in_file.exists():
+                    try:
+                        prune_in_file.unlink()
+                    except Exception as e:
+                        pass
             else:
                 logger.info("Keeping all intermediate files (debug mode)")
             

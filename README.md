@@ -301,8 +301,12 @@ association preprocess -g genotype.vcf -p phenotype.txt -o preprocessed/
 # Step 2: Model training (使用preprocess输出目录下的train_data.txt)
 association train -i preprocessed/train_data.txt -m LightGBM -f 1 -o results/
 
-# Step 3: Feature importance visualization
-association visualize -i results/LightGBM/feature_importance.txt -o result
+# Step 3: Visualization
+# Feature importance visualization
+association visualize -i results/LightGBM/LightGBM_feature_importance.txt -o result
+
+# Model evaluation visualization (from plotting_data)
+association visualize -I results/LightGBM/LightGBM_plotting_data.npz -o result
 ```
 
 **Advanced Example with GWAS and LD Filtering**:
@@ -314,7 +318,7 @@ association preprocess -g genotype.vcf -p phenotype.txt -o preprocessed/
 # 可以使用train_data.txt或train_data_metadata.json作为输入
 association train -i preprocessed/train_data.txt -m LightGBM -f 4 -o results/ \
   --gwas_genotype ./data/filtered_plink --gwas_pvalue 0.01 \
-  --ld_window_kb 50 --ld_window_r2 0.2
+  --ld-config "50,5,0.2"
 ```
 
 ## Detailed Usage ##
@@ -421,9 +425,7 @@ association train \
   [--random_state <seed>] \
   [--gwas_genotype <plink_prefix>] \
   [--gwas_pvalue <threshold>] \
-  [--ld_window_kb <size>] \
-  [--ld_window <variants>] \
-  [--ld_window_r2 <threshold>] \
+  [--ld-config \"<window_kb>,<window_variants>,<r2_threshold>\"] \
   [--ld_threads <number>]
 ```
 
@@ -439,9 +441,7 @@ association train \
 | `--random_state` | 可选 | 42 | 随机种子（重现结果） |
 | `--gwas_genotype` | 可选 | - | GWAS基因型文件前缀（模式2或4需要） |
 | `--gwas_pvalue` | 可选 | 0.01 | GWAS P值阈值（模式2或4使用） |
-| `--ld_window_kb` | 可选 | 50 | LD窗口大小（KB，模式3或4使用） |
-| `--ld_window` | 可选 | 5 | LD窗口变体数（模式3或4使用） |
-| `--ld_window_r2` | 可选 | 0.2 | LD r²阈值（模式3或4使用） |
+| `--ld-config` | 可选 | \"50,5,0.2\" | LD三合一配置参数 (standardized)，格式为 `\"<window_kb>,<window_variants>,<r2_threshold>\"`，例如 `\"50,5,0.2\"` 表示窗口50KB、窗口内5个变体、r²阈值0.2（模式3或4使用） |
 | `--ld_threads` | 可选 | 8 | LD过滤线程数（模式3或4使用） |
 
 **输入文件格式**：
@@ -455,12 +455,12 @@ association train \
 output_dir/
 ├── {model_type}/              # 模型专属目录
 │   ├── {model_type}_model.pkl # 训练好的模型文件
-│   ├── metrics.json            # 评估指标
+│   ├── {model_type}_metrics.json            # 评估指标
 │   ├── selected_snps.txt      # 筛选的SNP列表
-│   ├── feature_importance.txt # 特征重要性（完整列表）
+│   ├── {model_type}_feature_importance.txt # 特征重要性（完整列表）
 │   ├── top_features.txt       # Top 100特征
-│   ├── cv_results.json        # 交叉验证结果
-│   ├── performance_curves.png  # 性能曲线图（分类任务）
+│   ├── {model_type}_cv_results.json        # 交叉验证结果
+│   ├── {model_type}_performance_curves.png  # 性能曲线图（分类任务）
 │   ├── probability_distribution.png # 概率分布图（分类任务）
 │   └── cv_training_curves.png # 交叉验证训练曲线
 └── model_comparison_report.json # 全模型训练对比报告（train-all模式）
@@ -480,10 +480,10 @@ association train -i preprocessed/train_data.txt -m LightGBM -f 1 -o results/
 association train -i preprocessed/train_data.txt -m RandomForest -f 2 -o results/ \
   --gwas_genotype ./data/filtered_plink --gwas_pvalue 0.01
 
-# 单模型训练（GWAS和LD综合筛选）
+# 单模型训练（GWAS和LD综合筛选, 使用LD三合一配置）
 association train -i preprocessed/train_data.txt -m XGBoost -f 4 -o results/ \
   --gwas_genotype ./data/filtered_plink --gwas_pvalue 0.01 \
-  --ld_window_kb 50 --ld_window_r2 0.2
+  --ld-config "50,5,0.2"
 
 # 全模型训练（训练所有支持的模型）
 association train-all -i preprocessed/train_data.txt -f 1 -o results/
@@ -600,12 +600,12 @@ association preprocess -g genotype.vcf -p phenotype.csv -o preprocessed_data
 {output_dir}/
 └── {model_type}/                    # 模型专属目录（如 LightGBM/）
     ├── {model_type}_model.pkl      # 训练好的模型文件（用于预测）
-    ├── metrics.json                 # 评估指标（准确率、AUC、R²等）
-    ├── cv_results.json              # 交叉验证结果（每折的详细指标）
+    ├── {model_type}_metrics.json                 # 评估指标（准确率、AUC、R²等）
+    ├── {model_type}_cv_results.json              # 交叉验证结果（每折的详细指标）
     ├── selected_snps.txt           # 筛选的SNP列表（GWAS/LD筛选后的特征）
-    ├── feature_importance.txt       # 特征重要性完整列表（三列：feature, importance_abs, effect）
+    ├── {model_type}_feature_importance.txt       # 特征重要性完整列表（三列：feature, importance_abs, effect）
     ├── top_features.txt             # Top 100特征列表（仅特征名）
-    ├── cv_training_curves.png      # 交叉验证训练过程曲线
+    ├── {model_type}_cv_training_curves.png      # 交叉验证训练过程曲线
     ├── performance_curves.png       # 性能评估曲线（ROC曲线/回归散点图）
     └── probability_distribution.png # 概率分布图（仅分类任务）
 ```
@@ -615,12 +615,12 @@ association preprocess -g genotype.vcf -p phenotype.csv -o preprocessed_data
 | 文件名 | 格式 | 内容说明 |
 |--------|------|----------|
 | `{model_type}_model.pkl` | Pickle | 训练好的模型对象，用于后续预测 |
-| `metrics.json` | JSON | 包含平均准确率、AUC、R²、MAE等评估指标 |
-| `cv_results.json` | JSON | 每折交叉验证的详细结果和平均指标 |
+| `{model_type}_metrics.json` | JSON | 包含平均准确率、AUC、R²、MAE等评估指标 |
+| `{model_type}_cv_results.json` | JSON | 每折交叉验证的详细结果和平均指标 |
 | `selected_snps.txt` | 文本 | 经过GWAS/LD筛选后的SNP列表（每行一个SNP名称） |
-| `feature_importance.txt` | TSV | 三列格式：特征名、重要性绝对值、正负效应（1或-1） |
+| `{model_type}_feature_importance.txt` | TSV | 三列格式：特征名、重要性绝对值、正负效应（1或-1） |
 | `top_features.txt` | 文本 | Top 100重要特征名称列表（每行一个） |
-| `cv_training_curves.png` | PNG | 交叉验证过程中训练集和验证集的损失/准确率变化曲线 |
+| `{model_type}_cv_training_curves.png` | PNG | 交叉验证过程中训练集和验证集的损失/准确率变化曲线 |
 | `performance_curves.png` | PNG | 分类任务：ROC曲线；回归任务：预测值vs真实值散点图 |
 | `probability_distribution.png` | PNG | 分类任务：各类别的预测概率分布直方图 |
 
@@ -638,12 +638,12 @@ association train -i preprocessed_data.txt -m LightGBM -f 1 -o results/
 results/
 └── LightGBM/
     ├── LightGBM_model.pkl
-    ├── metrics.json
-    ├── cv_results.json
+    ├── LightGBM_metrics.json
+    ├── LightGBM_cv_results.json
     ├── selected_snps.txt
-    ├── feature_importance.txt
+    ├── LightGBM_feature_importance.txt
     ├── top_features.txt
-    ├── cv_training_curves.png
+    ├── LightGBM_cv_training_curves.png
     ├── performance_curves.png
     └── probability_distribution.png
 ```
@@ -690,7 +690,7 @@ association train-all -i preprocessed_data.txt -f 1 -o results/
 
 | 文件名 | 格式 | 说明 |
 |--------|------|------|
-| `{output_dir}/{model_type}/predictions.tsv` | TSV | 预测结果文件，包含样本ID和预测值 |
+| `{output_dir}/{model_type}/{model_type}_predictions.tsv` | TSV | 预测结果文件，包含样本ID和预测值 |
 
 **文件格式**：
 
@@ -713,7 +713,7 @@ Sample2   7.4
 association predict -i new_data.csv -m LightGBM -o results/
 ```
 输出：
-- `results/LightGBM/predictions.tsv` - 预测结果
+- `results/LightGBM/LightGBM_predictions.tsv` - 预测结果
 
 ---
 

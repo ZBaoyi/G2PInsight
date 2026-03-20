@@ -17,7 +17,7 @@ import atexit
 import signal
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple, Any
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -42,6 +42,10 @@ try:
     SHAP_AVAILABLE = True
 except ImportError:
     SHAP_AVAILABLE = False
+
+# ======================== 绘图质量固定开关（standardized） ========================
+# 固定实现：不再通过命令行或函数参数切换；所有训练/可视化产物统一使用期刊质量配置。
+PUB_QUALITY_MODE: bool = True
 
 # ======================== 调试控制开关 ========================
 # 设置为 False 时：保留模型训练过程中产生的所有临时文件和目录，方便排查问题
@@ -117,7 +121,6 @@ class TempFileManager:
         :param cleanup_preprocess: 是否清理preprocess阶段的临时目录（默认False，preprocess模块执行完毕不删除tmp_p目录）
         """
         if not CLEANUP_TEMP_FILES:
-            logger.debug("Debug mode: CLEANUP_TEMP_FILES=False, skipping temporary file cleanup")
             return
         
         # 防止重复清理：如果已经清理过临时文件/目录，且本次不清理preprocess，则跳过
@@ -131,18 +134,16 @@ class TempFileManager:
                     try:
                         if fp.exists():
                             fp.unlink()
-                            logger.debug(f"   Deleted temporary file: {fp}")
                     except Exception as e:
-                        logger.debug(f"   Failed to delete temporary file {fp}: {e}")
+                        pass
                 
                 # 2. 清理临时目录（逆序删除，确保子目录先删除）
                 for dp in reversed(self.temp_dirs):
                     try:
                         if dp.exists():
                             shutil.rmtree(dp, ignore_errors=True)
-                            logger.debug(f"   Deleted temporary directory: {dp}")
                     except Exception as e:
-                        logger.debug(f"   Failed to delete temporary directory {dp}: {e}")
+                        pass
                 
                 # 清空列表
                 self.temp_files.clear()
@@ -155,9 +156,8 @@ class TempFileManager:
                     try:
                         if dp.exists():
                             shutil.rmtree(dp, ignore_errors=True)
-                            logger.debug(f"   Deleted preprocess temporary directory: {dp}")
                     except Exception as e:
-                        logger.debug(f"   Failed to delete preprocess temporary directory {dp}: {e}")
+                        pass
                 self.preprocess_tmp_dirs.clear()
                 
         except Exception as e:
@@ -203,7 +203,6 @@ def load_preprocess_metadata(metadata_file: str) -> Dict:
     # 目前 model training 阶段不再依赖这些中间 PLINK 文件，为避免干扰用户，这里不再做存在性检查。
     # 如需使用 GWAS/LD 相关的 PLINK 输出，请在对应模块中单独验证路径。
     
-    logger.debug(f"Loaded metadata: {len(metadata['valid_samples']):,} samples")
     return metadata
 
 def parse_train_input_path(input_path: str) -> Dict:
@@ -255,11 +254,10 @@ def parse_train_input_path(input_path: str) -> Dict:
                     metadata_found = True
                     break
                 except Exception as e:
-                    logger.debug(f"Failed to read metadata file {metadata_path}: {e}")
                     continue  # 尝试下一个路径
         
         if not metadata_found:
-            logger.debug(f"Metadata file not found, attempted paths: {possible_metadata_paths}")
+            pass
     
     # 验证训练文件存在性
     if not Path(result["train_file"]).exists():
@@ -302,7 +300,6 @@ def load_training_data(train_file: str, valid_samples: List[str] = None) -> Tupl
         y: 目标变量Series
         snp_name_mapping: 原始SNP名称到清理后名称的映射字典
     """
-    logger.debug("Loading training data")
     
     # 检查文件格式
     train_file_path = Path(train_file)
@@ -315,7 +312,7 @@ def load_training_data(train_file: str, valid_samples: List[str] = None) -> Tupl
             f"VCF file detected: {train_file}\n"
             f"Error: Model training/prediction requires preprocessed training data format (tab-separated .txt file with 'sample' column as index).\n"
             f"VCF files must be preprocessed first using the 'preprocess' command.\n"
-            f"Please run: association preprocess -g {train_file} -p <phenotype_file> -o <output_dir>\n"
+            f"Please run: assog2p preprocess -g {train_file} -p <phenotype_file> -o <output_dir>\n"
             f"Then use the preprocessed output file for training/prediction."
         )
     
@@ -366,9 +363,7 @@ def load_training_data(train_file: str, valid_samples: List[str] = None) -> Tupl
             detected_delimiter = sniffer.sniff(sample_text, delimiters="\t, ").delimiter
             if detected_delimiter:
                 delimiter = detected_delimiter
-                logger.debug(f"CSV Sniffer detected delimiter: {repr(delimiter)}")
         except Exception as e:
-            logger.debug(f"CSV Sniffer failed: {e}, using manual detection")
             # 手动检测：统计每种分隔符出现的次数
             delimiter_counts = {"\t": [], ",": [], " ": []}
             
@@ -396,13 +391,11 @@ def load_training_data(train_file: str, valid_samples: List[str] = None) -> Tupl
                         delimiter = sep
                         break
             
-            logger.debug(f"Manually detected delimiter: {repr(delimiter)} (avg count: {max_avg:.1f})")
         
         # 验证检测到的分隔符：检查第一行使用该分隔符后有多少字段
         if sample_lines:
             first_line = sample_lines[0].strip()
             field_count = len(first_line.split(delimiter))
-            logger.debug(f"First line has {field_count} fields when using delimiter {repr(delimiter)}")
             
             # 如果字段数异常（太多或太少），尝试其他分隔符
             if field_count > 1000 or field_count < 2:
@@ -432,7 +425,6 @@ def load_training_data(train_file: str, valid_samples: List[str] = None) -> Tupl
                 on_bad_lines='skip',  # 跳过格式错误的行（pandas >= 1.3.0）
                 compression='gzip' if is_compressed else 'infer'  # 明确指定压缩格式
             )
-            logger.debug(f"Successfully read file with delimiter {repr(delimiter)} using on_bad_lines='skip'")
         except (TypeError, ValueError) as e:
             read_errors.append(f"Strategy 1 (on_bad_lines='skip'): {str(e)}")
             # 策略2: 对于旧版本的pandas，使用不同的参数
@@ -447,7 +439,6 @@ def load_training_data(train_file: str, valid_samples: List[str] = None) -> Tupl
                     warn_bad_lines=True,
                     compression='gzip' if is_compressed else 'infer'
                 )
-                logger.debug(f"Successfully read file with delimiter {repr(delimiter)} using error_bad_lines=False")
             except (TypeError, ValueError) as e2:
                 read_errors.append(f"Strategy 2 (error_bad_lines=False): {str(e2)}")
                 # 策略3: 使用最基本的读取方式，不跳过错误行
@@ -460,7 +451,6 @@ def load_training_data(train_file: str, valid_samples: List[str] = None) -> Tupl
                         engine='python',
                         compression='gzip' if is_compressed else 'infer'
                     )
-                    logger.debug(f"Successfully read file with delimiter {repr(delimiter)} using basic mode")
                 except Exception as e3:
                     read_errors.append(f"Strategy 3 (basic mode): {str(e3)}")
                     # 策略4: 尝试使用C引擎（更快，但可能不够健壮，且可能不支持压缩）
@@ -474,7 +464,6 @@ def load_training_data(train_file: str, valid_samples: List[str] = None) -> Tupl
                                 engine='c',
                                 low_memory=False
                             )
-                            logger.debug(f"Successfully read file with delimiter {repr(delimiter)} using C engine")
                         except Exception as e4:
                             read_errors.append(f"Strategy 4 (C engine): {str(e4)}")
                     else:
@@ -497,7 +486,7 @@ def load_training_data(train_file: str, valid_samples: List[str] = None) -> Tupl
                                             error_msg += f"This file format is not compatible with model training/prediction.\n"
                                             error_msg += f"Expected format: Tab-separated file with 'sample' column as index (from preprocess module output).\n"
                                             if file_ext in ['.vcf', '.vcf.gz']:
-                                                error_msg += f"Note: VCF files must be preprocessed first using: association preprocess -g <vcf_file> -p <phenotype_file> -o <output_dir>"
+                                                error_msg += f"Note: VCF files must be preprocessed first using: assog2p preprocess -g <vcf_file> -p <phenotype_file> -o <output_dir>"
                             except Exception:
                                 pass
                         
@@ -666,6 +655,8 @@ def init_model(model_type: str, task_type: str, random_state: int = 42) -> Any:
             "iterations": 100,  # 使用iterations而不是n_estimators，与参数网格保持一致
             "learning_rate": 0.1,
             "verbose": 0,
+            # [CATBOOST_CLEAN] 禁止 CatBoost 在当前工作目录创建 catboost_info/
+            "allow_writing_files": False,
             **common_params
         },
         "Logistic": {
@@ -686,7 +677,15 @@ def init_model(model_type: str, task_type: str, random_state: int = 42) -> Any:
     model_class = model_classes[task_type][model_type]
     params = model_params[model_type]
     
-    return model_class(**params)
+    model = model_class(**params)
+    # [CATBOOST_CLEAN_FALLBACK] 兜底：个别版本/配置下仍可能生成 catboost_info，
+    # 这里尽量关闭写文件（若不支持该属性则忽略）
+    try:
+        if model_type == "CatBoost" and hasattr(model, "set_params"):
+            model.set_params(allow_writing_files=False)
+    except Exception:
+        pass
+    return model
 
 def get_param_grid(model_type: str, task_type: str) -> Dict:
     """
@@ -816,7 +815,6 @@ def perform_grid_search(
         # 如果进程名不是'MainProcess'，说明在子进程中，使用n_jobs=1避免嵌套并行
         if process_name != 'MainProcess':
             n_jobs_value = 1
-            logger.debug(f"  Detected subprocess ({process_name}), using n_jobs=1 to avoid nested parallelism")
     except Exception:
         # 如果无法检测，保守地使用n_jobs=1（避免资源泄漏）
         # 但为了性能，只在明确检测到子进程时才使用n_jobs=1
@@ -833,11 +831,8 @@ def perform_grid_search(
         verbose=0
     )
     
-    logger.debug(f"  Grid search: {n_iter} iterations, {cv}-fold cross-validation...")
     search.fit(X_train, y_train)
     
-    logger.debug(f"  Best parameters: {search.best_params_}")
-    logger.debug(f"  Best score: {search.best_score_:.4f}")
     
     return search.best_estimator_
 
@@ -895,7 +890,6 @@ def evaluate_model(y_true: pd.Series, y_pred: np.ndarray, y_prob: np.ndarray, ta
                     if n_unique < 2:
                         # 只有一个类别，无法计算AUC
                         metrics["auc"] = "N/A"
-                        logger.debug(f"  Only one class ({unique_labels}), cannot calculate AUC")
                     elif n_unique == 2:
                         # 二分类
                         try:
@@ -925,7 +919,7 @@ def evaluate_model(y_true: pd.Series, y_pred: np.ndarray, y_prob: np.ndarray, ta
             else:
                 metrics["auc"] = "N/A"
                 if task_type == "classification":
-                    logger.debug("  Prediction probabilities are empty, cannot calculate AUC")
+                    pass
         except Exception as e:
             logger.warning(f"  Failed to calculate AUC: {str(e)}")
             metrics["auc"] = "N/A"
@@ -947,8 +941,13 @@ def evaluate_model(y_true: pd.Series, y_pred: np.ndarray, y_prob: np.ndarray, ta
                 metrics["pearson_pvalue"] = "N/A"
             else:
                 pearson_corr, pearson_pvalue = pearsonr(y_true_array, y_pred_array)
+                # 相关系数保留4位小数
                 metrics["pearson_correlation"] = round(pearson_corr, 4)
-                metrics["pearson_pvalue"] = round(pearson_pvalue, 6)  # p值通常需要更高精度
+                # p值：常规情况下保留6位小数；当极小时用科学计数法表示，避免被四舍五入为0.0
+                if pearson_pvalue < 1e-6:
+                    metrics["pearson_pvalue"] = float(f"{pearson_pvalue:.2e}")
+                else:
+                    metrics["pearson_pvalue"] = round(pearson_pvalue, 6)
         except ImportError:
             logger.warning("  scipy not installed, cannot calculate Pearson correlation coefficient and p-value")
             metrics["pearson_correlation"] = "N/A"
@@ -1120,7 +1119,9 @@ def calculate_shap_values(
     feature_names: List[str],
     X_train: pd.DataFrame,
     y_train: pd.Series,
-    task_type: str
+    task_type: str,
+    # 参与SHAP解释的样本数（默认全量；可用于控制输出/耗时）
+    shap_sample_size: Optional[int] = None,
 ) -> pd.DataFrame:
     """
     计算SHAP值（格式与feature_importance相同）
@@ -1139,9 +1140,16 @@ def calculate_shap_values(
         return pd.DataFrame()
     
     try:
+        shap_t0 = time.time()
         # 使用全部数据计算SHAP值
         X_shap = X_train
         y_shap = y_train
+        X_input = X_shap[feature_names] if feature_names else X_shap
+
+        # 默认：不指定 shap_sample_size 就用全量；SVM/Kernel 路径会再做上限控制
+        if shap_sample_size is not None and len(X_input) > shap_sample_size:
+            X_input = X_input.sample(n=int(shap_sample_size), random_state=42)
+            y_shap = y_shap.loc[X_input.index]
         
         # 根据模型类型选择合适的SHAP解释器
         if model_type in ["LightGBM", "XGBoost", "CatBoost", "RandomForest"]:
@@ -1153,11 +1161,31 @@ def calculate_shap_values(
             explainer = shap.LinearExplainer(model, X_shap[feature_names] if feature_names else X_shap)
             shap_values = explainer.shap_values(X_shap[feature_names] if feature_names else X_shap)
         elif model_type == "SVM":
-            # 当前实现的 SVM 使用 sklearn.svm.SVR/SVC，通常为非线性核（如RBF），
-            # shap.LinearExplainer 不支持这类模型，会报 "An unknown model type was passed"。
-            # 为避免极慢的 KernelExplainer 计算（特征数和样本数较大），这里直接跳过SHAP计算。
-            logger.warning("  SHAP values are not calculated for SVM models (non-linear kernels not supported efficiently); skipping.")
-            return pd.DataFrame()
+            # ======================== SVM: 固定使用线性代理模型（近似） ========================
+            # 说明：
+            # - 训练模型默认是 rbf 核（见 init_model），KernelExplainer 计算复杂度极高且在 1k+ 特征下非常慢
+            # - 这里固定用 LinearSVR / LinearSVC 拟合一个线性代理模型，再用 LinearExplainer 计算SHAP
+            from sklearn.svm import LinearSVR, LinearSVC
+
+            # 控制代理模型训练数据量，避免在超大样本时耗时（保持通用性）
+            X_sur = X_input
+            if len(X_sur) > 5000:
+                X_sur = X_sur.sample(n=5000, random_state=42)
+            y_sur = y_shap.loc[X_sur.index]
+
+            logger.info(
+                f"  [SHAP][SVM] Fixed mode: linear surrogate + LinearExplainer "
+                f"(surrogate_samples={len(X_sur):,}, features={X_sur.shape[1]:,}, task={task_type})"
+            )
+
+            if task_type == "classification":
+                surrogate = LinearSVC(C=1.0, dual=True, max_iter=5000)
+            else:
+                surrogate = LinearSVR(C=1.0, dual=True, max_iter=5000)
+
+            surrogate.fit(X_sur, y_sur)
+            explainer = shap.LinearExplainer(surrogate, X_sur, feature_perturbation="interventional")
+            shap_values = explainer.shap_values(X_input)
         else:
             # 其他模型：使用KernelExplainer（较慢）
             logger.warning(f"  {model_type} model uses KernelExplainer for SHAP values, may be slow")
@@ -1225,13 +1253,15 @@ def calculate_shap_values(
         shap_df = shap_df.sort_values('shap_abs', ascending=False)
         shap_df = shap_df.reset_index(drop=True)
         
-        logger.info(f"  SHAP values calculation completed (using all {len(X_shap):,} samples)")
+        logger.info(
+            f"  SHAP values calculation completed "
+            f"(samples_used={len(X_input):,}, elapsed={time.time()-shap_t0:.2f}s)"
+        )
         return shap_df
         
     except Exception as e:
         logger.error(f"  SHAP values calculation failed: {str(e)}")
         import traceback
-        logger.debug(traceback.format_exc())
         return pd.DataFrame()
 
 # ======================== 辅助函数：减少代码重复 ========================
@@ -1319,7 +1349,7 @@ def filter_phenotype_from_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ======================== 可视化函数 ========================
-def plot_performance_curves(y_true: pd.Series, y_pred: np.ndarray, y_prob: Optional[np.ndarray], output_dir: Path, model_type: str, task_type: str, publication_quality: bool = True) -> None:
+def plot_performance_curves(y_true: pd.Series, y_pred: np.ndarray, y_prob: Optional[np.ndarray], output_dir: Path, model_type: str, task_type: str) -> None:
     """
     绘制性能评估指标变化曲线（分类/回归）
     
@@ -1329,15 +1359,15 @@ def plot_performance_curves(y_true: pd.Series, y_pred: np.ndarray, y_prob: Optio
     :param output_dir: 输出目录
     :param model_type: 模型类型
     :param task_type: 任务类型（classification/regression）
-    :param publication_quality: 是否生成期刊发表质量图表（高分辨率、矢量格式、专业配色）
     """
     # 设置matplotlib环境
     matplotlib_available, plt = _setup_matplotlib()
     if not matplotlib_available:
         return
     
-    # 期刊发表质量设置
-    if publication_quality:
+    # 期刊发表质量设置（fixed）
+    pub_quality_mode = PUB_QUALITY_MODE
+    if pub_quality_mode:
         # 设置期刊标准字体和样式
         plt.rcParams.update({
             'font.family': 'serif',  # 使用serif字体（如Times New Roman）
@@ -1368,7 +1398,7 @@ def plot_performance_curves(y_true: pd.Series, y_pred: np.ndarray, y_prob: Optio
     if task_type == "regression":
         # ========== Regression performance curves ==========
         # 绘制多个回归评估图：散点图、残差图、残差分布、Q-Q图
-        if publication_quality:
+        if pub_quality_mode:
             # 期刊标准尺寸：单栏宽度约3.5英寸，双栏约7英寸
             fig, axes = plt.subplots(2, 2, figsize=(7, 6))  # 适合双栏布局
             fig.suptitle(f'{model_type} Model Performance (Regression)', fontsize=12, fontweight='bold')
@@ -1394,7 +1424,7 @@ def plot_performance_curves(y_true: pd.Series, y_pred: np.ndarray, y_prob: Optio
         
         # 1. 预测值 vs 真实值散点图
         ax1 = axes[0, 0]
-        if publication_quality:
+        if pub_quality_mode:
             # 期刊标准：使用灰度或专业配色，更大的点，清晰的边缘
             ax1.scatter(y_true_values, y_pred_values, alpha=0.6, s=25, 
                        color='#2E86AB', edgecolors='black', linewidths=0.3)
@@ -1444,7 +1474,7 @@ def plot_performance_curves(y_true: pd.Series, y_pred: np.ndarray, y_prob: Optio
         
         # 2. 残差图（残差 vs 预测值）
         ax2 = axes[0, 1]
-        if publication_quality:
+        if pub_quality_mode:
             ax2.scatter(y_pred_values, residuals, alpha=0.6, s=25, 
                        color='#2E86AB', edgecolors='black', linewidths=0.3)
             ax2.axhline(y=0, color='k', linestyle='--', linewidth=2, 
@@ -1466,7 +1496,7 @@ def plot_performance_curves(y_true: pd.Series, y_pred: np.ndarray, y_prob: Optio
         ax3 = axes[1, 0]
         mean_residual = np.mean(residuals)
         std_residual = np.std(residuals)
-        if publication_quality:
+        if pub_quality_mode:
             ax3.hist(residuals, bins=30, edgecolor='black', alpha=0.7, 
                     color='#A23B72', linewidth=0.8)
             ax3.axvline(x=0, color='k', linestyle='--', linewidth=2, 
@@ -1500,7 +1530,7 @@ def plot_performance_curves(y_true: pd.Series, y_pred: np.ndarray, y_prob: Optio
         try:
             from scipy import stats
             stats.probplot(residuals, dist="norm", plot=ax4)
-            if publication_quality:
+            if pub_quality_mode:
                 # 优化Q-Q图的线条样式
                 lines = ax4.get_lines()
                 if len(lines) >= 2:
@@ -1527,7 +1557,7 @@ def plot_performance_curves(y_true: pd.Series, y_pred: np.ndarray, y_prob: Optio
         plt.tight_layout()
         
         # 保存图形
-        if publication_quality:
+        if pub_quality_mode:
             # 期刊标准：保存为PDF（矢量格式）和PNG（高分辨率）
             plot_file_pdf = output_dir / "performance_curves.pdf"
             plot_file_png = output_dir / "performance_curves.png"
@@ -1562,7 +1592,7 @@ def plot_performance_curves(y_true: pd.Series, y_pred: np.ndarray, y_prob: Optio
         try:
             from sklearn.metrics import roc_curve, auc, precision_recall_curve, f1_score, accuracy_score, recall_score
             
-            if publication_quality:
+            if pub_quality_mode:
                 fig1, axes = plt.subplots(1, 3, figsize=(14, 4))
                 fig1.suptitle(f'{model_type} Performance Curves (Classification)', fontsize=12, fontweight='bold')
             else:
@@ -1600,7 +1630,7 @@ def plot_performance_curves(y_true: pd.Series, y_pred: np.ndarray, y_prob: Optio
                 ax1 = axes[0]
                 ax1.plot(fpr, tpr, 'b-', lw=2, label=f'ROC Curve (AUC = {roc_auc:.4f})')
                 ax1.plot([0, 1], [0, 1], 'k--', lw=1, label='Random Guess', alpha=0.5)
-                if publication_quality:
+                if pub_quality_mode:
                     ax1.set_xlabel('False Positive Rate (FPR)', fontsize=10)
                     ax1.set_ylabel('True Positive Rate (TPR)', fontsize=10)
                     ax1.set_title('ROC Curve (AUC)', fontsize=11)
@@ -1620,7 +1650,7 @@ def plot_performance_curves(y_true: pd.Series, y_pred: np.ndarray, y_prob: Optio
                 # 在最高值点处添加垂直虚线
                 ax2.axvline(x=max_acc_threshold, color='r', linestyle='--', linewidth=1.5, alpha=0.7, 
                            label=f'Max Accuracy: {max_acc_value:.4f} at {max_acc_threshold:.3f}')
-                if publication_quality:
+                if pub_quality_mode:
                     ax2.set_xlabel('Threshold', fontsize=10)
                     ax2.set_ylabel('Accuracy', fontsize=10)
                     ax2.set_title('Accuracy Curve', fontsize=11)
@@ -1640,7 +1670,7 @@ def plot_performance_curves(y_true: pd.Series, y_pred: np.ndarray, y_prob: Optio
                 # 在最高值点处添加垂直虚线
                 ax3.axvline(x=max_f1_threshold, color='m', linestyle='--', linewidth=1.5, alpha=0.7,
                            label=f'Max F1: {max_f1_value:.4f} at {max_f1_threshold:.3f}')
-                if publication_quality:
+                if pub_quality_mode:
                     ax3.set_xlabel('Threshold', fontsize=10)
                     ax3.set_ylabel('F1 Score', fontsize=10)
                     ax3.set_title('F1 Score Curve', fontsize=11)
@@ -1667,7 +1697,7 @@ def plot_performance_curves(y_true: pd.Series, y_pred: np.ndarray, y_prob: Optio
                         roc_auc = auc(fpr, tpr)
                         ax1.plot(fpr, tpr, lw=2, label=f'Class {class_label} (AUC = {roc_auc:.4f})')
                 ax1.plot([0, 1], [0, 1], 'k--', lw=2, label='Random Guess')
-                if publication_quality:
+                if pub_quality_mode:
                     ax1.set_xlabel('False Positive Rate (FPR)', fontsize=10)
                     ax1.set_ylabel('True Positive Rate (TPR)', fontsize=10)
                     ax1.set_title('ROC Curve (AUC)', fontsize=11)
@@ -1682,12 +1712,16 @@ def plot_performance_curves(y_true: pd.Series, y_pred: np.ndarray, y_prob: Optio
                 # 其他子图留空或显示提示
                 for ax in [axes[1], axes[2]]:
                     ax.axis('off')
-                    if publication_quality:
-                        ax.text(0.5, 0.5, 'Multi-class metrics\nnot implemented', 
-                               ha='center', va='center', transform=ax.transAxes, fontsize=10)
+                    if pub_quality_mode:
+                        ax.text(
+                            0.5, 0.5, 'Multi-class metrics\nnot implemented',
+                            ha='center', va='center', transform=ax.transAxes, fontsize=10
+                        )
                     else:
-                        ax.text(0.5, 0.5, 'Multi-class metrics\nnot implemented', 
-                               ha='center', va='center', transform=ax.transAxes, fontsize=12)
+                        ax.text(
+                            0.5, 0.5, 'Multi-class metrics\nnot implemented',
+                            ha='center', va='center', transform=ax.transAxes, fontsize=12
+                        )
             
             plt.tight_layout()
             plot_file1 = output_dir / "performance_curves.png"
@@ -2008,7 +2042,6 @@ def plot_cv_training_curves(cv_results: Dict, output_dir: Path, model_type: str,
     # 保存图形
     plot_file = output_dir / "cv_training_curves.png"
     plt.savefig(plot_file, dpi=300, bbox_inches='tight', facecolor='white')
-    logger.debug(f"   Cross-validation boxplot saved: {plot_file}")
     plt.close()
 
 def save_training_results(
@@ -2023,8 +2056,7 @@ def save_training_results(
     y_test: Optional[pd.Series] = None,
     y_pred: Optional[np.ndarray] = None,
     y_prob: Optional[np.ndarray] = None,
-    cv_results: Optional[Dict] = None,
-    publication_quality: bool = True
+    cv_results: Optional[Dict] = None
 ) -> None:
     """
     保存训练结果（模型文件、评估指标、筛选的SNP列表、特征重要性、SHAP值）
@@ -2041,20 +2073,25 @@ def save_training_results(
     :param y_pred: 测试集预测值（用于绘制性能曲线）
     :param y_prob: 测试集预测概率（分类任务需要，用于绘制性能曲线）
     :param cv_results: 交叉验证结果字典（用于绘制交叉验证曲线）
-    :param publication_quality: 是否生成期刊发表质量图表（高分辨率、矢量格式、专业配色）
     """
     # 创建模型专属目录
     model_dir = Path(output_dir) / model_type
     model_dir.mkdir(parents=True, exist_ok=True)
+
+    # ======================== 输出命名规范化（standardized） ========================
+    # 统一输出前缀：{output_dir}/{model_type}/{model_type}
+    # 所有产物文件都以该前缀 + 固定后缀命名，避免目录内出现“裸文件名”导致覆盖与歧义
+    output_prefix = model_dir / model_type
     
-    # 1. 保存模型文件
+    # 1. 保存模型文件（规范：仍保持“模型名称”命名）
+    # - 文件名固定为：{model_type}_model.pkl
+    # - 避免把更多前缀信息塞进模型文件名，便于用户直观识别与手动指定
     model_file = model_dir / f"{model_type}_model.pkl"
     import joblib
     joblib.dump(model, model_file)
-    logger.debug(f"   Model saved: {model_file.name}")
     
     # 2. 保存评估指标
-    metrics_file = model_dir / "metrics.json"
+    metrics_file = Path(f"{output_prefix}_metrics.json")
     with open(metrics_file, 'w') as f:
         json.dump({
             "model_type": model_type,
@@ -2062,7 +2099,6 @@ def save_training_results(
             "metrics": metrics,
             "training_time": time.strftime("%Y-%m-%d %H:%M:%S")
         }, f, indent=2)
-    logger.debug(f"   Evaluation metrics saved: {metrics_file.name}")
     
     # 2.5 保存训练阶段使用的特征列表（用于预测阶段特征对齐）
     # 说明：
@@ -2072,7 +2108,7 @@ def save_training_results(
     #   * 训练有、预测没有 → 在预测矩阵中补一列，整列填0；
     #   * 训练没有、预测有 → 在预测阶段丢弃该列。
     try:
-        features_file = model_dir / "training_features.json"
+        features_file = Path(f"{output_prefix}_training_features.json")
         with open(features_file, "w") as f:
             json.dump(
                 {
@@ -2084,7 +2120,6 @@ def save_training_results(
                 f,
                 indent=2,
             )
-        logger.debug(f"   Training feature names saved: {features_file.name}")
     except Exception as e:
         # 保存失败不影响训练流程，但会在预测阶段失去自动对齐能力
         logger.warning(f"   Failed to save training feature names (ignored): {e}")
@@ -2095,9 +2130,8 @@ def save_training_results(
         filtered_importance_df = feature_importance_df[
             feature_importance_df['feature'].astype(str).apply(lambda x: 'phenotype' not in x.lower())
         ]
-        importance_file = model_dir / "feature_importance.txt"
+        importance_file = Path(f"{output_prefix}_feature_importance.txt")
         filtered_importance_df.to_csv(importance_file, sep='\t', index=False)
-        logger.debug(f"   Feature importance saved: {importance_file.name}")
     
     # 4.5. 保存SHAP值（可选，格式与feature_importance相同）
     if shap_df is not None and not shap_df.empty:
@@ -2107,17 +2141,16 @@ def save_training_results(
         ]
         # 重命名列以匹配feature_importance格式（feature, importance_abs, effect）
         # 但为了区分，我们保持shap_abs列名，或者重命名为importance_abs以兼容可视化
-        shap_file = model_dir / "shap_values.txt"
+        shap_file = Path(f"{output_prefix}_shap_values.txt")
         # 为了兼容可视化模块，将shap_abs重命名为importance_abs
         shap_output_df = filtered_shap_df.copy()
         shap_output_df = shap_output_df.rename(columns={'shap_abs': 'importance_abs'})
         shap_output_df.to_csv(shap_file, sep='\t', index=False)
-        logger.debug(f"   SHAP values saved: {shap_file.name}")
         
     # 5. 保存所有绘图数据到一个统一文件（用于visualization模块）
     if y_test is not None and y_pred is not None:
         import pickle
-        plotting_data_file = model_dir / "plotting_data.npz"
+        plotting_data_file = Path(f"{output_prefix}_plotting_data.npz")
         save_dict = {
             # 预测数据（numpy数组）
             'y_test': y_test.values if isinstance(y_test, pd.Series) else y_test,
@@ -2125,7 +2158,8 @@ def save_training_results(
             # 元数据（字符串）
             'model_type': np.array([model_type], dtype=object),
             'task_type': np.array([task_type], dtype=object),
-            'publication_quality': np.array([publication_quality], dtype=bool)
+            # 兼容字段名（fixed）：publication_quality 固定由内部常量控制
+            'publication_quality': np.array([PUB_QUALITY_MODE], dtype=bool)
         }
         # 预测概率（如果存在）
         if y_prob is not None:
@@ -2135,7 +2169,6 @@ def save_training_results(
             save_dict['cv_results'] = np.array([pickle.dumps(cv_results)], dtype=object)
         
         np.savez_compressed(plotting_data_file, **save_dict)
-        logger.debug(f"   Plotting data saved: {plotting_data_file.name}")
     
     logger.info(f"  Results saved successfully: {model_dir}")
 
@@ -2159,7 +2192,6 @@ def _run_single_fold_cv(
     - train_idx和val_idx是numpy数组，表示位置索引，与iloc兼容
     """
     logger = logging.getLogger(__name__)
-    logger.debug(f"[Fold {fold_idx}] Training in worker process...")
 
     try:
         # 修复：使用iloc进行位置索引访问，确保索引正确
@@ -2231,8 +2263,8 @@ def run_single_model(
     random_state: int = 42,
     # 特征重要性计算参数（可选）
     calculate_feature_importance: bool = False,
-    # 图表质量参数
-    publication_quality: bool = True,
+    # 图表质量固定开关（fixed，已不对外开放）
+    pub_quality_mode: bool = True,
     # 预加载的训练数据（可选，用于train-all中避免重复读取文件）
     preloaded_data: Optional[Dict[str, Any]] = None,
 ) -> int:
@@ -2254,12 +2286,22 @@ def run_single_model(
         )
     # 保存对calculate_feature_importance函数的引用，避免与参数名冲突
     _calculate_feature_importance_func = globals()['calculate_feature_importance']
+    # 固定实现：忽略外部传入值，统一使用内部常量
+    pub_quality_mode = PUB_QUALITY_MODE
+
     start_time = time.time()
     output_dir_path = Path(output_dir)
     output_dir_path.mkdir(parents=True, exist_ok=True)
 
-    # 临时目录根（输出目录下的 temp_m，model training专用，与preprocess的tmp_p区分）
-    tmp_root = output_dir_path / "temp_m"
+    # ======================== 临时目录规范化（standardized） ========================
+    # 临时文件放在基础输出目录下的 tmp/train 子目录中（与阶段目录同级）
+    # 每个阶段在 tmp 下创建自己的子目录，避免不同阶段的临时文件互相干扰
+    # 例如：如果 output_dir 是 test/train，则 tmp_root 是 test/tmp/train
+    base_output_dir = output_dir_path.parent
+    # 重要：tmp 必须按“模型+进程”隔离。
+    # train-all 会并行调用 run_single_model；若共享 tmp 或在子进程里删除 base_output_dir/tmp，
+    # 会产生竞态：进程互相删对方临时文件，导致随机失败/结果不完整。
+    tmp_root = base_output_dir / "tmp" / "train" / model_type
     tmp_root.mkdir(parents=True, exist_ok=True)
 
     # 使用全局临时文件管理器注册临时目录/文件
@@ -2269,8 +2311,8 @@ def run_single_model(
     def register_file(p: Path) -> Path:
         return _temp_file_manager.register_file(p)
 
-    # 本次运行直接使用统一的 tmp 目录，不再附加日期/进程号
-    run_tmp_dir = register_dir(tmp_root)
+    # 使用进程级目录，避免同一模型在不同进程里冲突
+    run_tmp_dir = register_dir(tmp_root / f"pid_{os.getpid()}")
 
     # 预处理阶段的临时目录（从元数据读取，不清理，preprocess模块执行完毕不删除tmp目录）
     preprocess_tmp_dir = None
@@ -2309,7 +2351,6 @@ def run_single_model(
                 _temp_file_manager.register_preprocess_tmp_dir(preprocess_tmp_dir)
 
             # 加载训练数据
-            logger.debug("Loading training data...")
             X, y, snp_name_mapping = load_training_data(train_file, valid_samples)
 
             # 若未提供task_type，则基于表型推断（规则与preprocess一致）
@@ -2434,8 +2475,17 @@ def run_single_model(
                 avg_metrics['pearson_correlation'] = float(round(np.mean(pearson_corrs), 4))
                 avg_metrics['pearson_correlation_std'] = float(round(np.std(pearson_corrs), 4))
             if pearson_pvalues:
-                avg_metrics['pearson_pvalue'] = float(round(np.mean(pearson_pvalues), 6))
-                avg_metrics['pearson_pvalue_std'] = float(round(np.std(pearson_pvalues), 6))
+                mean_p = float(np.mean(pearson_pvalues))
+                std_p = float(np.std(pearson_pvalues))
+                # 对极小的平均p值和标准差使用科学计数法表示
+                if mean_p < 1e-6:
+                    avg_metrics['pearson_pvalue'] = float(f"{mean_p:.2e}")
+                else:
+                    avg_metrics['pearson_pvalue'] = float(round(mean_p, 6))
+                if std_p < 1e-6:
+                    avg_metrics['pearson_pvalue_std'] = float(f"{std_p:.2e}")
+                else:
+                    avg_metrics['pearson_pvalue_std'] = float(round(std_p, 6))
         else:
             accuracies = [m.get('accuracy', 0) for m in cv_fold_metrics 
                          if isinstance(m.get('accuracy'), (int, float))]
@@ -2462,7 +2512,6 @@ def run_single_model(
         logger.info(f"   {avg_metrics}")
         
         # Step 9: 使用全部数据训练最终模型（用于特征重要性）
-        logger.debug("Training final model...")
         param_grid = get_param_grid(model_type, task_type)
         final_model = perform_grid_search(
             model_type=model_type,
@@ -2519,7 +2568,6 @@ def run_single_model(
         # Step 10: 计算特征重要性（可选，使用最终模型）
         feature_importance_df = None
         if calculate_feature_importance:
-            logger.debug("Calculating feature importance...")
             feature_cols = filter_phenotype_columns(X_filtered.columns.tolist())
             
             feature_importance_df = _calculate_feature_importance_func(
@@ -2533,7 +2581,7 @@ def run_single_model(
             logger.info("Feature importance calculation completed")
         
         # Step 10.5: 计算SHAP值（默认计算，使用最终模型）
-        logger.debug("Calculating SHAP values...")
+        # SVM 使用 KernelExplainer（分类任务使用 predict_proba，回归任务使用 predict）
         feature_cols = filter_phenotype_columns(X_filtered.columns.tolist())
         
         shap_df = calculate_shap_values(
@@ -2547,6 +2595,7 @@ def run_single_model(
         if not shap_df.empty:
             logger.info("SHAP values calculation completed")
         else:
+            # 兜底：空结果可能来自真正失败（如shap未安装或计算错误）
             logger.warning("  SHAP values calculation failed or returned empty results")
             # 如果SHAP值计算失败，使用feature importance作为替代
             if feature_importance_df is not None and not feature_importance_df.empty:
@@ -2582,7 +2631,6 @@ def run_single_model(
                     logger.warning("  Both SHAP values and feature importance calculation failed")
 
         # Step 11: 保存结果
-        logger.debug("Saving results...")
         model_dir = Path(output_dir) / model_type
         model_dir.mkdir(parents=True, exist_ok=True)
         
@@ -2592,7 +2640,7 @@ def run_single_model(
             'fold_metrics': cv_fold_metrics,
             'average_metrics': avg_metrics
         }
-        cv_results_file = model_dir / "cv_results.json"
+        cv_results_file = model_dir / f"{model_type}_cv_results.json"
         with open(cv_results_file, 'w') as f:
             json.dump(cv_results, f, indent=2, default=str)
         
@@ -2612,7 +2660,6 @@ def run_single_model(
             y_pred=y_pred_combined,
             y_prob=y_prob_combined,
             cv_results=cv_results,
-            publication_quality=publication_quality
         )
 
         # 最终日志：输出当前模型的训练用时
@@ -2639,13 +2686,11 @@ def run_single_model(
                                 # Python 3.9+ 使用 is_relative_to
                                 if tmp_root_abs == preprocess_tmp_dir_abs or preprocess_tmp_dir_abs.is_relative_to(tmp_root_abs):
                                     should_delete = False
-                                    logger.debug(f"Skipping deletion of tmp_root (overlaps with preprocess_tmp_dir): {tmp_root}")
                             except AttributeError:
                                 # Python < 3.9 使用其他方法检查
                                 try:
                                     preprocess_tmp_dir_abs.relative_to(tmp_root_abs)
                                     should_delete = False
-                                    logger.debug(f"Skipping deletion of tmp_root (overlaps with preprocess_tmp_dir): {tmp_root}")
                                 except ValueError:
                                     pass  # 不是相对路径，可以删除
                         if should_delete:
@@ -2671,50 +2716,58 @@ def run_single_model(
                     except Exception as e:
                         logger.warning(f"Failed to delete GWAS output directory (ignored): {e}")
             except Exception as cleanup_err:
-                logger.debug(f"Error during temporary directory cleanup (ignored): {cleanup_err}")
+                pass
         else:
-            logger.debug("Debug mode: CLEANUP_TEMP_FILES=False, temporary files and directories from this run will be retained.")
+            pass
+        
+        # ======================== 阶段结束时清理临时目录（standardized） ========================
+        # 单模型训练只清理“本进程自己的”临时目录。
+        # 注意：train-all 会在父进程统一清理 base_output_dir/tmp，单模型子进程不得删除整个 tmp 根目录。
+        if CLEANUP_TEMP_FILES:
+            try:
+                import shutil
+                if run_tmp_dir.exists():
+                    shutil.rmtree(run_tmp_dir, ignore_errors=True)
+            except Exception as e:
+                pass
+        
         return 0
 
     except Exception as e:
         logger.error(f"Single model training failed: {str(e)}", exc_info=True)
         # 根据调试开关决定异常时是否清理临时目录/文件
         if CLEANUP_TEMP_FILES:
-            # 异常：仅清理本次运行登记的临时文件/目录，不触碰preprocess阶段的临时目录
+            # 异常：只清理本进程自己的临时目录（避免并行冲突）
             try:
                 _temp_file_manager.cleanup_on_exit(cleanup_preprocess=False)
-                # 异常时也检查tmp_root，但需要确保不会删除preprocess的tmp目录
-                try:
-                    if tmp_root.exists() and not any(tmp_root.iterdir()):
-                        # 由于tmp_root是temp_m，preprocess_tmp_dir是tmp_p，名称不同，不会冲突
-                        # 但保留检查逻辑作为额外安全措施
-                        should_delete = True
-                        if preprocess_tmp_dir:
-                            preprocess_tmp_dir_abs = Path(preprocess_tmp_dir).absolute()
-                            tmp_root_abs = tmp_root.absolute()
-                            # 如果tmp_root是preprocess_tmp_dir或其父目录，则不删除（理论上不会发生，因为名称不同）
-                            try:
-                                # Python 3.9+ 使用 is_relative_to
-                                if tmp_root_abs == preprocess_tmp_dir_abs or preprocess_tmp_dir_abs.is_relative_to(tmp_root_abs):
-                                    should_delete = False
-                                    logger.debug(f"Exception: skipping deletion of tmp_root (overlaps with preprocess_tmp_dir): {tmp_root}")
-                            except AttributeError:
-                                # Python < 3.9 使用其他方法检查
-                                try:
-                                    preprocess_tmp_dir_abs.relative_to(tmp_root_abs)
-                                    should_delete = False
-                                    logger.debug(f"Exception: skipping deletion of tmp_root (overlaps with preprocess_tmp_dir): {tmp_root}")
-                                except ValueError:
-                                    pass  # 不是相对路径，可以删除
-                        if should_delete:
-                            shutil.rmtree(tmp_root, ignore_errors=True)
-                except Exception:
-                    pass
+                import shutil
+                if run_tmp_dir.exists():
+                    shutil.rmtree(run_tmp_dir, ignore_errors=True)
             except Exception as cleanup_err:
-                logger.debug(f"Error during temporary directory cleanup (ignored): {cleanup_err}")
+                pass
         else:
-            logger.debug("Debug mode: Exception occurred, but temporary files and directories from this run will be retained (CLEANUP_TEMP_FILES=False).")
+            pass
         return 1
+
+
+def _run_single_model_silent(*args, **kwargs) -> int:
+    """
+    子进程包装器：抑制子进程中的冗长日志输出（standardized）
+    - 父进程负责输出"正在训练哪个模型 / 耗时"等进度信息
+    - 子进程仅保留 WARNING 及以上，避免刷屏
+    
+    注意：此函数必须在模块级别定义，以便可以被 multiprocessing 的 pickle 序列化
+    """
+    import logging as _logging
+    root = _logging.getLogger()
+    old_level = root.level
+    try:
+        root.setLevel(_logging.WARNING)
+        return run_single_model(*args, **kwargs)
+    finally:
+        root.setLevel(old_level)
+
+
 def run_all_models(
     input_path: str,
     output_dir: str,
@@ -2723,8 +2776,8 @@ def run_all_models(
     random_state: int = 42,
     # 特征重要性计算参数（可选）
     calculate_feature_importance: bool = False,
-    # 图表质量参数
-    publication_quality: bool = True
+    # 图表质量固定开关（fixed，已不对外开放）
+    pub_quality_mode: bool = True
 ) -> int:
     """训练所有支持的模型，并生成对比报告"""
     # 强制要求使用 preprocess 生成的 metadata.json 作为训练入口
@@ -2747,7 +2800,6 @@ def run_all_models(
     # 预先加载训练数据（在主进程中执行一次）
     train_file = input_info["train_file"]
     valid_samples = input_info["metadata"]["valid_samples"] if input_info["metadata"] else None
-    logger.debug("Pre-loading training data for all models...")
     X, y, snp_name_mapping = load_training_data(train_file, valid_samples)
 
     preloaded_data = {
@@ -2760,6 +2812,9 @@ def run_all_models(
         "task_type": task_type,
     }
     
+    # 固定实现：忽略外部传入值，统一使用内部常量
+    pub_quality_mode = PUB_QUALITY_MODE
+
     supported_models = ["LightGBM", "RandomForest", "XGBoost", "SVM", "CatBoost", "Logistic"]
     results = {}
     model_metrics_summary = {}  # 记录每个模型的评估指标（用于后续选择最佳模型）  # 新增
@@ -2768,8 +2823,12 @@ def run_all_models(
     output_dir_path = Path(output_dir)
     output_dir_path.mkdir(parents=True, exist_ok=True)
 
-    # 在输出目录下创建统一临时目录 temp_m，用于全模型训练阶段的所有中间文件（model training专用）
-    tmp_dir = output_dir_path / "temp_m"
+    # ======================== 临时目录规范化（standardized） ========================
+    # 临时文件放在基础输出目录下的 tmp/train 子目录中（与阶段目录同级）
+    # 每个阶段在 tmp 下创建自己的子目录，避免不同阶段的临时文件互相干扰
+    # 例如：如果 output_dir 是 test/train，则 tmp_dir 是 test/tmp/train
+    base_output_dir = output_dir_path.parent
+    tmp_dir = base_output_dir / "tmp" / "train"
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -2777,54 +2836,66 @@ def run_all_models(
         # 说明：
         # - 每个模型类型在一个独立的进程中调用 run_single_model 进行完整训练（含CV、特征重要性、SHAP等）
         # - 进程池大小根据模型个数和CPU核数自动设置，避免资源过载
-        # - 为减少训练过程中的冗长日志输出，这里临时将日志级别提升到WARNING，仅在结束时输出性能汇总
+        # - 父进程输出进度与耗时；子进程通过包装器抑制冗长日志
         max_workers = len(supported_models)
         cpu_count = os.cpu_count() or max_workers
         max_workers = min(max_workers, cpu_count)
         
         from concurrent.futures import ProcessPoolExecutor
-        
-        # 记录当前日志级别，并临时提高到WARNING，减少训练时的信息输出
-        import logging as _logging
-        root_logger = _logging.getLogger()
-        orig_root_level = root_logger.level
-        orig_module_level = logger.level
-        root_logger.setLevel(_logging.WARNING)
-        logger.setLevel(_logging.WARNING)
-        
-        try:
-            logger.info(f"Running all-models training in parallel: {len(supported_models)} models, max_workers={max_workers}")
+
+        logger.info(
+            f"[TRAIN_ALL] 并行训练开始: models={len(supported_models)}, max_workers={max_workers}, "
+            f"task_type={task_type}, n_folds={n_folds}"
+        )
+
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {}
+            submit_ts = {}
+            for model_type in supported_models:
+                logger.info(f"[TRAIN_ALL] 开始训练模型: {model_type}")
+                submit_ts[model_type] = time.time()
+                future = executor.submit(
+                    _run_single_model_silent,
+                    input_path,
+                    model_type,
+                    output_dir,
+                    task_type,
+                    n_folds,
+                    random_state,
+                    calculate_feature_importance,
+                    pub_quality_mode,
+                    preloaded_data,
+                )
+                futures[future] = model_type
             
-            with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                futures = {}
-                for model_type in supported_models:
-                    # 提交子任务（子进程会继承当前较高的日志级别，从而抑制详细日志）
-                    future = executor.submit(
-                        run_single_model,
-                        input_path,
-                        model_type,
-                        output_dir,
-                        task_type,
-                        n_folds,
-                        random_state,
-                        calculate_feature_importance,
-                        publication_quality,
-                        preloaded_data,
-                    )
-                    futures[future] = model_type
-                
-                # 收集各模型的退出码
-                for future, model_type in futures.items():
-                    try:
-                        ret_code = future.result()
-                    except Exception as e:
-                        logger.error(f"[train-all] Model {model_type} training failed with exception: {e}", exc_info=True)
-                        ret_code = 1
-                    results[model_type] = "成功" if ret_code == 0 else "失败"
-        finally:
-            # 恢复原日志级别，确保后续的性能汇总信息可以正常输出
-            root_logger.setLevel(orig_root_level)
-            logger.setLevel(orig_module_level)
+            # 收集各模型的退出码（按完成顺序输出）
+            for future in as_completed(futures):
+                model_type = futures[future]
+                elapsed = time.time() - submit_ts.get(model_type, time.time())
+                try:
+                    ret_code = future.result()
+                except Exception as e:
+                    logger.error(f"[TRAIN_ALL] 模型训练异常: model={model_type}, err={e}", exc_info=True)
+                    ret_code = 1
+                results[model_type] = "成功" if ret_code == 0 else "失败"
+                logger.info(
+                    f"[TRAIN_ALL] 模型训练结束: model={model_type}, status={results[model_type]}, "
+                    f"elapsed={elapsed:.1f}s"
+                )
+
+        logger.info(f"[TRAIN_ALL] 并行训练阶段完成, elapsed_total={time.time()-start_time:.1f}s")
+        
+        # ======================== 阶段结束时清理临时目录（standardized） ========================
+        # 在阶段正常结束时，删除整个 tmp 目录（包括目录本身及其所有文件和子目录）
+        if CLEANUP_TEMP_FILES:
+            try:
+                import shutil
+                # 删除整个 tmp 目录（output_dir/tmp），而不仅仅是 tmp/train 子目录
+                tmp_root_dir = base_output_dir / "tmp"
+                if tmp_root_dir.exists():
+                    shutil.rmtree(tmp_root_dir, ignore_errors=True)
+            except Exception as e:
+                pass
 
         # ======================== 新增：读取各模型评估指标，打印性能并选择最佳模型 ========================
         # 说明：
@@ -2835,10 +2906,10 @@ def run_all_models(
         best_score = None
         best_metric_name = None
 
-        logger.info("Model performance summary (based on metrics.json):")
+        logger.info("Model performance summary (based on *_metrics.json):")
         for model_type in supported_models:
             model_dir = output_dir_path / model_type
-            metrics_file = model_dir / "metrics.json"
+            metrics_file = model_dir / f"{model_type}_metrics.json"
             if not metrics_file.exists():
                 logger.warning(f"  Metrics file not found for model {model_type}: {metrics_file}")
                 continue
@@ -2890,22 +2961,16 @@ def run_all_models(
                     best_model_type = model_type
                     best_metric_name = metric_name
 
-        # 保存最佳模型副本到统一路径，便于下游直接加载
+        # 已按需求：仅保留性能最优模型目录（其内已包含 *_model.pkl 等文件）
+        # 因此不再额外复制 best_model.pkl，避免重复保存
         if best_model_type is not None:
             best_model_dir = output_dir_path / best_model_type
             best_model_src = best_model_dir / f"{best_model_type}_model.pkl"
             if best_model_src.exists():
-                best_model_dst = output_dir_path / "best_model.pkl"
-                try:
-                    import shutil
-                    shutil.copy2(best_model_src, best_model_dst)
-                except Exception as e:
-                    logger.warning(f"  Failed to copy best model file: {e}")
-
                 # 额外保存一个 best_model_info.json，记录最佳模型及所有模型性能
                 best_info_file = output_dir_path / "best_model_info.json"
                 try:
-                    with open(best_info_file, "w") as f:
+                    with open(best_info_file, "w", encoding="utf-8") as f:
                         json.dump(
                             {
                                 "task_type": task_type,
@@ -2917,11 +2982,12 @@ def run_all_models(
                             },
                             f,
                             indent=2,
+                            ensure_ascii=False,
                             default=str,
                         )
                     logger.info(
                         f"Best model: {best_model_type} ("
-                        f"{best_metric_name}={best_score}) saved to {best_model_dst}"
+                        f"{best_metric_name}={best_score})"
                     )
                 except Exception as e:
                     logger.warning(f"  Failed to save best_model_info.json: {e}")
@@ -2949,7 +3015,7 @@ def run_all_models(
         output_dir_path = Path(output_dir)
         output_dir_path.mkdir(parents=True, exist_ok=True)
         report_file = output_dir_path / "model_comparison_report.json"
-        with open(report_file, 'w') as f:
+        with open(report_file, 'w', encoding="utf-8") as f:
             json.dump({
                 "task_type": task_type,
                 "n_folds": n_folds,
@@ -2958,11 +3024,23 @@ def run_all_models(
                 "training_results": results,
                 "total_training_time": round(time.time() - start_time, 2),
                 "generated_time": time.strftime("%Y-%m-%d %H:%M:%S")
-            }, f, indent=2)
+            }, f, indent=2, ensure_ascii=False)
 
         logger.info("  All models training completed")
         
-        # 根据调试开关决定是否清理临时目录/文件
+        # ======================== 阶段结束时清理临时目录（standardized） ========================
+        # 在阶段正常结束时，删除整个 tmp 目录（包括目录本身及其所有文件和子目录）
+        if CLEANUP_TEMP_FILES:
+            try:
+                import shutil
+                # 删除整个 tmp 目录（output_dir/tmp），而不仅仅是 tmp/train 子目录
+                tmp_root_dir = base_output_dir / "tmp"
+                if tmp_root_dir.exists():
+                    shutil.rmtree(tmp_root_dir, ignore_errors=True)
+            except Exception as e:
+                pass
+        
+        # 根据调试开关决定是否清理临时目录/文件（保留原有逻辑作为备用）
         if CLEANUP_TEMP_FILES:
             # 所有模型训练结束后，尝试删除全模型阶段的 tmp 根目录（若为空）
             # 由于tmp_dir是temp_m，preprocess_tmp_dir是tmp_p，名称不同，不会冲突
@@ -2983,13 +3061,11 @@ def run_all_models(
                                 # Python 3.9+ 使用 is_relative_to
                                 if tmp_dir_abs == preprocess_tmp_dir_abs or preprocess_tmp_dir_abs.is_relative_to(tmp_dir_abs):
                                     should_delete = False
-                                    logger.debug(f"Skipping deletion of tmp_dir (overlaps with preprocess_tmp_dir): {tmp_dir}")
                             except AttributeError:
                                 # Python < 3.9 使用其他方法检查
                                 try:
                                     preprocess_tmp_dir_abs.relative_to(tmp_dir_abs)
                                     should_delete = False
-                                    logger.debug(f"Skipping deletion of tmp_dir (overlaps with preprocess_tmp_dir): {tmp_dir}")
                                 except ValueError:
                                     pass  # 不是相对路径，可以删除
                     except Exception:
@@ -3020,46 +3096,22 @@ def run_all_models(
                 except Exception as e:
                     logger.warning(f"Failed to delete GWAS output directory (ignored): {e}")
         else:
-            logger.debug("Debug mode: CLEANUP_TEMP_FILES=False, temporary files and directories from this run will be retained.")
+            pass
         
         return 0
 
     except Exception as e:
         logger.error(f"  All-models training failed: {str(e)}", exc_info=True)
-        # 异常时也尝试清理空的 tmp 根目录（不会触碰其中仍有内容的情况）
-        # 由于tmp_dir是temp_m，preprocess_tmp_dir是tmp_p，名称不同，不会冲突
-        # 但保留检查逻辑作为额外安全措施
-        try:
-            if tmp_dir.exists() and not any(tmp_dir.iterdir()):
-                should_delete = True
-                # 尝试从输入路径获取preprocess_tmp_dir（tmp_p目录）
-                try:
-                    input_info = parse_train_input_path(input_path)
-                    if input_info.get("preprocess_tmp_dir"):
-                        preprocess_tmp_dir_abs = Path(input_info["preprocess_tmp_dir"]).absolute()
-                        tmp_dir_abs = tmp_dir.absolute()
-                        # 如果tmp_dir是preprocess_tmp_dir或其父目录，则不删除（理论上不会发生，因为名称不同）
-                        try:
-                            # Python 3.9+ 使用 is_relative_to
-                            if tmp_dir_abs == preprocess_tmp_dir_abs or preprocess_tmp_dir_abs.is_relative_to(tmp_dir_abs):
-                                should_delete = False
-                                logger.debug(f"Exception: skipping deletion of tmp_dir (overlaps with preprocess_tmp_dir): {tmp_dir}")
-                        except AttributeError:
-                            # Python < 3.9 使用其他方法检查
-                            try:
-                                preprocess_tmp_dir_abs.relative_to(tmp_dir_abs)
-                                should_delete = False
-                                logger.debug(f"Exception: skipping deletion of tmp_dir (overlaps with preprocess_tmp_dir): {tmp_dir}")
-                            except ValueError:
-                                pass  # 不是相对路径，可以删除
-                except Exception:
-                    pass  # 如果无法获取preprocess_tmp_dir，则按原逻辑删除
-                
-                if should_delete:
-                    import shutil
-                    shutil.rmtree(tmp_dir, ignore_errors=True)
-        except Exception:
-            pass
+        # 异常时清理整个 tmp 目录（包括目录本身及其所有文件和子目录）
+        if CLEANUP_TEMP_FILES:
+            try:
+                import shutil
+                # 删除整个 tmp 目录（output_dir/tmp），而不仅仅是 tmp/train 子目录
+                tmp_root_dir = base_output_dir / "tmp"
+                if tmp_root_dir.exists():
+                    shutil.rmtree(tmp_root_dir, ignore_errors=True)
+            except Exception:
+                pass
         return 1
 
 # ======================== 6. 预测函数 ========================
@@ -3183,7 +3235,7 @@ def predict_with_model(
         X, _, _ = load_training_data(input_path)
         
         # 1.1 加载训练阶段使用的特征列表
-        features_file = model_dir / "training_features.json"
+        features_file = model_dir / f"{model_type}_training_features.json"
         if features_file.exists():
             try:
                 with open(features_file, "r") as f:
@@ -3205,10 +3257,6 @@ def predict_with_model(
         # - 训练没有、预测有：不加入模型输入（即丢弃该列）。
         
         # 调试信息：检查特征匹配情况
-        logger.debug(f"  Training features count: {len(train_features)}")
-        logger.debug(f"  Prediction features count: {len(X.columns)}")
-        logger.debug(f"  Training features (first 10): {train_features[:10]}")
-        logger.debug(f"  Prediction features (first 10): {list(X.columns[:10])}")
         
         # 检查特征名称匹配情况
         matched_features = [col for col in train_features if col in X.columns]
@@ -3256,7 +3304,7 @@ def predict_with_model(
                 f"  Please check if feature names match between training and prediction data."
             )
         else:
-            logger.debug(f"  Non-zero feature counts per sample: min={non_zero_counts.min()}, max={non_zero_counts.max()}, mean={non_zero_counts.mean():.1f}")
+            pass
         
         if missing_in_predict:
             logger.info(
@@ -3273,7 +3321,6 @@ def predict_with_model(
         
         # 3. 执行预测（基于对齐后的特征矩阵）
         # 验证特征矩阵的有效性
-        logger.debug(f"  Aligned feature matrix shape: {X_aligned.shape}")
         
         # 检查特征矩阵是否有变化
         feature_variance = X_aligned.var()
@@ -3308,7 +3355,9 @@ def predict_with_model(
         else:
             pred_output_dir = Path(output_dir) / model_type
         pred_output_dir.mkdir(parents=True, exist_ok=True)
-        pred_file = pred_output_dir / "predictions.tsv"
+        # ======================== 输出命名规范化（standardized） ========================
+        # 预测结果统一命名为：{model_type}_predictions.tsv
+        pred_file = pred_output_dir / f"{model_type}_predictions.tsv"
         
         # 构建结果DataFrame
         result_df = pd.DataFrame({
@@ -3326,10 +3375,9 @@ def predict_with_model(
         # 清理临时文件（如果是VCF转换产生的）
         if is_vcf_input and tmp_dir_to_clean and tmp_dir_to_clean.exists():
             try:
-                logger.debug(f"Cleaning up temporary directory: {tmp_dir_to_clean}")
                 shutil.rmtree(tmp_dir_to_clean, ignore_errors=True)
             except Exception as e:
-                logger.debug(f"Failed to clean up temporary files: {e}")
+                pass
         
         return 0
     except Exception as e:
@@ -3381,7 +3429,7 @@ if __name__ == "__main__":
             task_type=args.task_type,
             n_folds=args.n_folds,
             random_state=args.random_state,
-            publication_quality=True
+            pub_quality_mode=True
         ))
     elif args.command == "train-all":
         sys.exit(run_all_models(
@@ -3390,7 +3438,7 @@ if __name__ == "__main__":
             task_type=args.task_type,
             n_folds=args.n_folds,
             random_state=args.random_state,
-            publication_quality=True
+            pub_quality_mode=True
         ))
     elif args.command == "predict":
         sys.exit(predict_with_model(

@@ -8,6 +8,7 @@ import subprocess
 import logging
 import os
 import sys
+import shutil
 import pandas as pd
 from pathlib import Path
 from typing import Optional, Tuple
@@ -20,11 +21,54 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 软件路径（保持原始硬编码）
+# 软件路径：优先使用项目内集成的软件，其次回退到系统PATH中的可执行文件（standardized）
 bin_dir = Path(__file__).parent
 software_dir = bin_dir / "software"
-plink_executable = str(software_dir / "plink")
-gemma_executable = str(software_dir / "gemma-0.98.5-linux-static-AMD64")
+_bundled_plink = software_dir / "plink"
+_bundled_gemma = software_dir / "gemma-0.98.5-linux-static-AMD64"
+
+
+def _get_plink_executable() -> str:
+    """
+    获取PLINK可执行路径（standardized）
+    优先顺序：
+      1) 项目内 software 目录下的集成版本
+      2) 系统PATH中的 plink
+    """
+    if _bundled_plink.exists():
+        return str(_bundled_plink)
+    found = shutil.which("plink")
+    if found:
+        logger.info(f"Using system PLINK executable from PATH: {found}")
+        return found
+    raise FileNotFoundError(
+        f"PLINK executable not found. "
+        f"Checked bundled path: {_bundled_plink} and system PATH."
+    )
+
+
+def _get_gemma_executable() -> str:
+    """
+    获取GEMMA可执行路径（standardized）
+    优先顺序：
+      1) 项目内 software 目录下的集成版本
+      2) 系统PATH中的 gemma
+    """
+    if _bundled_gemma.exists():
+        return str(_bundled_gemma)
+    # GEMMA 在PATH中的命令名可能为 gemma，这里做一次简单尝试
+    found = shutil.which("gemma")
+    if found:
+        logger.info(f"Using system GEMMA executable from PATH: {found}")
+        return found
+    raise FileNotFoundError(
+        f"GEMMA executable not found. "
+        f"Checked bundled path: {_bundled_gemma} and system PATH."
+    )
+
+# 初始化可执行文件路径（在模块加载时执行，standardized）
+plink_executable = _get_plink_executable()
+gemma_executable = _get_gemma_executable()
 
 # 固定输入格式要求
 REQUIRED_INPUT_FILES = {
@@ -71,12 +115,6 @@ def validate_phenotype_file(phenotype_file: str) -> pd.DataFrame:
         # 重命名列
         pheno_df.columns = ['IID', 'PHENO']
         
-        # 打印前5行
-        logger.info("="*50)
-        logger.info("表型文件前5行（仅读取前两列）：")
-        logger.info(pheno_df.head().to_string(index=False))
-        logger.info("="*50)
-        
         # 校验前两列是否为空
         if pheno_df['IID'].isnull().any() or pheno_df['PHENO'].isnull().any():
             logger.warning("表型文件前两列包含空值，请检查！")
@@ -100,9 +138,11 @@ def run_shell_command(cmd: list, step_name: str) -> None:
     )
     
     if result.stdout:
-        logger.info(f"标准输出：{result.stdout[:1000]}")
+        # 标准输出通常信息量较大，仅在调试时完整查看
+        pass
     
     # 处理标准错误输出：区分真正的错误和信息性消息，并过滤掉GEMMA的进度条
+    stderr_content = ""
     if result.stderr:
         stderr_content = result.stderr[:1000]
         # GEMMA 在stderr中用类似“空格 + = + 百分比”的形式打印进度条，
@@ -289,7 +329,7 @@ def run_gemma_gwas(genotype_prefix: str, kinship_file: str, cov_file: str, outpu
         "-bfile", genotype_prefix,
         "-k", kinship_file,
         "-c", cov_file,
-        "-lmm", "4",
+        "-lmm", "1",
         "-o", gwas_prefix
     ]
     run_shell_command(cmd, "GWAS关联分析")

@@ -33,10 +33,6 @@ warnings.filterwarnings('ignore')
 
 logger = logging.getLogger(__name__)
 
-# ======================== 关键修复：确保 assoG2P 包在直接运行 main.py 时可导入 ========================
-# 常见场景：用户在 /path/to/assoG2P 目录内直接运行 `python3 main.py`
-# 此时 sys.path 默认包含当前目录（即 assoG2P 包目录本身），但不包含其父目录，
-# 导致 `import assoG2P` 失败。这里将父目录加入 sys.path，保证 CLI 能正常导入子模块。
 _pkg_dir = Path(__file__).resolve().parent
 _pkg_parent = _pkg_dir.parent
 if (_pkg_dir / "__init__.py").exists() and str(_pkg_parent) not in sys.path:
@@ -64,28 +60,22 @@ def run_preprocess(args) -> int:
         logger.info("Starting preprocessing")
         # 解析SNP过滤参数
         filter_snps_value = not args.no_filter_snps
-        # 获取GWAS/LD参数（如果未指定则使用默认值）
+        # 解析GWAS/LD特征筛选配置（LD使用三合一配置参数）
         feature_selection_mode = getattr(args, 'feature_selection_mode', 1)
         gwas_pvalue = getattr(args, 'gwas_pvalue', 0.01)
-        ld_window_kb = getattr(args, 'ld_window_kb', 50)
-        ld_window = getattr(args, 'ld_window', 5)
-        ld_window_r2 = getattr(args, 'ld_window_r2', 0.2)
+        # LD三合一配置，格式: \"<window_kb>,<window_variants>,<r2_threshold>\"
+        ld_config = getattr(args, 'ld_config', None) or "50,5,0.2"
         use_cache = not getattr(args, 'no_cache', False)
-        keep_temp_files = getattr(args, 'keep_temp_files', False)
         
         return preprocess_func(
             genotype_file=args.genotype,
             phenotype_file=args.phenotype,
             output_file=args.output,
-            pheno_col=args.pheno_col,
             filter_snps=filter_snps_value,
             use_cache=use_cache,
             feature_selection_mode=feature_selection_mode,
             gwas_pvalue=gwas_pvalue,
-            ld_window_kb=ld_window_kb,
-            ld_window=ld_window,
-            ld_window_r2=ld_window_r2,
-            keep_temp_files=keep_temp_files,
+            ld_config=ld_config,
         )
     except Exception as e:
         logger.error(f"Preprocessing failed: {str(e)}")
@@ -98,11 +88,18 @@ def run_training(args) -> int:
         
         logger.info(f"训练: {args.model}")
         
+        # ======================== 输出目录结构规范化（standardized） ========================
+        # 在 -o 指定的目录下创建 train 子目录
+        base_output_dir = Path(args.output_dir).absolute()
+        base_output_dir.mkdir(parents=True, exist_ok=True)
+        stage_output_dir = base_output_dir / "train"
+        stage_output_dir.mkdir(parents=True, exist_ok=True)
+        
         # GWAS/LD特征筛选已在preprocess模块完成，训练阶段不再执行筛选
         return run_single_model(
             input_path=args.json,
             model_type=args.model,
-            output_dir=args.output_dir,
+            output_dir=str(stage_output_dir),
             task_type=args.task_type,
             n_folds=args.n_folds,
             random_state=args.random_state,
@@ -120,10 +117,17 @@ def run_train_all(args) -> int:
         
         logger.info(f"训练所有模型")
         
+        # ======================== 输出目录结构规范化（standardized） ========================
+        # 在 -o 指定的目录下创建 train 子目录
+        base_output_dir = Path(args.output_dir).absolute()
+        base_output_dir.mkdir(parents=True, exist_ok=True)
+        stage_output_dir = base_output_dir / "train"
+        stage_output_dir.mkdir(parents=True, exist_ok=True)
+        
         # GWAS/LD特征筛选已在preprocess模块完成，训练阶段不再执行筛选
         return run_all_models(
             input_path=args.json,
-            output_dir=args.output_dir,
+            output_dir=str(stage_output_dir),
             task_type=args.task_type,
             n_folds=args.n_folds,
             random_state=args.random_state,
@@ -141,10 +145,17 @@ def run_predict(args) -> int:
         
         logger.info(f"预测")
         
+        # ======================== 输出目录结构规范化（standardized） ========================
+        # 在 -o 指定的目录下创建 predict 子目录
+        base_output_dir = Path(args.output_dir).absolute()
+        base_output_dir.mkdir(parents=True, exist_ok=True)
+        stage_output_dir = base_output_dir / "predict"
+        stage_output_dir.mkdir(parents=True, exist_ok=True)
+        
         return predict_with_model(
             input_path=args.input,
             model_path=args.model,
-            output_dir=args.output_dir,
+            output_dir=str(stage_output_dir),
             task_type=args.task_type
         )
         
@@ -197,119 +208,105 @@ def run_performance_visualization(args) -> int:
 
 def run_unified_visualization(args) -> int:
     """
-    统一的可视化处理函数，支持同时处理特征重要性可视化（-i）和模型性能可视化（-f/-d）
-    
-    可以同时指定-i和-f/-d，同时生成两种图表
-    执行顺序：先执行性能可视化（-f/-d），再执行特征重要性可视化（-i）
+    统一的可视化处理函数
+    - 使用 -i/--importance 输入特征重要性文件，生成全基因组散点图
+    - 使用 -I/--indicator 输入模型评估结果文件（plotting_data.npz），生成模型性能与CV曲线
+    - 使用 -o/--output 指定输出前缀（standardized），用于生成相关图形文件
     """
     result_code = 0
     
-    # 检查是否至少指定了一个参数
-    has_importance = args.input is not None
-    has_performance = args.file is not None or args.model_dir is not None
+    # 检查是否至少指定了一个输入
+    has_importance = getattr(args, "importance", None) is not None
+    has_indicator = getattr(args, "indicator", None) is not None
     
-    if not has_importance and not has_performance:
+    if not has_importance and not has_indicator:
         logger.error("必须至少指定以下参数之一：")
-        logger.error("  -i/--input: 特征重要性数据文件（用于重要性可视化）")
-        logger.error("  -f/--file 或 -d/--model-dir: 绘图数据文件或模型目录（用于性能可视化）")
+        logger.error("  -i/--importance: 特征重要性数据文件（用于重要性可视化）")
+        logger.error("  -I/--indicator: 模型评估结果文件（plotting_data.npz，用于性能/CV可视化）")
         return 1
     
-    # 先处理模型性能可视化（-f/-d）
-    if has_performance:
+    if not args.output:
+        logger.error("使用 -i/--importance 或 -I/--indicator 时必须指定 -o/--output 输出前缀")
+        return 1
+    
+    # ======================== 输出目录结构规范化（standardized） ========================
+    # 在 -o 指定的目录下创建 visualize 子目录
+    output_prefix = Path(args.output)
+    # 若用户只给了文件名而无目录，则默认当前工作目录
+    if not output_prefix.parent or str(output_prefix.parent) == ".":
+        output_prefix = Path.cwd() / output_prefix.name
+    
+    base_output_dir = output_prefix.parent
+    base_output_dir.mkdir(parents=True, exist_ok=True)
+    stage_output_dir = base_output_dir / "visualize"
+    stage_output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 输出前缀调整为在 visualize 目录下
+    output_prefix = stage_output_dir / output_prefix.name
+    output_dir = stage_output_dir
+    
+    # 先处理模型性能/评估指标可视化（-I）
+    if has_indicator:
         try:
-            logger.info("开始生成模型性能可视化...")
+            logger.info("开始生成模型评估指标可视化...")
             from assoG2P.bin.visualization import plot_model_performance_from_file
             
-            # 确定plotting_data.npz文件路径
-            plotting_data_file = None
-            if args.file:
-                plotting_data_file = Path(args.file)
-            elif args.model_dir:
-                plotting_data_file = Path(args.model_dir) / "plotting_data.npz"
-            
+            plotting_data_file = Path(args.indicator)
             if not plotting_data_file.exists():
-                logger.error(f"绘图数据文件不存在: {plotting_data_file}")
+                logger.error(f"模型评估结果文件不存在: {plotting_data_file}")
                 result_code = 1
             else:
-                # 确定输出目录
-                output_dir = None
-                if args.output_dir:
-                    output_dir = Path(args.output_dir)
-                elif args.model_dir:
-                    output_dir = Path(args.model_dir)
-                elif args.file:
-                    output_dir = Path(args.file).parent
-                
-                # 确定publication_quality
-                publication_quality = args.publication_quality if hasattr(args, 'publication_quality') else None
-                
-                logger.info(f"从文件读取绘图数据: {plotting_data_file}")
+                logger.info(f"从文件读取模型评估数据: {plotting_data_file}")
                 perf_result = plot_model_performance_from_file(
                     plotting_data_file=plotting_data_file,
                     output_dir=output_dir,
-                    publication_quality=publication_quality
+                    publication_quality=None,
+                    output_prefix=output_prefix
                 )
                 if perf_result != 0:
                     result_code = perf_result
                 else:
-                    logger.info("模型性能可视化完成")
-                    
+                    logger.info("模型评估指标可视化完成")
         except Exception as e:
-            logger.error(f"模型性能可视化失败: {str(e)}")
+            logger.error(f"模型评估指标可视化失败: {str(e)}")
             result_code = 1
     
     # 再处理特征重要性可视化（-i）
     if has_importance:
-        if not args.output:
-            logger.error("使用 -i/--input 时必须指定 --output 参数")
+        try:
+            logger.info("开始生成特征重要性可视化...")
+            from assoG2P.bin.visualization import EnhancedGenomeVisualizer
+            
+            importance_file = Path(args.importance)
+            if not importance_file.exists():
+                raise FileNotFoundError(f"特征重要性文件不存在: {importance_file}")
+            
+            # 创建可视化器实例，列名自动检测
+            visualizer = EnhancedGenomeVisualizer(
+                input_file=str(importance_file),
+                feature_col=None,
+                value_col=None
+            )
+            
+            # 统一使用输出前缀，生成静态和交互式图
+            static_output = f"{output_prefix}_importance_static.png"
+            interactive_output = f"{output_prefix}_importance_interactive.html"
+            
+            visualizer.plot_static_scatter(output_file=str(static_output))
+            logger.info(f"静态特征重要性图已生成: {static_output}")
+            
+            visualizer.plot_interactive_scatter(output_file=str(interactive_output))
+            logger.info(f"交互式特征重要性图已生成: {interactive_output}")
+            
+            logger.info("特征重要性可视化完成")
+            
+        except ImportError as e:
+            logger.error(f"模块导入错误: {str(e)}")
+            logger.error("对于交互式图表，请安装依赖: pip install plotly kaleido")
             result_code = 1
-        else:
-            try:
-                logger.info("开始生成特征重要性可视化...")
-                from assoG2P.bin.visualization import EnhancedGenomeVisualizer
-                
-                if not Path(args.input).exists():
-                    raise FileNotFoundError(f"输入文件不存在: {args.input}")
-                
-                # 创建可视化器实例
-                visualizer = EnhancedGenomeVisualizer(
-                    input_file=args.input,
-                    feature_col=args.feature_col,
-                    value_col=getattr(args, 'value_col', None) or getattr(args, 'shap_col', None)
-                )
-                
-                # 根据参数决定生成哪种图
-                generate_static = True
-                generate_interactive = True
-                if getattr(args, "static_only", False) and not getattr(args, "interactive_only", False):
-                    generate_interactive = False
-                elif getattr(args, "interactive_only", False) and not getattr(args, "static_only", False):
-                    generate_static = False
-                
-                if generate_static:
-                    static_output = f"{args.output}_static.png"
-                    visualizer.plot_static_scatter(
-                        output_file=static_output,
-                        dpi=args.dpi
-                    )
-                    logger.info(f"静态图表已生成: {static_output}")
-                
-                if generate_interactive:
-                    interactive_output = f"{args.output}_interactive.html"
-                    visualizer.plot_interactive_scatter(
-                        output_file=interactive_output
-                    )
-                    logger.info(f"交互式图表已生成: {interactive_output}")
-                
-                logger.info("特征重要性可视化完成")
-                
-            except ImportError as e:
-                logger.error(f"模块导入错误: {str(e)}")
-                logger.error("对于交互式图表，请安装依赖: pip install plotly kaleido")
-                result_code = 1
-            except Exception as e:
-                logger.error(f"特征重要性可视化失败: {str(e)}")
-                result_code = 1
+        except Exception as e:
+            logger.error(f"特征重要性可视化失败: {str(e)}")
+            result_code = 1
     
     return result_code
 
@@ -389,7 +386,7 @@ For more details, use: association [command] -h
         metavar=""
     )
     
-    # 数据预处理命令（新增GWAS/LD过滤参数）
+    # 数据预处理命令（新增GWAS/LD过滤参数, LD参数使用三合一配置）
     preprocess_parser = subparsers.add_parser(
         "preprocess",
         help="Data preprocessing (with optional GWAS/LD filtering)"
@@ -397,22 +394,24 @@ For more details, use: association [command] -h
     preprocess_parser.add_argument("-g", "--genotype", required=True, help="Genotypic data in VCF format")
     preprocess_parser.add_argument("-p", "--phenotype", required=True, help="Phenotypic data")
     preprocess_parser.add_argument("-o", "--output", required=True, help="Output file path")
-    preprocess_parser.add_argument("--pheno-col", help="Custom phenotype column name (for non-'phenotype' header)")
     preprocess_parser.add_argument("--no-filter-snps", action="store_true", help="不进行SNP质量过滤")
     preprocess_parser.add_argument("--no-cache", action="store_true", help="禁用缓存")
-    preprocess_parser.add_argument(
-        "--keep-temp-files",
-        action="store_true",
-        help="保留预处理阶段产生的GWAS/LD临时文件（默认自动清理，仅保留必要结果文件）"
-    )
     
-    # GWAS/LD特征筛选参数（在preprocess阶段执行）
+    # GWAS/LD特征筛选参数（在preprocess阶段执行, LD参数已三合一）
     preprocess_parser.add_argument("-f", "--feature_selection_mode", type=int, default=1, choices=[1, 2, 3, 4],
                                  help="Feature selection mode: 1=空白对照(不使用GWAS和LD, 默认), 2=GWAS筛选(仅使用GWAS), 3=LD过滤(仅使用LD), 4=GWAS和LD综合过滤(先GWAS后LD)")
     preprocess_parser.add_argument("--gwas_pvalue", type=float, default=0.01, help="P-value threshold for GWAS SNP selection (default: 0.01). Used when -f is 2 or 4")
-    preprocess_parser.add_argument("--ld_window_kb", type=int, default=50, help="LD window size in KB (default: 50). Used when -f is 3 or 4")
-    preprocess_parser.add_argument("--ld_window", type=int, default=5, help="LD window variant count (default: 5). Used when -f is 3 or 4")
-    preprocess_parser.add_argument("--ld_window_r2", type=float, default=0.2, help="LD r² threshold (default: 0.2). Used when -f is 3 or 4")
+    preprocess_parser.add_argument(
+        "--ld-config",
+        type=str,
+        default="50,5,0.2",
+        help=(
+            "LD三合一配置参数 (standardized): "
+            "\"<window_kb>,<window_variants>,<r2_threshold>\", "
+            "例如 \"50,5,0.2\" 表示窗口50KB、窗口内5个变体、r²阈值0.2；"
+            "仅在 -f 为 3 或 4 时使用"
+        ),
+    )
     
     preprocess_parser.set_defaults(func=run_preprocess)
     
@@ -486,46 +485,33 @@ For more details, use: association [command] -h
                                help="Task type (classification/regression, optional)")
     predict_parser.set_defaults(func=run_predict)
     
-    # 可视化命令（统一接口，支持同时使用-i和-f）
+    # 可视化命令（统一接口，使用-i/-I 输入，-o 指定输出前缀）
     viz_parser = subparsers.add_parser(
         "visualize",
         help="Visualization tools (feature importance scatter plot and/or model performance curves)"
     )
     
-    # 特征重要性可视化参数（-i）
-    viz_parser.add_argument("-i", "--input", 
-                           help="Feature importance data file (for importance visualization)")
-    viz_parser.add_argument("--output", 
-                           help="Output file prefix for importance plots (will add *_static.png and/or *_interactive.html)")
-    viz_parser.add_argument("--feature-col", 
-                           help="Feature column name (default: first column)")
-    viz_parser.add_argument("--value-col", 
-                           help="Feature importance value column name (default: auto-detect)")
-    viz_parser.add_argument("--shap-col", 
-                           dest='value_col',
-                           help="(Deprecated) Use --value-col instead. Feature importance value column name (default: auto-detect)")
-    viz_parser.add_argument("--dpi", 
-                           type=int, 
-                           default=1200,
-                           help="Image resolution for static plots (default: 1200)")
-    importance_group = viz_parser.add_mutually_exclusive_group()
-    importance_group.add_argument("--static-only",
-                                  action="store_true",
-                                  help="Only generate static scatter plot (PNG) for importance visualization")
-    importance_group.add_argument("--interactive-only",
-                                   action="store_true",
-                                   help="Only generate interactive scatter plot (HTML) for importance visualization")
+    # 特征重要性可视化输入（-i）
+    viz_parser.add_argument(
+        "-i",
+        "--importance",
+        help="特征重要性数据文件路径（用于全基因组特征重要性散点图可视化）"
+    )
     
-    # 模型性能可视化参数（-f或-d）
-    viz_parser.add_argument("-f", "--file", 
-                           help="plotting_data.npz file path (for performance visualization)")
-    viz_parser.add_argument("-d", "--model-dir", 
-                           help="Model output directory (will look for plotting_data.npz in this directory)")
-    viz_parser.add_argument("--output-dir", 
-                           help="Output directory for performance plots (default: same as model directory or plotting_data.npz directory)")
-    viz_parser.add_argument("--publication-quality", 
-                            action="store_true",
-                            help="Generate publication-quality plots (high resolution, PDF format) for performance visualization")
+    # 模型评估指标可视化输入（-I）
+    viz_parser.add_argument(
+        "-I",
+        "--indicator",
+        help="模型评估结果文件（plotting_data.npz，用于性能曲线和交叉验证曲线可视化）"
+    )
+    
+    # 统一输出前缀
+    viz_parser.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        help="输出文件前缀 (standardized)，用于生成特征重要性图和/或模型评估图"
+    )
     
     viz_parser.set_defaults(func=run_unified_visualization)
     
