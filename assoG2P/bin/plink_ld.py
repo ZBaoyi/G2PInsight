@@ -205,14 +205,13 @@ def run_plink_command(plink_path: str, args: list, step_name: str) -> bool:
         logger.error(f"{step_name} failed: {e}")
         return False
 
-def cleanup_intermediate_files(output_prefix: str, input_type: str, input_info: Dict) -> None:
+def cleanup_intermediate_files(output_prefix: str, input_type: str) -> None:
     """
     清理所有中间文件（包括prune.in，因为所有临时文件都不保留）
     
     Args:
         output_prefix: 输出文件前缀
         input_type: 输入文件类型
-        input_info: 输入文件信息
     """
     # 基础中间文件（包括prune.in，所有临时文件都不保留）
     patterns_to_delete = [
@@ -287,7 +286,6 @@ def run_ld_filtering(
     ld_window_kb: int = 50,
     ld_window: int = 5,
     ld_window_r2: float = 0.2,
-    plink_path: Optional[str] = None,
     keep_intermediate: bool = False,
     threads: int = 8,
     keep_samples_file: Optional[str] = None,
@@ -301,7 +299,6 @@ def run_ld_filtering(
         ld_window_kb: LD窗口大小（KB）
         ld_window: LD窗口大小（变体数）
         ld_window_r2: LD r²阈值
-        plink_path: PLINK可执行文件路径
         keep_intermediate: 是否保留中间文件（用于调试）
         threads: 使用的线程数
         keep_samples_file: 样本列表文件（可选，仅对指定样本进行LD过滤）
@@ -412,7 +409,7 @@ def run_ld_filtering(
             
             # 9. 清理所有中间文件（包括prune.in，因为所有临时文件都不保留）
             if not keep_intermediate:
-                cleanup_intermediate_files(output_prefix, input_type, input_info)
+                cleanup_intermediate_files(output_prefix, input_type)
                 # 删除 prune.in 文件（所有临时文件都不保留）
                 prune_in_file = Path(f"{output_prefix_abs}.prune.in")
                 if prune_in_file.exists():

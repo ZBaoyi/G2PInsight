@@ -185,19 +185,19 @@ logging.basicConfig(
 def load_preprocess_metadata(metadata_file: str) -> Dict:
     """读取preprocess生成的JSON元数据文件"""
     if not Path(metadata_file).exists():
-        raise FileNotFoundError(f"预处理元数据文件不存在: {metadata_file}")
+        raise FileNotFoundError(f"Preprocess metadata file not found: {metadata_file}")
     
     try:
         with open(metadata_file, 'r', encoding='utf-8') as f:
             metadata = json.load(f)
     except json.JSONDecodeError as e:
-        raise ValueError(f"元数据文件格式错误（非合法JSON）: {metadata_file}, 错误: {str(e)}")
+        raise ValueError(f"Invalid metadata JSON format: {metadata_file}, error: {str(e)}")
     
     # 验证核心字段（gwas_genotype_prefix可以为None，表示文件不存在）
     required_fields = ["valid_samples", "output_train_file"]
     missing_fields = [f for f in required_fields if f not in metadata]
     if missing_fields:
-        raise ValueError(f"元数据缺失关键信息: {', '.join(missing_fields)}")
+        raise ValueError(f"Metadata missing required fields: {', '.join(missing_fields)}")
     
     # 以前这里会验证 gwas_genotype_prefix 对应的 PLINK 文件是否存在，并在缺失时输出 warning。
     # 目前 model training 阶段不再依赖这些中间 PLINK 文件，为避免干扰用户，这里不再做存在性检查。
@@ -600,9 +600,20 @@ def load_training_data(train_file: str, valid_samples: List[str] = None) -> Tupl
         raise
 
 # ======================== 3. 模型训练 & 评估 ========================
-def init_model(model_type: str, task_type: str, random_state: int = 42) -> Any:
+def init_model(
+    model_type: str,
+    task_type: str,
+    random_state: int = 42,
+    cpu_cores: Optional[int] = None,
+) -> Any:
     """初始化模型（分类/回归）"""
     common_params = {"random_state": random_state}
+    # 为了避免并行进程下的线程超配，对支持多线程的模型显式设置线程数
+    # 单位：CPU 核心/线程数。最少为 1。
+    if cpu_cores is None:
+        cpu_cores_value = None
+    else:
+        cpu_cores_value = max(1, int(cpu_cores))
     
     # 模型类映射（减少重复代码）
     model_classes = {
@@ -631,12 +642,15 @@ def init_model(model_type: str, task_type: str, random_state: int = 42) -> Any:
             "learning_rate": 0.1,
             "num_leaves": 31,
             "verbose": -1,
+            # 控制 LightGBM 的并行线程数，避免在多进程并发时超配
+            **({} if cpu_cores_value is None else {"n_jobs": cpu_cores_value}),
             **common_params
         },
         "RandomForest": {
             "n_estimators": 100,
             "max_depth": None,
-            "n_jobs": -1,
+            # 控制随机森林并行线程数；默认保持单线程，避免单模型时也产生过度并行
+            "n_jobs": cpu_cores_value if cpu_cores_value is not None else 1,
             **common_params
         },
         "XGBoost": {
@@ -644,6 +658,8 @@ def init_model(model_type: str, task_type: str, random_state: int = 42) -> Any:
             "learning_rate": 0.1,
             "max_depth": 6,
             "verbosity": 0,
+            # 控制 XGBoost 的并行线程数
+            **({} if cpu_cores_value is None else {"n_jobs": cpu_cores_value}),
             **common_params
         },
         "SVM": {
@@ -657,10 +673,13 @@ def init_model(model_type: str, task_type: str, random_state: int = 42) -> Any:
             "verbose": 0,
             # [CATBOOST_CLEAN] 禁止 CatBoost 在当前工作目录创建 catboost_info/
             "allow_writing_files": False,
+            # 控制 CatBoost 线程数（不同版本参数名可能略有差异，这里使用 thread_count）
+            **({} if cpu_cores_value is None else {"thread_count": cpu_cores_value}),
             **common_params
         },
         "Logistic": {
-            "n_jobs": -1,
+            # 控制 LogisticRegression 的并行线程数；默认保持单线程，避免单模型时也产生过度并行
+            "n_jobs": cpu_cores_value if cpu_cores_value is not None else 1,
             **({"max_iter": 1000} if task_type == "classification" else {}),
             **({} if task_type == "regression" else common_params)
             # 注意：LinearRegression不支持random_state参数
@@ -668,10 +687,10 @@ def init_model(model_type: str, task_type: str, random_state: int = 42) -> Any:
     }
     
     if task_type not in model_classes:
-        raise ValueError(f"不支持的任务类型: {task_type}，可选: {list(model_classes.keys())}")
+        raise ValueError(f"Unsupported task type: {task_type}; available: {list(model_classes.keys())}")
     
     if model_type not in model_classes[task_type]:
-        raise ValueError(f"不支持的模型类型: {model_type}，可选: {list(model_classes[task_type].keys())}")
+        raise ValueError(f"Unsupported model type: {model_type}; available: {list(model_classes[task_type].keys())}")
     
     # 获取模型类和参数
     model_class = model_classes[task_type][model_type]
@@ -763,7 +782,7 @@ def get_param_grid(model_type: str, task_type: str) -> Dict:
     param_grids = {**common_param_grids, **task_specific}
     
     if model_type not in param_grids:
-        raise ValueError(f"不支持的模型类型: {model_type}，可选: {list(param_grids.keys())}")
+        raise ValueError(f"Unsupported model type: {model_type}; available: {list(param_grids.keys())}")
     
     return param_grids[model_type]
 
@@ -776,7 +795,8 @@ def perform_grid_search(
     n_iter: int = 20,
     cv: int = 3,
     random_state: int = 42,
-    scoring: Optional[str] = None
+    scoring: Optional[str] = None,
+    cpu_cores: Optional[int] = None,
 ) -> Any:
     """
     执行超参数网格搜索
@@ -793,7 +813,12 @@ def perform_grid_search(
     :return: 最佳模型
     """
     # 初始化基础模型
-    base_model = init_model(model_type, task_type, random_state=random_state)
+    base_model = init_model(
+        model_type,
+        task_type,
+        random_state=random_state,
+        cpu_cores=cpu_cores,
+    )
     
     # 设置默认评分指标
     if scoring is None:
@@ -1235,7 +1260,7 @@ def calculate_shap_values(
         min_len = min(n_features_from_shap, n_features_from_names, n_features_from_sign)
         if not (n_features_from_shap == n_features_from_names == n_features_from_sign):
             logger.warning(
-                " SHAP特征长度不一致，将按最小长度对齐: "
+                " SHAP feature-length mismatch; aligning by minimum length: "
                 f"shap={n_features_from_shap}, names={n_features_from_names}, sign={n_features_from_sign}"
             )
 
@@ -1455,86 +1480,6 @@ def save_training_results(
 
 # ======================== 5. 核心训练函数 ========================
 
-def _run_single_fold_cv(
-    fold_idx: int,
-    train_idx,
-    val_idx,
-    X: pd.DataFrame,
-    y: pd.Series,
-    model_type: str,
-    task_type: str,
-    random_state: int
-):
-    """
-    进程池中执行的单折训练与评估函数（用于5折交叉验证并行）
-    
-    修复说明：
-    - 使用iloc进行位置索引访问，确保即使DataFrame/Series的索引不是整数也能正确工作
-    - train_idx和val_idx是numpy数组，表示位置索引，与iloc兼容
-    """
-    logger = logging.getLogger(__name__)
-
-    try:
-        # 修复：使用iloc进行位置索引访问，确保索引正确
-        # train_idx和val_idx是numpy数组，表示位置索引（从0开始）
-        # iloc使用位置索引，即使DataFrame/Series的索引是字符串也能正确工作
-        X_train_fold = X.iloc[train_idx].copy()  # 添加copy()避免SettingWithCopyWarning
-        X_val_fold = X.iloc[val_idx].copy()
-        y_train_fold = y.iloc[train_idx].copy()
-        y_val_fold = y.iloc[val_idx].copy()
-
-        # 超参数搜索
-        param_grid = get_param_grid(model_type, task_type)
-        model_fold = perform_grid_search(
-            model_type=model_type,
-            task_type=task_type,
-            X_train=X_train_fold,
-            y_train=y_train_fold,
-            param_grid=param_grid,
-            n_iter=20,  # 每次搜索20个参数组合
-            cv=3,       # 网格搜索使用3折交叉验证
-            random_state=random_state
-        )
-
-        # 预测与概率
-        y_pred_fold = model_fold.predict(X_val_fold)
-        y_prob_fold = None
-        if task_type == "classification":
-            try:
-                if hasattr(model_fold, "predict_proba"):
-                    y_prob_fold = model_fold.predict_proba(X_val_fold)
-                elif hasattr(model_fold, "decision_function"):
-                    decision_scores = model_fold.decision_function(X_val_fold)
-                    from sklearn.utils.extmath import softmax
-                    if len(decision_scores.shape) == 1:
-                        prob_neg = 1 / (1 + np.exp(decision_scores))
-                        prob_pos = 1 - prob_neg
-                        y_prob_fold = np.column_stack([prob_neg, prob_pos])
-                    else:
-                        y_prob_fold = softmax(decision_scores)
-            except Exception as e:
-                logger.warning(f"[Fold {fold_idx}] Failed to obtain prediction probabilities: {str(e)}")
-
-        fold_metrics = evaluate_model(y_val_fold, y_pred_fold, y_prob_fold, task_type)
-        
-        # 清理资源：删除模型引用，帮助GC
-        del model_fold
-        
-        # 清理joblib的临时目录（如果存在）
-        try:
-            import joblib
-            import tempfile
-            # joblib可能会在tempfile.gettempdir()下创建临时目录
-            # 这里我们只是确保资源被释放，实际的清理由resource_tracker处理
-            import gc
-            gc.collect()
-        except Exception:
-            pass
-        
-        return fold_idx, fold_metrics, y_val_fold, y_pred_fold, y_prob_fold
-    except Exception as e:
-        logger.error(f"[Fold {fold_idx}] Error in worker process: {str(e)}", exc_info=True)
-        raise
 def run_single_model(
     input_path: str,
     model_type: str,
@@ -1544,10 +1489,10 @@ def run_single_model(
     random_state: int = 42,
     # 特征重要性计算参数（可选）
     calculate_feature_importance: bool = False,
-    # 图表质量固定开关（fixed，已不对外开放）
-    pub_quality_mode: bool = True,
     # 预加载的训练数据（可选，用于train-all中避免重复读取文件）
     preloaded_data: Optional[Dict[str, Any]] = None,
+    # 训练时允许使用的最大 CPU 核心数（用于限制多线程库的并行程度）
+    cpu_cores: Optional[int] = None,
 ) -> int:
     """
     单模型训练主函数
@@ -1562,13 +1507,24 @@ def run_single_model(
     # 强制要求使用 preprocess 生成的 metadata.json 作为训练入口，避免 txt 直读导致样本/任务类型/临时目录等信息不完整
     if not str(input_path).endswith("_metadata.json"):
         raise ValueError(
-            "训练输入必须为 preprocess 生成的元数据文件（*_metadata.json）。"
-            f"当前输入: {input_path}"
+            "Training input must be the preprocess-generated metadata file (*_metadata.json)."
+            f"Current input: {input_path}"
         )
     # 保存对calculate_feature_importance函数的引用，避免与参数名冲突
     _calculate_feature_importance_func = globals()['calculate_feature_importance']
-    # 固定实现：忽略外部传入值，统一使用内部常量
-    pub_quality_mode = PUB_QUALITY_MODE
+
+    # 限制本进程使用的线程数，避免与其它 model 进程叠加超配
+    if cpu_cores is not None:
+        cpu_cores_value = max(1, int(cpu_cores))
+        for var in [
+            "OMP_NUM_THREADS",
+            "MKL_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS",
+            "NUMEXPR_NUM_THREADS",
+            "VECLIB_MAXIMUM_THREADS",
+            "BLIS_NUM_THREADS",
+        ]:
+            os.environ[var] = str(cpu_cores_value)
 
     start_time = time.time()
     output_dir_path = Path(output_dir)
@@ -1664,7 +1620,8 @@ def run_single_model(
             param_grid=param_grid,
             n_iter=30,      # 适度的搜索次数
             cv=n_folds,     # 与外层评估折数保持一致
-            random_state=random_state
+            random_state=random_state,
+            cpu_cores=cpu_cores,
         )
         best_params = best_model.get_params()
         logger.info("Hyperparameter search completed, starting cross-validation with fixed best parameters")
@@ -1694,7 +1651,13 @@ def run_single_model(
             y_val_fold = y.iloc[val_idx].copy()
 
             # 使用最佳超参数初始化模型（不做搜索，只做一次拟合）
-            model_fold = init_model(model_type, task_type, random_state=random_state)
+            # 训练折模型时沿用本 model 的核心预算
+            model_fold = init_model(
+                model_type,
+                task_type,
+                random_state=random_state,
+                cpu_cores=cpu_cores,
+            )
             try:
                 model_fold.set_params(**best_params)
             except ValueError as e:
@@ -1802,7 +1765,8 @@ def run_single_model(
             param_grid=param_grid,
             n_iter=30,  # 最终模型使用更多迭代次数
             cv=5,  # 使用5折交叉验证
-            random_state=random_state
+            random_state=random_state,
+            cpu_cores=cpu_cores,
         )
         logger.info("Final model training completed")
         
@@ -2009,6 +1973,22 @@ def run_single_model(
                 import shutil
                 if run_tmp_dir.exists():
                     shutil.rmtree(run_tmp_dir, ignore_errors=True)
+                
+                # 只在“单模型”模式下做最终 tmp 清理：不管目录是否为空，直接删除。
+                # train-all 的子进程共享同一个 tmp 根目录，会并行写入；最终清理应由父进程统一完成。
+                if preloaded_data is None:
+                    try:
+                        tmp_train_dir = tmp_root.parent  # base_output_dir/tmp/train
+                        if tmp_train_dir.exists():
+                            shutil.rmtree(tmp_train_dir, ignore_errors=True)
+                    except Exception:
+                        pass
+                    try:
+                        tmp_root_dir = tmp_root.parent.parent  # base_output_dir/tmp
+                        if tmp_root_dir.exists():
+                            shutil.rmtree(tmp_root_dir, ignore_errors=True)
+                    except Exception:
+                        pass
             except Exception as e:
                 pass
         
@@ -2024,6 +2004,21 @@ def run_single_model(
                 import shutil
                 if run_tmp_dir.exists():
                     shutil.rmtree(run_tmp_dir, ignore_errors=True)
+                
+                # 只在“单模型”模式下做最终 tmp 清理：不管目录是否为空，直接删除。
+                if preloaded_data is None:
+                    try:
+                        tmp_train_dir = tmp_root.parent  # base_output_dir/tmp/train
+                        if tmp_train_dir.exists():
+                            shutil.rmtree(tmp_train_dir, ignore_errors=True)
+                    except Exception:
+                        pass
+                    try:
+                        tmp_root_dir = tmp_root.parent.parent  # base_output_dir/tmp
+                        if tmp_root_dir.exists():
+                            shutil.rmtree(tmp_root_dir, ignore_errors=True)
+                    except Exception:
+                        pass
             except Exception as cleanup_err:
                 pass
         else:
@@ -2057,15 +2052,13 @@ def run_all_models(
     random_state: int = 42,
     # 特征重要性计算参数（可选）
     calculate_feature_importance: bool = False,
-    # 图表质量固定开关（fixed，已不对外开放）
-    pub_quality_mode: bool = True
 ) -> int:
     """训练所有支持的模型，并生成对比报告"""
     # 强制要求使用 preprocess 生成的 metadata.json 作为训练入口
     if not str(input_path).endswith("_metadata.json"):
         raise ValueError(
-            "训练输入必须为 preprocess 生成的元数据文件（*_metadata.json）。"
-            f"当前输入: {input_path}"
+            "Training input must be the preprocess-generated metadata file (*_metadata.json)."
+            f"Current input: {input_path}"
         )
     # 首先解析输入路径，获取task_type默认值，并预先加载训练数据，避免每个模型子进程重复读盘
     input_info = parse_train_input_path(input_path)
@@ -2093,9 +2086,6 @@ def run_all_models(
         "task_type": task_type,
     }
     
-    # 固定实现：忽略外部传入值，统一使用内部常量
-    pub_quality_mode = PUB_QUALITY_MODE
-
     supported_models = ["LightGBM", "RandomForest", "XGBoost", "SVM", "CatBoost", "Logistic"]
     results = {}
     model_metrics_summary = {}  # 记录每个模型的评估指标（用于后续选择最佳模型）  # 新增
@@ -2121,6 +2111,24 @@ def run_all_models(
         max_workers = len(supported_models)
         cpu_count = os.cpu_count() or max_workers
         max_workers = min(max_workers, cpu_count)
+
+        # === CPU 核心分配：将系统可用核心数按“并发窗口”平均分配给各 model ===
+        # 冲突处理：保证并发时各进程分配的线程总数不超过 cpu_count。
+        # 若 model 数 > cpu_count，则最多只有 cpu_count 个 model 会并发执行，其它排队等待。
+        base_cores = max(1, cpu_count // max_workers)
+        remainder = cpu_count % max_workers  # 余数将分配给前 remainder 个正在并发执行的 model
+        model_cpu_map: Dict[str, int] = {}
+        for idx, mt in enumerate(supported_models):
+            if idx < max_workers:
+                model_cpu_map[mt] = base_cores + (1 if idx < remainder else 0)
+            else:
+                model_cpu_map[mt] = base_cores
+
+        logger.info(
+            f"[TRAIN_ALL][CPU_ALLOC] system_cores={cpu_count}, max_workers={max_workers}, "
+            f"base_cores={base_cores}, remainder={remainder}, "
+            f"model_cpu_map={model_cpu_map}"
+        )
         
         from concurrent.futures import ProcessPoolExecutor
 
@@ -2133,7 +2141,7 @@ def run_all_models(
             futures = {}
             submit_ts = {}
             for model_type in supported_models:
-                logger.info(f"[TRAIN_ALL] 开始训练模型: {model_type}")
+                logger.info(f"[TRAIN_ALL] Model training started: {model_type}")
                 submit_ts[model_type] = time.time()
                 future = executor.submit(
                     _run_single_model_silent,
@@ -2144,8 +2152,8 @@ def run_all_models(
                     n_folds,
                     random_state,
                     calculate_feature_importance,
-                    pub_quality_mode,
                     preloaded_data,
+                    cpu_cores=model_cpu_map.get(model_type, base_cores),
                 )
                 futures[future] = model_type
             
@@ -2156,15 +2164,15 @@ def run_all_models(
                 try:
                     ret_code = future.result()
                 except Exception as e:
-                    logger.error(f"[TRAIN_ALL] 模型训练异常: model={model_type}, err={e}", exc_info=True)
+                    logger.error(f"[TRAIN_ALL] Model training exception: model={model_type}, err={e}", exc_info=True)
                     ret_code = 1
-                results[model_type] = "成功" if ret_code == 0 else "失败"
+                results[model_type] = "success" if ret_code == 0 else "failed"
                 logger.info(
                     f"[TRAIN_ALL] 模型训练结束: model={model_type}, status={results[model_type]}, "
                     f"elapsed={elapsed:.1f}s"
                 )
 
-        logger.info(f"[TRAIN_ALL] 并行训练阶段完成, elapsed_total={time.time()-start_time:.1f}s")
+        logger.info(f"[TRAIN_ALL] Parallel training phase completed, elapsed_total={time.time()-start_time:.1f}s")
         
         # ======================== 阶段结束时清理临时目录（standardized） ========================
         # 在阶段正常结束时，删除整个 tmp 目录（包括目录本身及其所有文件和子目录）
@@ -2301,7 +2309,7 @@ def run_all_models(
                 "task_type": task_type,
                 "n_folds": n_folds,
                 "random_state": random_state,
-                "note": "GWAS/LD特征筛选已在preprocess模块完成",
+                "note": "GWAS/LD feature selection is handled in the preprocess module",
                 "training_results": results,
                 "total_training_time": round(time.time() - start_time, 2),
                 "generated_time": time.strftime("%Y-%m-%d %H:%M:%S")
@@ -2492,7 +2500,7 @@ def predict_with_model(
         model_type: str = ""
 
         if not model_path_obj.is_file():
-            raise FileNotFoundError(f"模型文件不存在或不是文件路径: {model_path_obj}")
+            raise FileNotFoundError(f"Model file does not exist or is not a valid file path: {model_path_obj}")
 
         model_file = model_path_obj
         model_dir = model_file.parent
@@ -2589,7 +2597,7 @@ def predict_with_model(
         
         # 2. 加载训练好的模型
         if not model_file.exists():
-            raise FileNotFoundError(f"模型文件不存在: {model_file}")
+            raise FileNotFoundError(f"Model file not found: {model_file}")
         import joblib
         model = joblib.load(model_file)
         logger.info("  Loading pre-trained model")

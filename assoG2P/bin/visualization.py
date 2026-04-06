@@ -33,10 +33,6 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# ======================== 绘图质量固定开关（standardized） ========================
-# 固定实现：不再通过命令行或函数参数切换；统一使用期刊质量配置。
-PUB_QUALITY_MODE: bool = True
-
 class EnhancedGenomeVisualizer:
     """
     增强型基因组数据可视化工具
@@ -210,7 +206,7 @@ class EnhancedGenomeVisualizer:
     def _load_and_process(self) -> pd.DataFrame:
         """数据加载和处理流程"""
         if not self.input_file.exists():
-            raise FileNotFoundError(f"输入文件不存在: {self.input_file}")
+            raise FileNotFoundError(f"Input file not found: {self.input_file}")
 
         # 自动检测分隔符
         sep = self._detect_separator(self.input_file)
@@ -248,14 +244,14 @@ class EnhancedGenomeVisualizer:
 
         # 数据校验
         if len(df) == 0:
-            raise ValueError("输入文件为空")
+            raise ValueError("Input file is empty")
         
         # 检查数值列是否包含有效值
         if df[self.value_col].isna().sum() > 0:
             logger.warning(f"Value column {self.value_col} contains {df[self.value_col].isna().sum():,} missing values, will be automatically removed")
             df = df.dropna(subset=[self.value_col])
             if len(df) == 0:
-                raise ValueError("删除缺失值后数据为空")
+                raise ValueError("No data remaining after removing missing values")
         
         # 检查数据分布
         value_range = df[self.value_col].max() - df[self.value_col].min()
@@ -304,8 +300,8 @@ class EnhancedGenomeVisualizer:
             chrom_num_series = chrom_num_series.loc[~invalid_mask]
             if len(df) == 0:
                 raise ValueError(
-                    f"特征列格式应为'染色体_位置'(如1_12345或chr1_12345等)，但过滤无效特征后数据为空。\n"
-                    f"无效样本示例: {invalid_samples}"
+                    f"Feature column must follow 'chromosome_position' format (e.g., 1_12345 or chr1_12345), but no valid rows remain after filtering.\n"
+                    f"Invalid examples: {invalid_samples}"
                 )
 
         # 数据增强（适应三列格式：特征名、绝对值、正负效应）
@@ -324,7 +320,7 @@ class EnhancedGenomeVisualizer:
             ).sort_values(['chrom_num', 'position'])
         else:
             raise ValueError(
-                "输入文件缺少正负效应列(effect)，当前只支持三列格式：feature、importance_abs、effect（effect 取 1/-1）。"
+                "Input file is missing the effect column. Only 3-column format is supported: feature, importance_abs, effect (effect must be 1/-1)."
             )
 
         # 计算基因组坐标
@@ -635,17 +631,17 @@ class EnhancedGenomeVisualizer:
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
             except PermissionError:
-                raise PermissionError(f"没有权限创建目录: {path.parent}")
+                raise PermissionError(f"Permission denied when creating directory: {path.parent}")
             except Exception as e:
-                raise IOError(f"创建目录失败: {str(e)}")
+                raise IOError(f"Failed to create directory: {str(e)}")
         
         # 检查路径可写性
         if path.exists():
             if not os.access(path, os.W_OK):
-                raise PermissionError(f"文件不可写: {path}")
+                raise PermissionError(f"File is not writable: {path}")
         else:
             if not os.access(path.parent, os.W_OK):
-                raise PermissionError(f"目录不可写: {path.parent}")
+                raise PermissionError(f"Directory is not writable: {path.parent}")
         
         try:
             fig.savefig(
@@ -657,80 +653,6 @@ class EnhancedGenomeVisualizer:
         except Exception as e:
             logger.error(f"Save failed: {str(e)}")
             raise
-
-def run_visualization(
-    input_file: str,
-    output_prefix: str,
-    feature_col: Optional[str] = None,
-    value_col: Optional[str] = None,
-    dpi: int = 1200,
-    static_only: bool = False,
-    interactive_only: bool = False,
-    **kwargs
-) -> int:
-    """
-    可视化入口函数
-    
-    支持三种模式：
-    1) 默认（不传 static_only/interactive_only）：同时生成静态和交互式散点图
-    2) static_only=True：只生成静态散点图
-    3) interactive_only=True：只生成交互式散点图
-    
-    返回:
-        0: 成功
-        1: 常规错误
-        2: 文件错误
-        3: 数据格式错误
-        4: 依赖错误
-    """
-    try:
-        visualizer = EnhancedGenomeVisualizer(
-            input_file=input_file,
-            feature_col=feature_col,
-            value_col=value_col
-        )
-
-        # 根据参数决定生成哪种图
-        generate_static = True
-        generate_interactive = True
-        if static_only and not interactive_only:
-            generate_interactive = False
-        elif interactive_only and not static_only:
-            generate_static = False
-
-        static_output = None
-        interactive_output = None
-
-        if generate_static:
-            static_output = f"{output_prefix}_static.png"
-            visualizer.plot_static_scatter(
-                output_file=static_output,
-                dpi=dpi,
-                **kwargs
-            )
-
-        if generate_interactive:
-            interactive_output = f"{output_prefix}_interactive.html"
-            visualizer.plot_interactive_scatter(
-                output_file=interactive_output,
-                **kwargs
-            )
-
-        logger.info("Visualization completed")
-        return 0
-
-    except FileNotFoundError:
-        logger.error(f"File error: Cannot find input file '{input_file}'\nPlease check if the file path is correct")
-        return 2
-    except ValueError as e:
-        logger.error(f"Data format error: {str(e)}\nInput file: {input_file}\nFeature column: {feature_col}, Value column: {value_col}")
-        return 3
-    except ImportError as e:
-        logger.error(f"Dependency error: {str(e)}\nPlease run 'pip install plotly kaleido' to install required dependencies")
-        return 4
-    except Exception as e:
-        logger.error(f"Visualization failed: {str(e)}")
-        return 1
 
 # ======================== 模型性能可视化函数 ========================
 
@@ -791,7 +713,7 @@ def load_plotting_data(plotting_data_file: Union[str, Path]) -> Dict:
     """
     plotting_data_file = Path(plotting_data_file)
     if not plotting_data_file.exists():
-        raise FileNotFoundError(f"绘图数据文件不存在: {plotting_data_file}")
+        raise FileNotFoundError(f"Plotting data file not found: {plotting_data_file}")
     
     # 加载NPZ文件
     data = np.load(plotting_data_file, allow_pickle=True)
@@ -1410,7 +1332,7 @@ def plot_cv_training_curves(
             
             stats_text = f'Mean: {mean_pvalue:.6f}\nMedian: {median_pvalue:.6f}\nStd: {std_pvalue:.6f}\nQ25: {q25:.6f}\nQ75: {q75:.6f}'
             if len(pearson_pvalues) < n_folds:
-                stats_text += f'\n\n注意: 仅显示 {len(pearson_pvalues)}/{n_folds} 折的数据'
+                stats_text += f'\n\nNote: displaying only {len(pearson_pvalues)}/{n_folds} folds due to missing values'
             ax2.text(0.98, 0.02, stats_text, transform=ax2.transAxes, 
                     fontsize=9, verticalalignment='bottom', horizontalalignment='right',
                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8, edgecolor='black', linewidth=1))

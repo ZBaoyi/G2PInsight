@@ -38,6 +38,14 @@ _pkg_parent = _pkg_dir.parent
 if (_pkg_dir / "__init__.py").exists() and str(_pkg_parent) not in sys.path:
     sys.path.insert(0, str(_pkg_parent))
 
+def _prepare_stage_output_dir(output_dir: str, stage: str) -> str:
+    """Prepare standardized stage output directory (e.g. {output_dir}/train)."""
+    base_output_dir = Path(output_dir).absolute()
+    base_output_dir.mkdir(parents=True, exist_ok=True)
+    stage_output_dir = base_output_dir / stage
+    stage_output_dir.mkdir(parents=True, exist_ok=True)
+    return str(stage_output_dir)
+
 def init_logging(log_file: Optional[Path] = None) -> None:
     """Unified log configuration"""
     handlers = [logging.StreamHandler()]
@@ -87,20 +95,13 @@ def run_training(args) -> int:
     try:
         from assoG2P.bin.modeltraining import run_single_model
         
-        logger.info(f"训练: {args.model}")
-        
-        # ======================== 输出目录结构规范化（standardized） ========================
-        # 在 -o 指定的目录下创建 train 子目录
-        base_output_dir = Path(args.output_dir).absolute()
-        base_output_dir.mkdir(parents=True, exist_ok=True)
-        stage_output_dir = base_output_dir / "train"
-        stage_output_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Training model: {args.model}")
         
         # GWAS/LD特征筛选已在preprocess模块完成，训练阶段不再执行筛选
         return run_single_model(
             input_path=args.json,
             model_type=args.model,
-            output_dir=str(stage_output_dir),
+            output_dir=_prepare_stage_output_dir(args.output_dir, "train"),
             task_type=args.task_type,
             n_folds=args.n_folds,
             random_state=args.random_state,
@@ -116,19 +117,12 @@ def run_train_all(args) -> int:
     try:
         from assoG2P.bin.modeltraining import run_all_models
         
-        logger.info(f"训练所有模型")
-        
-        # ======================== 输出目录结构规范化（standardized） ========================
-        # 在 -o 指定的目录下创建 train 子目录
-        base_output_dir = Path(args.output_dir).absolute()
-        base_output_dir.mkdir(parents=True, exist_ok=True)
-        stage_output_dir = base_output_dir / "train"
-        stage_output_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("Training all supported models")
         
         # GWAS/LD特征筛选已在preprocess模块完成，训练阶段不再执行筛选
         return run_all_models(
             input_path=args.json,
-            output_dir=str(stage_output_dir),
+            output_dir=_prepare_stage_output_dir(args.output_dir, "train"),
             task_type=args.task_type,
             n_folds=args.n_folds,
             random_state=args.random_state,
@@ -144,19 +138,12 @@ def run_predict(args) -> int:
     try:
         from assoG2P.bin.modeltraining import predict_with_model
         
-        logger.info(f"预测")
-        
-        # ======================== 输出目录结构规范化（standardized） ========================
-        # 在 -o 指定的目录下创建 predict 子目录
-        base_output_dir = Path(args.output_dir).absolute()
-        base_output_dir.mkdir(parents=True, exist_ok=True)
-        stage_output_dir = base_output_dir / "predict"
-        stage_output_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("Running prediction")
         
         return predict_with_model(
             input_path=args.input,
             model_path=args.model,
-            output_dir=str(stage_output_dir),
+            output_dir=_prepare_stage_output_dir(args.output_dir, "predict"),
             task_type=args.task_type
         )
         
@@ -178,13 +165,13 @@ def run_unified_visualization(args) -> int:
     has_indicator = getattr(args, "indicator", None) is not None
     
     if not has_importance and not has_indicator:
-        logger.error("必须至少指定以下参数之一：")
-        logger.error("  -i/--importance: 特征重要性数据文件（用于重要性可视化）")
-        logger.error("  -I/--indicator: 模型评估结果文件（plotting_data.npz，用于性能/CV可视化）")
+        logger.error("At least one input must be specified:")
+        logger.error("  -i/--importance: feature-importance file for importance visualization")
+        logger.error("  -I/--indicator: model plotting data file (plotting_data.npz) for performance/CV visualization")
         return 1
     
     if not args.output:
-        logger.error("使用 -i/--importance 或 -I/--indicator 时必须指定 -o/--output 输出前缀")
+        logger.error("When using -i/--importance or -I/--indicator, -o/--output must be provided")
         return 1
     
     # ======================== 输出目录结构规范化（standardized） ========================
@@ -206,15 +193,15 @@ def run_unified_visualization(args) -> int:
     # 先处理模型性能/评估指标可视化（-I）
     if has_indicator:
         try:
-            logger.info("开始生成模型评估指标可视化...")
+            logger.info("Generating model performance visualizations...")
             from assoG2P.bin.visualization import plot_model_performance_from_file
             
             plotting_data_file = Path(args.indicator)
             if not plotting_data_file.exists():
-                logger.error(f"模型评估结果文件不存在: {plotting_data_file}")
+                logger.error(f"Model plotting data file does not exist: {plotting_data_file}")
                 result_code = 1
             else:
-                logger.info(f"从文件读取模型评估数据: {plotting_data_file}")
+                logger.info(f"Loading model plotting data from file: {plotting_data_file}")
                 perf_result = plot_model_performance_from_file(
                     plotting_data_file=plotting_data_file,
                     output_dir=output_dir,
@@ -224,20 +211,20 @@ def run_unified_visualization(args) -> int:
                 if perf_result != 0:
                     result_code = perf_result
                 else:
-                    logger.info("模型评估指标可视化完成")
+                    logger.info("Model performance visualization completed")
         except Exception as e:
-            logger.error(f"模型评估指标可视化失败: {str(e)}")
+            logger.error(f"Model performance visualization failed: {str(e)}")
             result_code = 1
     
     # 再处理特征重要性可视化（-i）
     if has_importance:
         try:
-            logger.info("开始生成特征重要性可视化...")
+            logger.info("Generating feature-importance visualizations...")
             from assoG2P.bin.visualization import EnhancedGenomeVisualizer
             
             importance_file = Path(args.importance)
             if not importance_file.exists():
-                raise FileNotFoundError(f"特征重要性文件不存在: {importance_file}")
+                raise FileNotFoundError(f"Feature-importance file not found: {importance_file}")
             
             # 创建可视化器实例，列名自动检测
             visualizer = EnhancedGenomeVisualizer(
@@ -251,19 +238,19 @@ def run_unified_visualization(args) -> int:
             interactive_output = f"{output_prefix}_importance_interactive.html"
             
             visualizer.plot_static_scatter(output_file=str(static_output))
-            logger.info(f"静态特征重要性图已生成: {static_output}")
+            logger.info(f"Static feature-importance plot generated: {static_output}")
             
             visualizer.plot_interactive_scatter(output_file=str(interactive_output))
-            logger.info(f"交互式特征重要性图已生成: {interactive_output}")
+            logger.info(f"Interactive feature-importance plot generated: {interactive_output}")
             
-            logger.info("特征重要性可视化完成")
+            logger.info("Feature-importance visualization completed")
             
         except ImportError as e:
-            logger.error(f"模块导入错误: {str(e)}")
-            logger.error("对于交互式图表，请安装依赖: pip install plotly kaleido")
+            logger.error(f"Module import error: {str(e)}")
+            logger.error("For interactive plots, install dependencies: pip install plotly kaleido")
             result_code = 1
         except Exception as e:
-            logger.error(f"特征重要性可视化失败: {str(e)}")
+            logger.error(f"Feature-importance visualization failed: {str(e)}")
             result_code = 1
     
     return result_code
@@ -303,21 +290,21 @@ For more details, use: assog2p [command] -h
     preprocess_parser.add_argument("-g", "--genotype", required=True, help="Genotypic data in VCF format")
     preprocess_parser.add_argument("-p", "--phenotype", required=True, help="Phenotypic data")
     preprocess_parser.add_argument("-o", "--output", required=True, help="Output file path")
-    preprocess_parser.add_argument("--no-filter-snps", action="store_true", help="不进行SNP质量过滤")
+    preprocess_parser.add_argument("--no-filter-snps", action="store_true", help="Disable SNP quality filtering")
     
     # GWAS/LD特征筛选参数（在preprocess阶段执行, LD参数已三合一）
     preprocess_parser.add_argument("-f", "--feature_selection_mode", type=int, default=1, choices=[1, 2, 3, 4],
-                                 help="Feature selection mode: 1=空白对照(不使用GWAS和LD, 默认), 2=GWAS筛选(仅使用GWAS), 3=LD过滤(仅使用LD), 4=GWAS和LD综合过滤(先GWAS后LD)")
+                                 help="Feature selection mode: 1=no selection (default), 2=GWAS only, 3=LD only, 4=GWAS+LD (GWAS first, then LD)")
     preprocess_parser.add_argument("--gwas_pvalue", type=float, default=0.01, help="P-value threshold for GWAS SNP selection (default: 0.01). Used when -f is 2 or 4")
     preprocess_parser.add_argument(
         "--ld-config",
         type=str,
         default="50,5,0.2",
         help=(
-            "LD三合一配置参数 (standardized): "
+            "LD three-in-one configuration (standardized): "
             "\"<window_kb>,<window_variants>,<r2_threshold>\", "
             "例如 \"50,5,0.2\" 表示窗口50KB、窗口内5个变体、r²阈值0.2；"
-            "仅在 -f 为 3 或 4 时使用"
+            "used only when -f is 3 or 4"
         ),
     )
     
@@ -403,14 +390,14 @@ For more details, use: assog2p [command] -h
     viz_parser.add_argument(
         "-i",
         "--importance",
-        help="特征重要性数据文件路径（用于全基因组特征重要性散点图可视化）"
+        help="Feature-importance file path (for genome-wide importance scatter visualization)"
     )
     
     # 模型评估指标可视化输入（-I）
     viz_parser.add_argument(
         "-I",
         "--indicator",
-        help="模型评估结果文件（plotting_data.npz，用于性能曲线和交叉验证曲线可视化）"
+        help="Model plotting data file (plotting_data.npz) for performance and CV-curve visualization"
     )
     
     # 统一输出前缀
@@ -418,7 +405,7 @@ For more details, use: assog2p [command] -h
         "-o",
         "--output",
         required=True,
-        help="输出文件前缀 (standardized)，用于生成特征重要性图和/或模型评估图"
+        help="Output filename prefix (standardized) for feature-importance and/or model-performance plots"
     )
     
     viz_parser.set_defaults(func=run_unified_visualization)

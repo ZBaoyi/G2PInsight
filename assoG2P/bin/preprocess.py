@@ -61,9 +61,6 @@ except ImportError:
 # SNP数据类型常量
 SNP_DTYPE = np.int8
 
-# SNP映射缓存（用于get_snp_chr_pos_mapping_cached函数）
-_snp_mapping_cache: Dict[str, dict] = {}
-
 # ======================== 2. 向量化计算优化 ========================
 
 class VectorizedProcessor:
@@ -674,7 +671,7 @@ def get_snp_chr_pos_mapping_optimized(bim_file: str, chr_num: Optional[str] = No
     # 规范化路径
     bim_file = str(Path(bim_file).absolute())
     if not Path(bim_file).exists():
-        raise FileNotFoundError(f".bim文件不存在:{bim_file}")
+        raise FileNotFoundError(f".bim file not found: {bim_file}")
     
     # 使用向量化读取（如果文件不大）
     file_size = Path(bim_file).stat().st_size
@@ -735,7 +732,7 @@ def get_snp_chr_pos_mapping(bim_file: str, chr_num: Optional[str] = None) -> dic
     从.bim文件读取SNP映射：snp_id -> chr_pos
     """
     if not Path(bim_file).exists():
-        raise FileNotFoundError(f".bim文件不存在:{bim_file}")
+        raise FileNotFoundError(f".bim file not found: {bim_file}")
     
     snp_mapping = {}
     
@@ -905,7 +902,7 @@ def _process_chunk_parallel(chunk_data: Tuple[int, pd.DataFrame, Dict[str, str],
         return (chunk_idx, chunk_df)
     except Exception as e:
         import logging
-        logging.getLogger(__name__).error(f"处理chunk {chunk_idx}失败: {e}")
+        logging.getLogger(__name__).error(f"Chunk {chunk_idx} processing failed: {e}")
         raise
 
 
@@ -1221,7 +1218,7 @@ def process_single_chromosome_optimized(
         # 步骤5: 解析.raw文件
         chr_geno_file = f"{chr_recode_prefix}.raw"
         if not Path(chr_geno_file).exists():
-            logger.error(f"染色体 {chr_num}: .raw文件未生成")
+            logger.error(f"Chromosome {chr_num}: .raw file was not generated")
             return (chr_num, None)
         
         # 获取SNP映射（带缓存）
@@ -1341,7 +1338,7 @@ def plink_to_training_data_optimized(
     if not chr_list:
         raise RuntimeError("No chromosomes detected")
     
-    logger.info(f"Detected {len(chr_list)} chromosome(s)")
+    logger.info(f"Chromosome scan completed: {len(chr_list)} chromosome(s) detected")
     
     # 步骤3: 染色体级并行生成 .raw（PLINK --recodeA）
     # 说明：此处仅并行“生成raw文件”，解析与合并仍沿用原逻辑，避免内存压力过大
@@ -1393,11 +1390,7 @@ def plink_to_training_data_optimized(
             if per_plink_mem:
                 optimized_params["memory_mb"] = per_plink_mem
 
-            logger.info(
-                f"Parallel PLINK recodeA (generate .raw): chromosomes={len(chr_list)}, "
-                f"processes={recode_workers}, threads_per_plink={per_plink_threads}, "
-                f"memory_mb_per_plink={optimized_params.get('memory_mb')}"
-            )
+            logger.info("Genotype recode started (parallel mode)")
 
             with ProcessPoolExecutor(max_workers=recode_workers) as executor:
                 futures = {
@@ -1432,16 +1425,13 @@ def plink_to_training_data_optimized(
 
                     chr_to_recode_prefix[chr_num_ret] = recode_prefix
 
-                    if completed % max(1, len(chr_list) // 10) == 0:
-                        logger.info(f"PLINK recodeA progress: {completed}/{len(chr_list)}")
-
             ok = len(chr_to_recode_prefix)
             if ok == 0:
                 raise RuntimeError("All chromosome recodeA tasks failed; no .raw generated")
-            logger.info(f"PLINK recodeA completed: {ok}/{len(chr_list)} chromosome .raw generated")
+            logger.info(f"Genotype recode completed: {ok}/{len(chr_list)} chromosome(s) succeeded")
         else:
             # 串行生成（旧逻辑）
-            logger.info("Serial PLINK recodeA (generate .raw) mode")
+            logger.info("Genotype recode started (serial mode)")
             for chr_num in chr_list:
                 chr_recode_prefix = f"{plink_prefix_abs}_chr{chr_num}"
                 base_params = PLINKOptimizer.optimize_plink_parameters()
@@ -1464,8 +1454,6 @@ def plink_to_training_data_optimized(
             if chr_num not in chr_to_recode_prefix:
                 logger.warning(f"Chromosome {chr_num}: .raw not generated, skipping parsing")
                 continue
-
-            logger.info(f"Parsing chromosome {chr_idx}/{len(chr_list)} from .raw: {chr_num}")
 
             _, chr_df = process_single_chromosome_optimized(
                 chr_num,
@@ -1496,7 +1484,6 @@ def plink_to_training_data_optimized(
                 del chr_df
                 gc.collect()
                 
-                logger.info(f"Chromosome {chr_num} processing completed, saved to temporary file")
             else:
                 logger.warning(f"Chromosome {chr_num} has no valid data, skipping")
         
@@ -1504,7 +1491,7 @@ def plink_to_training_data_optimized(
         if not chr_result_files:
             raise RuntimeError("All chromosomes have no valid data")
         
-        logger.info(f"Starting merge of {len(chr_result_files)} chromosome results")
+        logger.info(f"Merging chromosome results: {len(chr_result_files)} chunk(s)")
         
         # 使用批次合并优化内存
         batch_size = min(5, len(chr_result_files))
@@ -1582,8 +1569,8 @@ def plink_to_training_data_optimized(
                 bim_file=bim_file,
                 pheno_columns=pheno_columns,
             )
-        except Exception as e:
-            logger.warning(f"Failed to standardize SNP column names to chr_pos format (ignored): {e}")
+        except Exception:
+            logger.warning("SNP name standardization skipped due to format conversion issue")
         
         # 步骤6: 保存最终训练数据
         # 确保输出文件有.txt后缀
@@ -1716,7 +1703,7 @@ def run_preprocess(
     try:
         # ======================== 参数检查与标准化 ========================
         if not Path(phenotype_file).exists():
-            raise FileNotFoundError(f"表型文件不存在:{phenotype_file}")
+            raise FileNotFoundError(f"Phenotype file not found: {phenotype_file}")
         
         # 解析LD三合一配置参数 (standardized)
         try:
@@ -1728,8 +1715,8 @@ def run_preprocess(
             ld_window_r2 = float(ld_parts[2])
         except Exception:
             raise ValueError(
-                f"无效的LD三合一配置 ld_config={ld_config!r}; "
-                f"正确格式为 \"<window_kb>,<window_variants>,<r2_threshold>\", 例如 \"50,5,0.2\""
+                f"Invalid LD three-in-one configuration ld_config={ld_config!r}; "
+                f"Expected format is \"<window_kb>,<window_variants>,<r2_threshold>\", e.g., \"50,5,0.2\""
             )
         
         # ======================== 输出目录结构规范化（standardized） ========================
@@ -1823,7 +1810,7 @@ def run_preprocess(
         sample_filtered_plink = filter_samples_by_phenotype(plink_prefix, pheno_df, sample_filtered_prefix)
         
         # 步骤4: SNP质量过滤（可选）
-        logger.info(f"SNP过滤参数: filter_snps={filter_snps}")
+        logger.info(f"SNP quality filter setting: filter_snps={filter_snps}")
         if filter_snps:
             filtered_plink_prefix = str(tmp_dir / "filtered_plink")
             temp_prefixes.append(filtered_plink_prefix)
@@ -1845,10 +1832,7 @@ def run_preprocess(
             raise ValueError(f"feature_selection_mode must be 1, 2, 3, or 4, got: {feature_selection_mode}")
 
         if feature_selection_mode != 1:
-            logger.info(
-                f"Running feature selection in preprocess (mode={feature_selection_mode}): "
-                f"1=no selection, 2=GWAS, 3=LD, 4=GWAS+LD"
-            )
+            logger.info(f"Feature selection started (mode={feature_selection_mode})")
 
         # 仅当需要GWAS或LD时才执行后续步骤
         if feature_selection_mode in [2, 3, 4]:
@@ -1859,7 +1843,7 @@ def run_preprocess(
             # 为GWAS使用的表型：使用当前已清洗后的 pheno_df（与sample_filtered_plink一致）
             if feature_selection_mode in [2, 4]:
                 try:
-                    logger.info(f"Preprocess GWAS: p-value threshold={gwas_pvalue}")
+                    logger.info("GWAS analysis started")
                     significant_snps = run_gwas_preprocess(
                         plink_prefix=final_plink_prefix,
                         pheno_df=pheno_df,
@@ -1872,8 +1856,10 @@ def run_preprocess(
                     if not significant_snps:
                         logger.warning("No significant SNPs found by GWAS; feature selection will be skipped.")
                         feature_selection_mode = 1
+                    else:
+                        logger.info(f"GWAS analysis completed: {len(significant_snps):,} significant SNP(s)")
                 except Exception as e:
-                    logger.error(f"GWAS in preprocess failed: {e}")
+                    logger.error(f"GWAS analysis failed: {e}")
                     feature_selection_mode = 1
 
             # LD 过滤
@@ -1883,10 +1869,7 @@ def run_preprocess(
                     logger.warning("GWAS failed or no significant SNPs; skip LD filtering.")
                     feature_selection_mode = 1
                 else:
-                    logger.info(
-                        f"[LD_CONFIG] Preprocess LD filtering with three-in-one config: "
-                        f"window_kb={ld_window_kb}, window_variants={ld_window}, r²_threshold={ld_window_r2}"
-                    )
+                    logger.info("LD analysis started")
                     # 确保使用绝对路径
                     ld_output_prefix = str(Path(tmp_dir / "ld_filtered_plink").absolute())
                     # 如果是模式4，仅对GWAS显著SNP执行LD过滤
@@ -1896,13 +1879,11 @@ def run_preprocess(
                         with open(extract_snps_file, "w") as f:
                             for snp in significant_snps:
                                 f.write(f"{snp}\n")
-                        logger.info(f"LD filtering will be performed on {len(significant_snps):,} GWAS-significant SNPs")
+                        logger.info(f"LD analysis scope: {len(significant_snps):,} SNP(s) from GWAS")
 
                     try:
                         # 确保输入路径也是绝对路径
                         final_plink_prefix_abs = str(Path(final_plink_prefix).absolute())
-                        logger.info(f"LD filtering input: {final_plink_prefix_abs}")
-                        logger.info(f"LD filtering output: {ld_output_prefix}")
                         ld_ret = plink_ld.run_ld_filtering(
                             input_path=final_plink_prefix_abs,
                             output_prefix=ld_output_prefix,
@@ -1915,12 +1896,12 @@ def run_preprocess(
                             extract_snps_file=extract_snps_file
                         )
                         if ld_ret != 0:
-                            logger.error("LD filtering in preprocess failed, fallback to no feature selection.")
+                            logger.error("LD analysis failed, fallback to no feature selection.")
                             feature_selection_mode = 1
                         else:
                             final_plink_prefix = ld_output_prefix
                             gwas_genotype_prefix = ld_output_prefix
-                            logger.info("LD filtering in preprocess completed.")
+                            logger.info("LD analysis completed")
                     finally:
                         if extract_snps_file:
                             try:
@@ -1929,7 +1910,7 @@ def run_preprocess(
                                 pass
             elif feature_selection_mode == 2 and significant_snps:
                 # 仅GWAS：直接按显著SNP抽取PLINK
-                logger.info("Preprocess GWAS-only feature selection: extracting significant SNPs.")
+                logger.info("Applying GWAS-selected SNP extraction")
                 gwas_only_prefix = str(tmp_dir / "gwas_filtered_plink")
                 try:
                     final_plink_prefix = extract_snps_with_plink(
@@ -1939,7 +1920,7 @@ def run_preprocess(
                     )
                     gwas_genotype_prefix = final_plink_prefix
                 except Exception as e:
-                    logger.error(f"GWAS-only extraction failed, fallback to no feature selection: {e}")
+                    logger.error(f"GWAS SNP extraction failed, fallback to no feature selection: {e}")
                     feature_selection_mode = 1
 
         # 步骤5: 使用优化的函数生成训练数据
@@ -2008,7 +1989,7 @@ def detect_genotype_format(genotype_path: str) -> Literal["vcf", "plink_binary",
 
     if genotype_path.endswith((".vcf", ".vcf.gz")):
         if not Path(genotype_path).exists():
-            raise FileNotFoundError(f"VCF文件不存在:{genotype_path}")
+            raise FileNotFoundError(f"VCF file not found: {genotype_path}")
         return "vcf"
 
     plink_bin_files = [f"{genotype_path}.bed", f"{genotype_path}.bim", f"{genotype_path}.fam"]
@@ -2020,8 +2001,8 @@ def detect_genotype_format(genotype_path: str) -> Literal["vcf", "plink_binary",
         return "plink_text"
 
     raise ValueError(
-        f"\n无法识别基因型格式:{genotype_path}\n"
-        f"支持格式:VCF(.vcf/.vcf.gz)、PLINK二进制(.bed/.bim/.fam)、PLINK文本(.map/.ped)"
+        f"\nUnable to detect genotype format: {genotype_path}\n"
+        f"Supported formats: VCF(.vcf/.vcf.gz), PLINK binary(.bed/.bim/.fam), PLINK text(.map/.ped)"
     )
 
 
@@ -2047,8 +2028,8 @@ def genotype_to_plink(genotype_path: str, output_prefix: str,) -> str:
                 delete_temp_files(genotype_path, [".vcf", ".vcf.gz", ".log"])
             return output_prefix
         except subprocess.CalledProcessError as e:
-            logger.error(f"PLINK执行失败:{e.stderr}")
-            raise RuntimeError(f"VCF转PLINK失败: {e.stderr}")
+            logger.error(f"PLINK execution failed: {e.stderr}")
+            raise RuntimeError(f"VCF-to-PLINK conversion failed: {e.stderr}")
 
     elif fmt == "plink_binary":
         return genotype_path
@@ -2083,13 +2064,13 @@ def plink_text_to_binary(genotype_path: str, output_prefix: str, ) -> str:
         )
         
         if result.returncode != 0:
-            error_msg = result.stderr or result.stdout or "未知错误"
-            logger.error(f"PLINK文本转二进制失败: {error_msg[:500]}")
-            raise RuntimeError(f"PLINK文本转二进制失败: {error_msg[:500]}")
+            error_msg = result.stderr or result.stdout or "Unknown error"
+            logger.error(f"PLINK text-to-binary conversion failed: {error_msg[:500]}")
+            raise RuntimeError(f"PLINK text-to-binary conversion failed: {error_msg[:500]}")
         
         return output_prefix
     except Exception as e:
-        logger.error(f"PLINK文本转二进制异常: {str(e)}")
+        logger.error(f"PLINK text-to-binary conversion exception: {str(e)}")
         raise
 
 
@@ -2100,7 +2081,7 @@ def normalize_chromosome_names(plink_prefix: str) -> None:
     """
     bim_file = f"{Path(plink_prefix).absolute().as_posix()}.bim"
     if not Path(bim_file).exists():
-        raise FileNotFoundError(f"PLINK .bim文件不存在:{bim_file}")
+        raise FileNotFoundError(f"PLINK .bim file not found: {bim_file}")
     
     # 读取.bim文件
     bim_df = pd.read_csv(
@@ -2164,7 +2145,7 @@ def auto_detect_chromosomes(plink_prefix: str) -> List[str]:
     """
     bim_file = f"{Path(plink_prefix).absolute().as_posix()}.bim"
     if not Path(bim_file).exists():
-        raise FileNotFoundError(f"PLINK .bim文件不存在:{bim_file}")
+        raise FileNotFoundError(f"PLINK .bim file not found: {bim_file}")
     
     
     # 分块读取.bim文件，仅提取第一列（染色体）
@@ -2196,7 +2177,7 @@ def auto_detect_chromosomes(plink_prefix: str) -> List[str]:
 def load_phenotype(pheno_path: str, pheno_col: Optional[str] = None) -> pd.DataFrame:
     """加载表型文件，检查异常值"""
     if pheno_col is not None:
-        logger.warning(f"--pheno-col参数无效（表型文件无表头）")
+        logger.warning("--pheno-col is ignored because the phenotype file has no header")
 
     # 自动识别分隔符（更稳健：多行投票 + 自动跳过疑似表头行）
     def detect_separator(file_path: str) -> str:
@@ -2288,7 +2269,7 @@ def load_phenotype(pheno_path: str, pheno_col: Optional[str] = None) -> pd.DataF
             engine='python'
         )
     except Exception as e:
-        raise RuntimeError(f"读取表型文件失败:{str(e)}")
+        raise RuntimeError(f"Failed to read phenotype file: {str(e)}")
 
     # 至少需要两列：sample + phenotype
     if pheno_df.shape[1] < 2:
@@ -2385,7 +2366,7 @@ def determine_phenotype_type(pheno_df: pd.DataFrame, output_dir: Path) -> Litera
         MATPLOTLIB_AVAILABLE = True
     except ImportError:
         MATPLOTLIB_AVAILABLE = False
-        logger.warning("matplotlib未安装，跳过表型可视化")
+        logger.warning("matplotlib is not installed; phenotype visualization will be skipped")
     
     phenotype_values = pheno_df["phenotype"].values
     
@@ -2464,7 +2445,7 @@ def plot_regression_phenotype_distribution(pheno_df: pd.DataFrame, output_dir: P
         MATPLOTLIB_AVAILABLE = True
     except ImportError:
         MATPLOTLIB_AVAILABLE = False
-        logger.warning("matplotlib未安装，跳过表型可视化")
+        logger.warning("matplotlib is not installed; phenotype visualization will be skipped")
         return
     
     if not MATPLOTLIB_AVAILABLE:
@@ -2495,7 +2476,7 @@ def plot_regression_phenotype_distribution(pheno_df: pd.DataFrame, output_dir: P
     plot_file = output_dir / "phenotype_distribution_histogram.png"
     plt.savefig(plot_file, dpi=150, bbox_inches='tight')
     plt.close()
-    logger.info(f"回归任务表型分布图已保存: {plot_file}")
+    logger.info(f"Regression phenotype distribution plot saved: {plot_file}")
 
 def filter_samples_by_phenotype(plink_prefix: str, pheno_df: pd.DataFrame, output_prefix: str) -> str:
     """按表型ID过滤PLINK样本"""
@@ -2522,8 +2503,8 @@ def filter_samples_by_phenotype(plink_prefix: str, pheno_df: pd.DataFrame, outpu
             delete_temp_files(plink_prefix, [".bed", ".bim", ".fam", ".log", ".nosex"])
         return output_prefix_abs
     except subprocess.CalledProcessError as e:
-        logger.error(f"PLINK样本过滤失败:{e.stderr}")
-        raise RuntimeError(f"样本过滤失败: {e.stderr}")
+        logger.error(f"PLINK sample filtering failed: {e.stderr}")
+        raise RuntimeError(f"Sample filtering failed: {e.stderr}")
 
 
 def filter_snps_by_quality(
@@ -2641,9 +2622,9 @@ def run_gwas_preprocess(
     try:
         pheno_file_abs = generate_gwas_phenotype_file_preprocess(pheno_df, gwas_pheno_file)
         if not Path(pheno_file_abs).exists():
-            raise FileNotFoundError(f"表型文件生成失败：{pheno_file_abs}")
+            raise FileNotFoundError(f"Failed to generate phenotype file: {pheno_file_abs}")
     except Exception as e:
-        raise RuntimeError(f"生成表型文件出错：{str(e)}") from e
+        raise RuntimeError(f"Error while generating phenotype file: {str(e)}") from e
     
     # 2. 修正：GWAS输出前缀直接放在output_dir下，避免路径混乱
     gwas_output_prefix = output_dir_path / "preprocess_gwas"  # 改为output_dir下
@@ -2661,7 +2642,7 @@ def run_gwas_preprocess(
         # GEMMA 默认在当前工作目录下创建 output/ 目录
         os.chdir(output_dir_path)
         # 补充：捕获GEMMA执行异常
-        logger.info(f"开始执行GWAS流程，输出前缀：{gwas_output_prefix_abs}，perform_plink_qc={perform_plink_qc}")
+        logger.info("GWAS workflow running")
         gemma_gwas.run_complete_gwas_pipeline(
             input_plink_prefix=plink_prefix_abs,
             phenotype_file=pheno_file_abs,
@@ -2669,34 +2650,20 @@ def run_gwas_preprocess(
             perform_plink_qc=perform_plink_qc,
         )
     except Exception as e:
-        raise RuntimeError(f"GEMMA GWAS流程执行失败：{str(e)}") from e
+        raise RuntimeError(f"GEMMA GWAS pipeline failed: {str(e)}") from e
     finally:
         os.chdir(original_cwd)
     
     # 3. 检查GWAS结果文件是否存在
-    logger.info(f"检查GWAS结果文件：{gwas_result_file}")
     if not gwas_result_file.exists():
-        # 补充：打印目录下的所有文件，辅助排查
-        output_subdir = output_dir_path / "output"
-        if output_subdir.exists():
-            files_in_output = os.listdir(output_subdir)
-            logger.error(f"GWAS结果文件缺失，预期文件：{gwas_result_file.name}")
-            logger.error(f"output目录下的文件：{files_in_output}")
-            # 尝试查找类似的文件名
-            matching_files = [f for f in files_in_output if "gwas" in f.lower() and "assoc" in f.lower()]
-            if matching_files:
-                logger.warning(f"找到可能的GWAS结果文件：{matching_files}")
-        else:
-            logger.error(f"GEMMA未创建output目录：{output_subdir}")
+        logger.error("GWAS result file missing")
         raise FileNotFoundError(f"GWAS result file missing: {gwas_result_file.absolute()}")
-    else:
-        logger.info(f"GWAS结果文件已找到：{gwas_result_file}")
     
     # 4. 解析GWAS结果并筛选显著SNP
     try:
         gwas_df = pd.read_csv(gwas_result_file, sep="\t")
     except Exception as e:
-        raise RuntimeError(f"读取GWAS结果文件失败：{str(e)}") from e
+        raise RuntimeError(f"Failed to read GWAS result file: {str(e)}") from e
     
     # 查找P值列
     pvalue_col = None
@@ -2705,7 +2672,7 @@ def run_gwas_preprocess(
             pvalue_col = col
             break
     if not pvalue_col:
-        raise ValueError(f"Cannot identify P-value column in GWAS results: {gwas_result_file}\n可用列：{gwas_df.columns.tolist()}")
+        raise ValueError(f"Cannot identify P-value column in GWAS results: {gwas_result_file}\nAvailable columns: {gwas_df.columns.tolist()}")
     
     # 查找SNP ID列
     snp_col = None
@@ -2715,15 +2682,15 @@ def run_gwas_preprocess(
             break
     if not snp_col:
         snp_col = gwas_df.columns[0]
-        logger.warning(f"未找到rs/SNP列，使用第一列 {snp_col} 作为SNP ID列")
+        logger.warning(f"'rs'/'SNP' column not found; using the first column '{snp_col}' as SNP ID")
     
     # 筛选显著SNP（去重+去空值）
     significant_snps = gwas_df[gwas_df[pvalue_col] < pvalue_threshold][snp_col].dropna().astype(str).unique().tolist()
-    logger.info(f"GWAS in preprocess completed: {len(significant_snps):,} significant SNPs (p < {pvalue_threshold})")
+    logger.info(f"GWAS result summary: {len(significant_snps):,} significant SNP(s)")
 
     # 5. 清理GWAS产生的所有临时文件和目录（包括output目录）
     try:
-        logger.info("开始清理GWAS临时文件...")
+        logger.info("GWAS temporary files cleanup started")
         import shutil
         # 以 gwas_output_prefix 作为基础前缀
         gwas_prefix_base = str(Path(gwas_output_prefix_abs))
@@ -2758,9 +2725,9 @@ def run_gwas_preprocess(
                 shutil.rmtree(gwas_work_dir, ignore_errors=True)
         except Exception:
             pass
-        logger.info("GWAS临时文件清理完成")
+        logger.info("GWAS temporary files cleanup completed")
     except Exception as e:
-        logger.warning(f"清理GWAS中间文件时发生异常，但不影响主流程：{e}")
+        logger.warning("GWAS temporary files cleanup partially failed (ignored)")
 
     return significant_snps
 
@@ -2848,7 +2815,7 @@ def generate_metadata(
     metadata = {
         "preprocess_time": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
         "genotype_format": genotype_format,
-        "phenotype_format": "无表头2列（样本ID+表型值）",
+        "phenotype_format": "Two-column, no-header format (sample ID + phenotype value)",
         "output_train_file": train_file,
         "valid_samples": valid_samples,
         "sample_count": len(valid_samples),
@@ -2858,7 +2825,7 @@ def generate_metadata(
         "processing_mode": "single_thread_sequential",  # 处理模式：单线程串行
         "plink_memory_limit_MB": "unlimited (no --memory passed to PLINK)",
         "snp_dtype": str(SNP_DTYPE),
-        "snp_naming_rule": "染色体_物理位置（如'1_123456'）",
+        "snp_naming_rule": "chromosome_physicalPosition (e.g., '1_123456')",
         "plink_executable": PLINK_EXECUTABLE,
         "plink_recode_param": "--recodeA",
         # 为简化后续流程并避免依赖 tmp 目录的 PLINK 中间文件，不再在元数据中记录 gwas_genotype_prefix
@@ -2894,7 +2861,7 @@ def generate_metadata(
     with open(metadata_file, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2, ensure_ascii=False)
 
-    logger.info(f"元数据保存完成")
+    logger.info("Metadata file generated successfully")
 
 def validate_plink_files(genotype_path: str, fmt: str) -> None:
     """校验PLINK文件完整性"""
@@ -2905,7 +2872,7 @@ def validate_plink_files(genotype_path: str, fmt: str) -> None:
 
     missing = [f"{genotype_path}{ext}" for ext in required if not Path(f"{genotype_path}{ext}").exists()]
     if missing:
-        raise FileNotFoundError(f"\nPLINK文件缺失:{', '.join(missing)}")
+        raise FileNotFoundError(f"\nMissing PLINK files: {', '.join(missing)}")
 
 def create_keep_file(pheno_df: pd.DataFrame, output_file: str) -> str:
     """
@@ -2933,69 +2900,4 @@ def create_keep_file(pheno_df: pd.DataFrame, output_file: str) -> str:
             f.write(f"{sample_id}\t{sample_id}\n")
     
     return output_file
-
-def get_cache_key(bim_file: str, chr_num: Optional[str] = None) -> str:
-    """
-    生成缓存键（基于文件路径和修改时间）
-    
-    :param bim_file: .bim文件路径
-    :param chr_num: 染色体号
-    :return: 缓存键字符串
-    """
-    try:
-        file_mtime = os.path.getmtime(bim_file)
-        key_parts = [bim_file, str(chr_num), str(file_mtime)]
-        return hashlib.md5(str(key_parts).encode()).hexdigest()
-    except Exception:
-        # 如果无法获取文件修改时间，使用文件路径和染色体号
-        return hashlib.md5(f"{bim_file}_{chr_num}".encode()).hexdigest()
-
-def load_cached_mapping(cache_key: str) -> Optional[dict]:
-    """
-    从磁盘加载缓存的SNP映射
-    
-    :param cache_key: 缓存键
-    :return: 缓存的映射字典，如果不存在则返回None
-    """
-    # 使用全局缓存系统，而不是单独的磁盘缓存
-    # 这里返回None，让调用者使用GLOBAL_CACHE
-    return None
-
-def save_cached_mapping(cache_key: str, mapping: dict) -> None:
-    """
-    保存SNP映射到磁盘缓存
-    
-    :param cache_key: 缓存键
-    :param mapping: 映射字典
-    """
-    # 使用全局缓存系统，不需要单独的磁盘缓存操作
-    # 映射已经保存在_snp_mapping_cache中
-    pass
-
-@functools.lru_cache(maxsize=32)
-def get_snp_chr_pos_mapping_cached(bim_file: str, chr_num: Optional[str] = None) -> dict:
-    """
-    带缓存的SNP映射函数（使用LRU缓存）
-    注意：由于functools.lru_cache不支持可变参数，这里使用文件路径+染色体号作为键
-    """
-    # 检查内存缓存
-    cache_key = f"{bim_file}_{chr_num}"
-    if cache_key in _snp_mapping_cache:
-        return _snp_mapping_cache[cache_key]
-    
-    # 检查全局缓存系统
-    global_cache_key = f"snp_mapping_{cache_key}"
-    cached_result = GLOBAL_CACHE.get(global_cache_key, check_file_mtime=True, file_path=bim_file)
-    if cached_result is not None:
-        _snp_mapping_cache[cache_key] = cached_result
-        return cached_result
-    
-    # 计算映射
-    mapping = get_snp_chr_pos_mapping(bim_file, chr_num)
-    
-    # 保存到缓存
-    _snp_mapping_cache[cache_key] = mapping
-    GLOBAL_CACHE.set(global_cache_key, mapping, file_path=bim_file, ttl_seconds=3600)
-    
-    return mapping
 
