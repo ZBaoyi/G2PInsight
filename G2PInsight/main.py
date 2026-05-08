@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Genotype-phenotype assog2p analysis tool
+Genotype-phenotype G2PInsight analysis tool
 
 Usage:
-    assog2p [command] [options]
+    G2PInsight [command] [options]
 
 Commands:
     preprocess    Data preprocessing (with optional GWAS/LD filtering)
@@ -13,11 +13,11 @@ Commands:
     visualize     Result visualization
 
 Examples:
-    assog2p preprocess -h
-    assog2p train -h
-    assog2p train-all -h
-    assog2p predict -h
-    assog2p visualize -h
+    G2PInsight preprocess -h
+    G2PInsight train -h
+    G2PInsight train-all -h
+    G2PInsight predict -h
+    G2PInsight visualize -h
 """
 
 import argparse
@@ -63,7 +63,7 @@ def init_logging(log_file: Optional[Path] = None) -> None:
 
 def run_preprocess(args) -> int:
     """Perform data preprocessing"""
-    from assoG2P.bin.preprocess import run_preprocess as preprocess_func
+    from G2PInsight.bin.preprocess import run_preprocess as preprocess_func
     try:
         logger.info("Starting preprocessing")
         # 解析SNP过滤参数
@@ -93,7 +93,7 @@ def run_preprocess(args) -> int:
 def run_training(args) -> int:
     """Perform model training (GWAS/LD filtering should be done in preprocess stage)"""
     try:
-        from assoG2P.bin.modeltraining import run_single_model
+        from G2PInsight.bin.modeltraining import run_single_model
         
         logger.info(f"Training model: {args.model}")
         
@@ -115,7 +115,7 @@ def run_training(args) -> int:
 def run_train_all(args) -> int:
     """Train all models and compare results (GWAS/LD filtering should be done in preprocess stage)"""
     try:
-        from assoG2P.bin.modeltraining import run_all_models
+        from G2PInsight.bin.modeltraining import run_all_models
         
         logger.info("Training all supported models")
         
@@ -136,7 +136,7 @@ def run_train_all(args) -> int:
 def run_predict(args) -> int:
     """Perform prediction using trained models"""
     try:
-        from assoG2P.bin.modeltraining import predict_with_model
+        from G2PInsight.bin.modeltraining import predict_with_model
         
         logger.info("Running prediction")
         
@@ -194,7 +194,7 @@ def run_unified_visualization(args) -> int:
     if has_indicator:
         try:
             logger.info("Generating model performance visualizations...")
-            from assoG2P.bin.visualization import plot_model_performance_from_file
+            from G2PInsight.bin.visualization import plot_model_performance_from_file
             
             plotting_data_file = Path(args.indicator)
             if not plotting_data_file.exists():
@@ -220,7 +220,7 @@ def run_unified_visualization(args) -> int:
     if has_importance:
         try:
             logger.info("Generating feature-importance visualizations...")
-            from assoG2P.bin.visualization import EnhancedGenomeVisualizer
+            from G2PInsight.bin.visualization import EnhancedGenomeVisualizer
             
             importance_file = Path(args.importance)
             if not importance_file.exists():
@@ -262,17 +262,17 @@ def print_banner() -> None:
 
 def setup_argparse() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Genotype-phenotype machine learning assog2p analysis tool",
+        description="Genotype-phenotype machine learning G2PInsight analysis tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  assog2p preprocess -g genotype.vcf -p phenotype.csv -o preprocessed_data
-  assog2p train -j preprocessed_data/*_metadata.json -m LightGBM -o results
-  assog2p predict -i new_data.txt -m results/train/LightGBM/LightGBM_model.pkl -o predictions
-  assog2p visualize -i feature_importance.txt -o results/plot
-  assog2p visualize -I results/train/LightGBM/LightGBM_plotting_data.npz -o results/plot
+  G2PInsight preprocess -g genotype.vcf -p phenotype.csv -o preprocessed_data
+  G2PInsight train -j preprocessed_data/*_metadata.json -m LightGBM -o results
+  G2PInsight predict -i new_data.txt -m results/train/LightGBM/LightGBM_model.pkl -o predictions
+  G2PInsight visualize -i feature_importance.txt -o results/plot
+  G2PInsight visualize -I results/train/LightGBM/LightGBM_plotting_data.npz -o results/plot
 
-For more details, use: assog2p [command] -h
+For more details, use: G2PInsight [command] -h
         """
     )
     
@@ -319,7 +319,7 @@ For more details, use: assog2p [command] -h
         "-j",
         "--json",
         required=True,
-        help="Preprocess metadata JSON file (*_metadata.json). Training is metadata-driven; direct .txt input is not supported."
+        help="Preprocess metadata JSON file (*_metadata.json)."
     )
     train_parser.add_argument("-m", "--model", required=True, 
                              choices=["LightGBM", "RandomForest", "XGBoost", "SVM", "CatBoost", "Logistic"],help="Select a model")
@@ -421,7 +421,7 @@ def format_runtime(start_time: float) -> str:
 
 def main() -> None:
     start_time = time.time()
-    init_logging(Path("assog2p.log"))
+    init_logging(Path("G2PInsight.log"))
     print_banner()
     
     parser = setup_argparse()

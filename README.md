@@ -1,6 +1,6 @@
-# assoG2P Genomic Analysis Tool
+# G2PInsight Genomic Analysis Tool
 
-assoG2P is a command-line toolkit for genotype-to-phenotype association analysis. It provides an end-to-end workflow covering data preprocessing, model training, prediction, and visualization, with optional GWAS/LD-based feature selection during preprocessing.
+G2PInsight is a command-line toolkit for genotype-to-phenotype association analysis. It provides an end-to-end workflow covering data preprocessing, model training, prediction, and visualization, with optional GWAS/LD-based feature selection during preprocessing.
 
 ---
 
@@ -26,7 +26,7 @@ assoG2P is a command-line toolkit for genotype-to-phenotype association analysis
 
 ## Project Overview
 
-assoG2P standardizes the following workflow:
+G2PInsight standardizes the following workflow:
 
 1. Align and clean genotype and phenotype data.
 2. Optionally apply GWAS/LD-based feature selection during preprocessing.
@@ -93,7 +93,7 @@ chmod +x tools.sh
 ### Option 2: Install from wheel
 
 ```bash
-pip install assoG2P-1.0.0-py3-none-any.whl
+pip install G2PInsight-1.0.0-py3-none-any.whl
 ```
 
 ### Option 3: Install from source
@@ -105,8 +105,8 @@ pip install .
 ### Verify installation
 
 ```bash
-assog2p --version
-assog2p -h
+G2PInsight --version
+G2PInsight -h
 ```
 
 ---
@@ -115,13 +115,13 @@ assog2p -h
 
 ```bash
 # 1) Preprocess
-assog2p preprocess -g genotype.vcf -p phenotype.txt -o preprocessed/
+G2PInsight preprocess -g genotype.vcf -p phenotype.txt -o preprocessed/
 
 # 2) Train (metadata-driven)
-assog2p train -j preprocessed/preprocess/preprocessed_metadata.json -m LightGBM -o results/
+G2PInsight train -j preprocessed/preprocess/preprocessed_metadata.json -m LightGBM -o results/
 
 # 3) Visualize feature importance
-assog2p visualize -i results/train/LightGBM/LightGBM_feature_importance.txt -o result_plot
+G2PInsight visualize -i results/train/LightGBM/LightGBM_feature_importance.txt -o result_plot
 ```
 
 > Note: `train` and `train-all` must use preprocess-generated `*_metadata.json`.
@@ -137,7 +137,7 @@ Purpose: convert genotype + phenotype inputs into model-ready training matrix, w
 ### Usage
 
 ```bash
-assog2p preprocess \
+G2PInsight preprocess \
   -g <genotype_input> \
   -p <phenotype.txt> \
   -o <output_path> \
@@ -162,8 +162,8 @@ assog2p preprocess \
 ### Example
 
 ```bash
-assog2p preprocess -g data.vcf -p pheno.txt -o out/ -f 1
-assog2p preprocess -g data.vcf -p pheno.txt -o out/ -f 4 --gwas_pvalue 0.01 --ld-config "50,5,0.2"
+G2PInsight preprocess -g data.vcf -p pheno.txt -o out/ -f 1
+G2PInsight preprocess -g data.vcf -p pheno.txt -o out/ -f 4 --gwas_pvalue 0.01 --ld-config "50,5,0.2"
 ```
 
 ---
@@ -175,7 +175,7 @@ Purpose: train one selected model and export model artifacts, metrics, and plott
 ### Usage
 
 ```bash
-assog2p train \
+G2PInsight train \
   -j <preprocess_metadata.json> \
   -m <LightGBM|RandomForest|XGBoost|SVM|CatBoost|Logistic> \
   -o <output_dir> \
@@ -200,7 +200,7 @@ assog2p train \
 ### Example
 
 ```bash
-assog2p train -j out/preprocess/out_metadata.json -m LightGBM -o results/
+G2PInsight train -j out/preprocess/out_metadata.json -m LightGBM -o results/
 ```
 
 ---
@@ -212,7 +212,7 @@ Purpose: train all supported models in parallel and produce comparison outputs.
 ### Usage
 
 ```bash
-assog2p train-all \
+G2PInsight train-all \
   -j <preprocess_metadata.json> \
   -o <output_dir> \
   [--task_type <classification|regression>] \
@@ -228,7 +228,7 @@ Current implementation keeps only the best-performing model directory after all-
 ### Example
 
 ```bash
-assog2p train-all -j out/preprocess/out_metadata.json -o results/
+G2PInsight train-all -j out/preprocess/out_metadata.json -o results/
 ```
 
 ---
@@ -240,7 +240,7 @@ Purpose: predict phenotypes using a trained `.pkl` model.
 ### Usage
 
 ```bash
-assog2p predict \
+G2PInsight predict \
   -i <input_data.txt|input_data.vcf|input_data.vcf.gz> \
   -m <model.pkl> \
   -o <output_dir> \
@@ -265,7 +265,7 @@ Prediction results are written to the model directory:
 ### Example
 
 ```bash
-assog2p predict -i new_data.txt -m results/train/LightGBM/LightGBM_model.pkl -o pred/
+G2PInsight predict -i new_data.txt -m results/train/LightGBM/LightGBM_model.pkl -o pred/
 ```
 
 ---
@@ -277,7 +277,7 @@ Purpose: generate feature-importance plots or model-performance plots.
 ### Usage
 
 ```bash
-assog2p visualize \
+G2PInsight visualize \
   [-i <feature_importance.txt>] \
   [-I <plotting_data.npz>] \
   -o <output_prefix>
@@ -303,8 +303,8 @@ Required columns:
 ### Example
 
 ```bash
-assog2p visualize -i results/train/LightGBM/LightGBM_feature_importance.txt -o plot
-assog2p visualize -I results/train/LightGBM/LightGBM_plotting_data.npz -o plot
+G2PInsight visualize -i results/train/LightGBM/LightGBM_feature_importance.txt -o plot
+G2PInsight visualize -I results/train/LightGBM/LightGBM_plotting_data.npz -o plot
 ```
 
 ---
@@ -380,8 +380,8 @@ Prediction outputs are saved in the model directory by current implementation. `
 ### Project Structure
 
 ```text
-assoG2P/
-├── assoG2P/
+G2PInsight/
+├── G2PInsight/
 │   ├── main.py
 │   └── bin/
 │       ├── preprocess.py
@@ -399,7 +399,7 @@ assoG2P/
 
 ```bash
 git clone <your-repo-url>
-cd assoG2P
+cd G2PInsight
 pip install -e .
 ```
 

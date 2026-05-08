@@ -25,7 +25,7 @@ warnings.filterwarnings('ignore')
 
 # 导入字体设置工具
 try:
-    from assoG2P.bin.font_utils import setup_matplotlib_font, setup_plotly_font
+    from G2PInsight.bin.font_utils import setup_matplotlib_font, setup_plotly_font
     setup_matplotlib_font()
     PLOTLY_FONT = setup_plotly_font()
 except ImportError:
@@ -669,7 +669,7 @@ def _setup_matplotlib() -> Tuple[bool, Any]:
         import matplotlib.pyplot as plt
         # 设置字体
         try:
-            from assoG2P.bin.font_utils import setup_matplotlib_font
+            from G2PInsight.bin.font_utils import setup_matplotlib_font
             setup_matplotlib_font()
         except ImportError:
             pass
@@ -1000,22 +1000,33 @@ def plot_performance_curves(
             logger.warning(" Classification task requires predicted probabilities, skip performance curves")
             return
         
+        y_prob = np.asarray(y_prob)
+        if y_prob.ndim == 1:
+            y_prob = y_prob.reshape(-1, 1)
+        
         # 获取类别信息
         unique_classes = np.unique(y_true_values)
         n_classes = len(unique_classes)
         
-        # 确定二分类时使用的概率列
+        # 二分类：标签编码为 {0,1}，正类概率列与 sklearn predict_proba（按类名升序）一致
+        y_bin_enc: Optional[np.ndarray] = None
+        y_prob_pos: Optional[np.ndarray] = None
         if n_classes == 2:
-            prob_col = 1 if y_prob.shape[1] > 1 else 0
-            y_prob_binary = y_prob[:, prob_col]
-        else:
-            # 多分类：使用第一个类别的概率
-            prob_col = 0
-            y_prob_binary = y_prob[:, prob_col]
+            from sklearn.preprocessing import LabelEncoder
+            le = LabelEncoder()
+            y_bin_enc = le.fit_transform(y_true_values)
+            if y_prob.shape[1] >= 2:
+                y_prob_pos = y_prob[:, 1]
+            else:
+                y_prob_pos = y_prob[:, 0]
         
         # ========== 图1：多个性能曲线合并在一张图中（1x3子图布局，删除召回率曲线）==========
         try:
             from sklearn.metrics import roc_curve, auc, precision_recall_curve, f1_score, accuracy_score, recall_score
+            
+            if n_classes == 2 and (y_bin_enc is None or y_prob_pos is None):
+                logger.warning(" Binary classification encoding failed, skip performance curves")
+                return
             
             if publication_quality:
                 fig1, axes = plt.subplots(1, 3, figsize=(14, 4))
@@ -1025,22 +1036,22 @@ def plot_performance_curves(
                 fig1.suptitle(f'{model_type} Performance Curves (Classification)', fontsize=16, fontweight='bold')
             
             if n_classes == 2:
-                # 二分类：计算不同阈值下的指标
+                # 二分类：计算不同阈值下的指标（y_bin_enc / y_prob_pos 与上文一致）
                 thresholds = np.linspace(0, 1, 100)
                 accuracies = []
                 recalls = []
                 f1_scores = []
                 
                 # 计算ROC曲线
-                fpr, tpr, roc_thresholds = roc_curve(y_true_values, y_prob_binary)
+                fpr, tpr, roc_thresholds = roc_curve(y_bin_enc, y_prob_pos)
                 roc_auc = auc(fpr, tpr)
                 
                 # 计算不同阈值下的准确率、召回率和F1得分
                 for threshold in thresholds:
-                    y_pred_thresh = (y_prob_binary >= threshold).astype(int)
-                    accuracies.append(accuracy_score(y_true_values, y_pred_thresh))
-                    recalls.append(recall_score(y_true_values, y_pred_thresh, zero_division=0))
-                    f1_scores.append(f1_score(y_true_values, y_pred_thresh, zero_division=0))
+                    y_pred_thresh = (y_prob_pos >= threshold).astype(int)
+                    accuracies.append(accuracy_score(y_bin_enc, y_pred_thresh))
+                    recalls.append(recall_score(y_bin_enc, y_pred_thresh, zero_division=0))
+                    f1_scores.append(f1_score(y_bin_enc, y_pred_thresh, zero_division=0))
                 
                 # 找到准确率和F1得分的最高值点
                 max_acc_idx = np.argmax(accuracies)

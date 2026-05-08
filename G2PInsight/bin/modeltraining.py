@@ -312,7 +312,7 @@ def load_training_data(train_file: str, valid_samples: List[str] = None) -> Tupl
             f"VCF file detected: {train_file}\n"
             f"Error: Model training/prediction requires preprocessed training data format (tab-separated .txt file with 'sample' column as index).\n"
             f"VCF files must be preprocessed first using the 'preprocess' command.\n"
-            f"Please run: assog2p preprocess -g {train_file} -p <phenotype_file> -o <output_dir>\n"
+            f"Please run: G2PInsight preprocess -g {train_file} -p <phenotype_file> -o <output_dir>\n"
             f"Then use the preprocessed output file for training/prediction."
         )
     
@@ -486,7 +486,7 @@ def load_training_data(train_file: str, valid_samples: List[str] = None) -> Tupl
                                             error_msg += f"This file format is not compatible with model training/prediction.\n"
                                             error_msg += f"Expected format: Tab-separated file with 'sample' column as index (from preprocess module output).\n"
                                             if file_ext in ['.vcf', '.vcf.gz']:
-                                                error_msg += f"Note: VCF files must be preprocessed first using: assog2p preprocess -g <vcf_file> -p <phenotype_file> -o <output_dir>"
+                                                error_msg += f"Note: VCF files must be preprocessed first using: G2PInsight preprocess -g <vcf_file> -p <phenotype_file> -o <output_dir>"
                             except Exception:
                                 pass
                         
@@ -928,16 +928,25 @@ def evaluate_model(y_true: pd.Series, y_pred: np.ndarray, y_prob: np.ndarray, ta
                             logger.warning(f"  Binary classification AUC calculation failed: {str(e)}")
                             metrics["auc"] = "N/A"
                     else:
-                        # 多分类：使用macro平均
+                        # 多分类：macro OVR；labels 必须与 predict_proba 列顺序一致（通常为 y 中唯一类升序）
                         try:
-                            from sklearn.preprocessing import label_binarize
-                            n_classes = y_prob_array.shape[1]
-                            y_true_binarized = label_binarize(y_true_array, classes=range(n_classes))
-                            
-                            if y_true_binarized.shape[1] == 1:
-                                metrics["auc"] = round(roc_auc_score(y_true_array, y_prob_array[:, 1] if y_prob_array.shape[1] > 1 else y_prob_array[:, 0]), 4)
+                            labels = np.sort(np.unique(y_true_array))
+                            if y_prob_array.shape[1] != len(labels):
+                                logger.warning(
+                                    f"  Multi-class AUC: y_prob columns ({y_prob_array.shape[1]}) != number of classes ({len(labels)})"
+                                )
+                                metrics["auc"] = "N/A"
                             else:
-                                metrics["auc"] = round(roc_auc_score(y_true_binarized, y_prob_array, average="macro", multi_class="ovr"), 4)
+                                metrics["auc"] = round(
+                                    roc_auc_score(
+                                        y_true_array,
+                                        y_prob_array,
+                                        average="macro",
+                                        multi_class="ovr",
+                                        labels=labels,
+                                    ),
+                                    4,
+                                )
                         except Exception as e:
                             logger.warning(f"  Multi-class AUC calculation failed: {str(e)}")
                             metrics["auc"] = "N/A"
@@ -2430,7 +2439,7 @@ def predict_with_model(
             logger.info("Converting VCF to training data format...")
             
             # 导入preprocess模块的函数
-            from assoG2P.bin.preprocess import (
+            from G2PInsight.bin.preprocess import (
                 genotype_to_plink,
                 plink_to_training_data_optimized,
                 auto_detect_chromosomes

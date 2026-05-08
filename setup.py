@@ -15,16 +15,16 @@ You can also install in editable mode with:
 from setuptools import setup, find_packages
 
 setup(
-    name="assog2p",
+    name="G2PInsight",
     packages=find_packages(),
     package_dir={"": "."},
     include_package_data=True,
     package_data={
-        "assoG2P": ["bin/software/*"],
+        "G2PInsight": ["bin/software/*"],
     },
     entry_points={
         "console_scripts": [
-            "assog2p=assoG2P.main:main",
+            "G2PInsight=G2PInsight.main:main",
         ],
     },
 )

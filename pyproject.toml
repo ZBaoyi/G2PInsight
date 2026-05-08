@@ -6,7 +6,7 @@ requires = [
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "assog2p"
+name = "G2PInsight"
 version = "1.0.0"
 description = "Genome-wide association analysis toolkit"
 readme = "README.md"
@@ -46,4 +46,4 @@ dependencies = [
 ]
 
 [project.scripts]
-assog2p = "assoG2P.main:main"
+G2PInsight = "G2PInsight.main:main"

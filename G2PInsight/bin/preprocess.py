@@ -31,7 +31,7 @@ from datetime import datetime, timedelta
 from collections import OrderedDict
 
 # GWAS / LD 相关模块（供预处理阶段调用）
-from assoG2P.bin import gemma_gwas, plink_ld
+from G2PInsight.bin import gemma_gwas, plink_ld
 
 warnings.filterwarnings('ignore')
 
@@ -2359,7 +2359,7 @@ def determine_phenotype_type(pheno_df: pd.DataFrame, output_dir: Path) -> Litera
         import numpy as np
         # 设置字体
         try:
-            from assoG2P.bin.font_utils import setup_matplotlib_font
+            from G2PInsight.bin.font_utils import setup_matplotlib_font
             setup_matplotlib_font()
         except ImportError:
             pass
@@ -2438,7 +2438,7 @@ def plot_regression_phenotype_distribution(pheno_df: pd.DataFrame, output_dir: P
         import numpy as np
         # 设置字体
         try:
-            from assoG2P.bin.font_utils import setup_matplotlib_font
+            from G2PInsight.bin.font_utils import setup_matplotlib_font
             setup_matplotlib_font()
         except ImportError:
             pass
