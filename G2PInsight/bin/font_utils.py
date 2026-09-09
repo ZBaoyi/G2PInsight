@@ -1,135 +1,74 @@
-"""
-字体检测和设置工具
-自动检测系统中可用的中英文字体，并设置为matplotlib和plotly的默认字体
-"""
-
+from __future__ import annotations
+import importlib
 import logging
-import platform
-from typing import Optional, Tuple
-
+from functools import lru_cache
+from typing import Any, Optional, Tuple, cast
 logger = logging.getLogger(__name__)
+_FONT_MANAGER_LOGGER = 'matplotlib.font_manager'
 
-def detect_available_fonts() -> Tuple[Optional[str], Optional[str]]:
-    """
-    检测系统中可用的中英文字体
-    
-    使用matplotlib.font_manager.FontManager获取所有可用字体，
-    然后按照指定顺序检测中文字体。
-    
-    Returns:
-        (chinese_font, english_font): 中文字体和英文字体名称
-    """
+def _load_module(name: str) -> Any:
+    return importlib.import_module(name)
+
+def _collect_matplotlib_font_names() -> set:
+    fm = _load_module('matplotlib.font_manager')
+    font_manager = getattr(fm, 'fontManager', None)
+    if font_manager is None:
+        font_manager = cast(Any, fm.FontManager)()
+    mpl_logger = logging.getLogger(_FONT_MANAGER_LOGGER)
+    prev_level = mpl_logger.level
+    mpl_logger.setLevel(logging.WARNING)
     try:
-        from matplotlib.font_manager import FontManager
-        
-        # 获取所有可用字体列表
-        mpl_fonts = set(f.name for f in FontManager().ttflist)
-        
-        # 中文字体候选列表（按优先级顺序）
-        chinese_font_candidates = [
-            'SimHei',        # 黑体
-            'SimSun',        # 宋体
-            'Microsoft YaHei',  # 微软雅黑
-            'KaiTi',         # 楷体
-            'FangSong',      # 仿宋
-            'STSong',        # 华文宋体
-            'STKaiti',       # 华文楷体
-        ]
-        
-        # 英文字体候选列表（按优先级）
-        english_fonts = [
-            'Arial', 'DejaVu Sans', 'Liberation Sans', 
-            'Helvetica', 'Times New Roman', 'Calibri'
-        ]
-        
-        # 按照指定顺序检测中文字体
+        return {f.name for f in font_manager.ttflist}
+    finally:
+        mpl_logger.setLevel(prev_level)
+
+@lru_cache(maxsize=1)
+def detect_available_fonts() -> Tuple[Optional[str], Optional[str]]:
+    try:
+        mpl_fonts = _collect_matplotlib_font_names()
+        chinese_font_candidates = ['SimHei', 'SimSun', 'Microsoft YaHei', 'KaiTi', 'FangSong', 'STSong', 'STKaiti']
+        english_fonts = ['Arial', 'DejaVu Sans', 'Liberation Sans', 'Helvetica', 'Times New Roman', 'Calibri']
         chinese_font = None
         for font_name in chinese_font_candidates:
             if font_name in mpl_fonts:
                 chinese_font = font_name
                 break
-        
-        # 检测英文字体
         english_font = None
         for font_name in english_fonts:
             if font_name in mpl_fonts:
                 english_font = font_name
                 break
-        
-        # 如果没有找到，使用默认字体
         if not chinese_font:
-            chinese_font = 'DejaVu Sans'  # matplotlib默认字体，支持基本字符
+            chinese_font = 'DejaVu Sans'
         if not english_font:
             english_font = 'DejaVu Sans'
-        
-        return chinese_font, english_font
-        
-    except Exception as e:
-        return 'DejaVu Sans', 'DejaVu Sans'
+        return (chinese_font, english_font)
+    except Exception:
+        return ('DejaVu Sans', 'DejaVu Sans')
 
-def setup_matplotlib_font(chinese_font: Optional[str] = None, english_font: Optional[str] = None) -> None:
-    """
-    设置matplotlib的默认字体
-    
-    Args:
-        chinese_font: 中文字体名称
-        english_font: 英文字体名称
-    """
+def setup_matplotlib_font(chinese_font: Optional[str]=None, english_font: Optional[str]=None) -> None:
     try:
-        import matplotlib
-        matplotlib.use('Agg')  # 使用非交互式后端
-        import matplotlib.pyplot as plt
-        import matplotlib.font_manager as fm
-        
-        # 如果没有指定，自动检测
+        mpl = _load_module('matplotlib')
+        mpl.use('Agg')
+        plt = _load_module('matplotlib.pyplot')
         if chinese_font is None or english_font is None:
             chinese_font, english_font = detect_available_fonts()
-        
-        # 优先使用中文字体（通常也支持英文）
         default_font = chinese_font if chinese_font else english_font
-        
-        # 设置matplotlib默认字体
         plt.rcParams['font.sans-serif'] = [default_font, english_font, 'DejaVu Sans']
-        plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
-        
-        
-    except Exception as e:
+        plt.rcParams['axes.unicode_minus'] = False
+    except Exception:
         pass
 
-def setup_plotly_font(chinese_font: Optional[str] = None, english_font: Optional[str] = None) -> dict:
-    """
-    设置plotly的默认字体配置
-    
-    Args:
-        chinese_font: 中文字体名称
-        english_font: 英文字体名称
-    
-    Returns:
-        plotly字体配置字典
-    """
+def setup_plotly_font(chinese_font: Optional[str]=None, english_font: Optional[str]=None) -> dict:
     try:
-        # 如果没有指定，自动检测
         if chinese_font is None or english_font is None:
             chinese_font, english_font = detect_available_fonts()
-        
-        # 优先使用中文字体
         default_font = chinese_font if chinese_font else english_font
-        
-        # plotly字体配置
-        font_config = {
-            'family': default_font,
-            'size': 12
-        }
-        
-        
-        return font_config
-        
-    except Exception as e:
+        return {'family': default_font, 'size': 12}
+    except Exception:
         return {'family': 'Arial', 'size': 12}
-
-# 在模块导入时自动设置字体
 try:
-    chinese_font, english_font = detect_available_fonts()
-    setup_matplotlib_font(chinese_font, english_font)
+    _cn, _en = detect_available_fonts()
+    setup_matplotlib_font(_cn, _en)
 except Exception:
-    pass  # 静默处理字体设置失败
+    pass

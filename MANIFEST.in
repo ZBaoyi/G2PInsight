@@ -1,0 +1,4 @@
+include LICENSE README.md pyproject.toml
+recursive-include G2PInsight/bin/software plink gemma-*
+prune G2PInsight/bin/software/output
+global-exclude *.pyc __pycache__

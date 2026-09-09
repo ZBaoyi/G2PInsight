@@ -7,17 +7,26 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "G2PInsight"
-version = "1.0.0"
+version = "1.0.5"
 description = "Genome-wide association analysis toolkit"
 readme = "README.md"
 requires-python = ">=3.8,<3.13"
-license = "MIT"
+license = {text = "MIT"}
 authors = [
     {name = "chenrf", email = "12024128035@stu.ynu.edu.cn"}
+]
+keywords = [
+    "GWAS",
+    "genotype",
+    "phenotype",
+    "machine-learning",
+    "SHAP",
+    "bioinformatics",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.8",
@@ -27,7 +36,6 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Operating System :: OS Independent",
 ]
-
 dependencies = [
     "numpy>=1.20,<2.0",  # numpy 2.0+ 需要 GCC >= 9.3
     "pandas>=1.3,<2.0",  # pandas 2.0+ 可能需要更新的编译器
@@ -35,6 +43,9 @@ dependencies = [
     "scipy>=1.7,<2.0",  # scipy 2.0+ 可能需要更新的编译器
     "joblib>=1.0",
     "matplotlib>=3.5",
+    # Pillow 12.3+ only ships manylinux_2_28 wheels; CentOS7/glibc2.17 falls back to
+    # source builds and fails on old GCC (C99 for-loop error).
+    "Pillow>=8,<12.3",
     "numba>=0.57",  # 通常有预编译 wheel，不需要从源码编译
     "lightgbm>=3.3,<4.0.0",
     "xgboost>=1.6,<2.1",  # xgboost 2.1+ 可能需要更新的编译器
@@ -45,5 +56,34 @@ dependencies = [
     "seaborn>=0.11",
 ]
 
+[project.optional-dependencies]
+bed = ["bed-reader>=0.2"]
+monitor = ["psutil>=5.0"]
+all = [
+    "bed-reader>=0.2",
+    "psutil>=5.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/chenrf0407/G2P_tool"
+Repository = "https://github.com/chenrf0407/G2P_tool"
+Issues = "https://github.com/chenrf0407/G2P_tool/issues"
+
 [project.scripts]
 G2PInsight = "G2PInsight.main:main"
+
+[tool.setuptools]
+# Keep LICENSE in sdist via MANIFEST.in; do not emit License-File metadata
+# (avoids twine failures on older packaging that reject that field).
+license-files = []
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["G2PInsight*"]
+exclude = ["G2PInsight.bin.software*"]
+
+[tool.setuptools.package-data]
+G2PInsight = [
+    "bin/software/plink",
+    "bin/software/gemma-0.98.5-linux-static-AMD64",
+]
