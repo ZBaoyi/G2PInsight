@@ -978,7 +978,7 @@ def perform_grid_search(model_type: str, task_type: str, X_train: pd.DataFrame, 
     base_model = init_model(model_type, task_type, random_state=random_state, cpu_cores=cpu_cores)
     if scoring is None:
         if task_type == 'classification':
-            scoring = 'roc_auc' if len(y_train.unique()) == 2 else 'f1_weighted'
+            scoring = 'roc_auc' if len(y_train.unique()) == 2 else 'f1_macro'
         else:
             scoring = 'neg_mean_squared_error'
     cv_splitter = cv if hasattr(cv, 'split') else _make_cv_splitter(task_type, int(cv), random_state)
@@ -1014,7 +1014,7 @@ def resolve_training_hyperparameters(model_type: str, task_type: str, X_train: p
     test_fold[len(inner_train_idx):] = 0
     cv_splitter = PredefinedSplit(test_fold)
     if task_type == 'classification':
-        scoring = 'roc_auc' if len(y_train.unique()) == 2 else 'f1_weighted'
+        scoring = 'roc_auc' if len(y_train.unique()) == 2 else 'f1_macro'
     else:
         scoring = 'neg_mean_squared_error'
     base_model = init_model(model_type, task_type, random_state=random_state, cpu_cores=cpu_cores)
@@ -1137,8 +1137,15 @@ def evaluate_model(y_true: pd.Series, y_pred: np.ndarray, y_prob: np.ndarray, ta
                 metrics['f1'] = 'N/A'
             else:
                 metrics['accuracy'] = round(accuracy_score(y_true_array, y_pred_array), 4)
-                metrics['recall'] = round(recall_score(y_true_array, y_pred_array, average='weighted'), 4)
-                metrics['f1'] = round(f1_score(y_true_array, y_pred_array, average='weighted'), 4)
+                # binary: positive-class recall/F1 (≠ accuracy); macro: equal-weight multi-class average
+                unique_labels = np.unique(y_true_array)
+                if len(unique_labels) == 2:
+                    pos_label = unique_labels[1]  # align with AUC using predict_proba[:, 1]
+                    metrics['recall'] = round(recall_score(y_true_array, y_pred_array, average='binary', pos_label=pos_label, zero_division=0), 4)
+                    metrics['f1'] = round(f1_score(y_true_array, y_pred_array, average='binary', pos_label=pos_label, zero_division=0), 4)
+                else:
+                    metrics['recall'] = round(recall_score(y_true_array, y_pred_array, average='macro', zero_division=0), 4)
+                    metrics['f1'] = round(f1_score(y_true_array, y_pred_array, average='macro', zero_division=0), 4)
         except Exception as e:
             logger.debug(f'  Failed to calculate classification metrics: {str(e)}')
             metrics['accuracy'] = 'N/A'

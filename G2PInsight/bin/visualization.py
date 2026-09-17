@@ -77,8 +77,13 @@ _CV_GROUP_BAR_KW = {'alpha': 0.92, 'edgecolor': 'white', 'linewidth': 0.7}
 _CV_BAR_WIDTH_COMPACT = 0.58
 
 # Palette / bar style for held-out *test* metric bars (*_test_metrics.png)
+# Classification metrics reuse _CV_PALETTE so test / CV plots stay consistent.
 _TEST_METRIC_PALETTE = {
-    'test': '#4EB5FF',
+    'test': '#4EB5FF',  # regression / fallback
+    'accuracy': _CV_PALETTE['accuracy'],
+    'recall': _CV_PALETTE['recall'],
+    'f1': _CV_PALETTE['f1'],
+    'auc': _CV_PALETTE['auc'],
 }
 _TEST_METRIC_BAR_WIDTH = 0.48
 _TEST_METRIC_BAR_KW = {'alpha': 0.92, 'edgecolor': '#333333', 'linewidth': 1.0}
@@ -108,13 +113,21 @@ def _test_metric_annotate_bar_values(ax: Axes, bar_containers, *, fmt: str='.3f'
                 continue
             ax.text(bar.get_x() + bar.get_width() / 2.0, height + pad, f'{height:{fmt}}', ha='center', va='bottom', fontsize=6)
 
-def _test_metric_finish_figure(ax: Axes, fig, bar_containers, task_type: str) -> None:
+def _classification_metric_colors(metric_keys: List[str], *, fallback: Optional[str]=None) -> List[str]:
+    """Map metric keys to distinct colors (classification Accuracy / Recall / F1 / AUC)."""
+    default = fallback if fallback is not None else _TEST_METRIC_PALETTE['test']
+    return [_CV_PALETTE.get(key, _TEST_METRIC_PALETTE.get(key, default)) for key in metric_keys]
+
+def _test_metric_finish_figure(ax: Axes, fig, bar_containers, task_type: str, *, legend_handles: Optional[List[Any]]=None) -> None:
     y_min, y_max = _test_metric_score_limits(task_type)
     ax.set_ylim(y_min, y_max)
     _test_metric_annotate_bar_values(ax, bar_containers, fmt=_test_metric_value_fmt(task_type))
     ax.grid(False)
     fig.subplots_adjust(right=0.82)
-    ax.legend(loc='center left', bbox_to_anchor=(1.02, 0.5), ncol=1, frameon=False, fontsize=10, handleheight=1.0, handlelength=1.2)
+    if legend_handles is not None:
+        ax.legend(handles=legend_handles, loc='center left', bbox_to_anchor=(1.02, 0.5), ncol=1, frameon=False, fontsize=10, handleheight=1.0, handlelength=1.2)
+    else:
+        ax.legend(loc='center left', bbox_to_anchor=(1.02, 0.5), ncol=1, frameon=False, fontsize=10, handleheight=1.0, handlelength=1.2)
 
 def _cv_summary_stats(values: List[float], *, float_fmt: str='.4f') -> str:
     arr = np.asarray(values, dtype=float)
@@ -227,16 +240,18 @@ def _task_metric_specs(task_type: str) -> List[Tuple[str, str, bool]]:
 def _regression_test_bar_specs() -> List[Tuple[str, str, bool]]:
     return [('pearson_correlation', 'Pearson r', True), ('r2', 'R²', True), ('rmse', 'RMSE', False), ('mae', 'MAE', False)]
 
-def _collect_metric_bar_values(metrics: Dict, specs: List[Tuple[str, str, bool]]) -> Tuple[List[str], List[float]]:
+def _collect_metric_bar_values(metrics: Dict, specs: List[Tuple[str, str, bool]]) -> Tuple[List[str], List[str], List[float]]:
+    metric_keys: List[str] = []
     metric_names: List[str] = []
     vals: List[float] = []
     for key, label, _ in specs:
         val = _metric_float(metrics.get(key))
         if val is None:
             continue
+        metric_keys.append(key)
         metric_names.append(label)
         vals.append(val)
-    return metric_names, vals
+    return metric_keys, metric_names, vals
 
 def _warn_missing_regression_test_metrics(test_metrics: Dict) -> None:
     missing = [label for key, label, _ in _regression_test_bar_specs() if key != 'pearson_correlation' and _metric_float(test_metrics.get(key)) is None]
@@ -252,7 +267,7 @@ def _plot_test_metric_bar_panel(ax: Axes, metric_names: List[str], vals: List[fl
     ax.set_ylabel(ylabel)
     ax.set_ylim(*ylim)
     _test_metric_annotate_bar_values(ax, [bars], fmt=fmt)
-    ax.grid(axis='y', alpha=0.25)
+    ax.grid(False)
     _hide_top_right_spines(ax)
 
 def _metric_float(value: Any) -> Optional[float]:
@@ -1121,8 +1136,8 @@ def plot_test_set_metrics(test_metrics: Dict, output_dir: Union[str, Path], mode
         specs = _regression_test_bar_specs()
         corr_specs = [item for item in specs if item[0] in ('pearson_correlation', 'r2')]
         err_specs = [item for item in specs if item[0] in ('rmse', 'mae')]
-        corr_names, corr_vals = _collect_metric_bar_values(test_metrics, corr_specs)
-        err_names, err_vals = _collect_metric_bar_values(test_metrics, err_specs)
+        _, corr_names, corr_vals = _collect_metric_bar_values(test_metrics, corr_specs)
+        _, err_names, err_vals = _collect_metric_bar_values(test_metrics, err_specs)
         if not corr_names and not err_names:
             logger.debug('  Held-out test metrics plot: no plottable metrics')
             return None
@@ -1148,18 +1163,20 @@ def plot_test_set_metrics(test_metrics: Dict, output_dir: Union[str, Path], mode
         fig.tight_layout()
     else:
         specs = _task_metric_specs(task_type)
-        metric_names, test_vals = _collect_metric_bar_values(test_metrics, specs)
+        metric_keys, metric_names, test_vals = _collect_metric_bar_values(test_metrics, specs)
         if not metric_names:
             logger.debug('  Held-out test metrics plot: no plottable metrics')
             return None
         x = np.arange(len(metric_names))
+        colors = _classification_metric_colors(metric_keys)
         fig, ax = plt.subplots(figsize=(max(6, len(metric_names) * 1.6), 5))
-        bars = ax.bar(x, test_vals, width=_TEST_METRIC_BAR_WIDTH, color=_TEST_METRIC_PALETTE['test'], **_TEST_METRIC_BAR_KW, label='Held-out test set')
+        bars = ax.bar(x, test_vals, width=_TEST_METRIC_BAR_WIDTH, color=colors, **_TEST_METRIC_BAR_KW)
         ax.set_xticks(x)
         ax.set_xticklabels(metric_names, rotation=20, ha='right')
         ax.set_ylabel('Score')
         ax.set_title(f'{model_type} Held-out Test Set Metrics ({task_type})', fontsize=13, fontweight='bold')
-        _test_metric_finish_figure(ax, fig, [bars], task_type)
+        legend_handles = [Patch(facecolor=c, edgecolor='#333333', linewidth=1.0, label=n) for c, n in zip(colors, metric_names)]
+        _test_metric_finish_figure(ax, fig, [bars], task_type, legend_handles=legend_handles)
         _hide_top_right_spines(ax)
         fig.tight_layout()
     plot_file = Path(f'{output_prefix_path}_test_metrics.png')
@@ -1236,19 +1253,22 @@ def plot_cv_average_metrics(cv_results: Dict, output_dir: Union[str, Path], mode
     if not matplotlib_available:
         return None
     specs = _task_metric_specs(task_type)
+    metric_keys: List[str] = []
     metric_names: List[str] = []
     vals: List[float] = []
     for key, label, _ in specs:
         v = _metric_float(avg_metrics.get(key))
         if v is None:
             continue
+        metric_keys.append(key)
         metric_names.append(label)
         vals.append(v)
     if not metric_names:
         return None
     x = np.arange(len(metric_names))
+    colors = _classification_metric_colors(metric_keys, fallback='#3E5C76')
     fig, ax = plt.subplots(figsize=(max(6, len(metric_names) * 1.6), 5))
-    ax.bar(x, vals, width=0.55, color='#3E5C76', alpha=0.92, label='CV mean (training set)')
+    ax.bar(x, vals, width=0.55, color=colors, alpha=0.92, edgecolor='white', linewidth=0.7)
     ax.set_xticks(x)
     ax.set_xticklabels(metric_names, rotation=20, ha='right')
     ax.set_ylabel('Score')
@@ -1258,8 +1278,9 @@ def plot_cv_average_metrics(cv_results: Dict, output_dir: Union[str, Path], mode
         ax.set_ylim(-1.05, 1.05)
     n_folds = cv_results.get('n_folds', '?')
     ax.set_title(f'{model_type} {n_folds}-Fold CV Mean on Training Set ({task_type})', fontsize=13, fontweight='bold')
-    ax.legend(loc='best', frameon=False)
-    ax.grid(axis='y', alpha=0.3)
+    legend_handles = [Patch(facecolor=c, edgecolor='white', linewidth=0.7, label=n) for c, n in zip(colors, metric_names)]
+    ax.legend(handles=legend_handles, loc='best', frameon=False)
+    ax.grid(False)
     _hide_top_right_spines(ax)
     fig.tight_layout()
     plot_file = Path(f'{output_prefix_path}_cv_average_metrics.png')
@@ -1280,13 +1301,12 @@ def plot_performance_curves(y_true: Union[pd.Series, np.ndarray], y_pred: np.nda
     if not matplotlib_available:
         return
     if publication_quality:
-        plt.rcParams.update({'font.family': 'serif', 'font.serif': ['Times New Roman', 'DejaVu Serif', 'Liberation Serif'], 'font.size': 9, 'axes.labelsize': 10, 'axes.titlesize': 11, 'xtick.labelsize': 8, 'ytick.labelsize': 8, 'legend.fontsize': 8, 'figure.titlesize': 12, 'lines.linewidth': 2, 'axes.linewidth': 1.2, 'grid.linewidth': 0.8, 'axes.grid': True, 'grid.alpha': 0.3, 'figure.dpi': 300, 'savefig.dpi': 300, 'savefig.bbox': 'tight', 'savefig.pad_inches': 0.1})
+        plt.rcParams.update({'font.family': 'serif', 'font.serif': ['Times New Roman', 'DejaVu Serif', 'Liberation Serif'], 'font.size': 9, 'axes.labelsize': 10, 'axes.titlesize': 11, 'xtick.labelsize': 8, 'ytick.labelsize': 8, 'legend.fontsize': 8, 'figure.titlesize': 12, 'lines.linewidth': 2, 'axes.linewidth': 1.2, 'grid.linewidth': 0.8, 'axes.grid': False, 'grid.alpha': 0.3, 'figure.dpi': 300, 'savefig.dpi': 300, 'savefig.bbox': 'tight', 'savefig.pad_inches': 0.1})
     y_true_values = _ensure_numpy_array(y_true)
     y_pred_values = np.array(y_pred)
     if task_type == 'regression':
         if publication_quality:
             fig, axes = plt.subplots(2, 2, figsize=(7, 6))
-            fig.suptitle(f'{model_type} Model Performance (Regression, held-out test)', fontsize=12, fontweight='bold')
         else:
             fig, axes = plt.subplots(2, 2, figsize=(14, 10))
             fig.suptitle(f'{model_type} Performance (Regression, held-out test)', fontsize=16, fontweight='bold')
@@ -1303,6 +1323,18 @@ def plot_performance_curves(y_true: Union[pd.Series, np.ndarray], y_pred: np.nda
             logger.debug(f'  Failed to calculate Pearson correlation coefficient: {str(e)}')
             pearson_corr = None
             pearson_p = None
+        # Coefficient of determination: R² = 1 - SS_res / SS_tot (not Pearson r²)
+        r2_det = None
+        try:
+            from sklearn.metrics import r2_score
+            r2_val = float(r2_score(y_true_values, y_pred_values))
+            if not np.isnan(r2_val):
+                r2_det = r2_val
+        except Exception:
+            ss_res = float(np.sum((y_true_values - y_pred_values) ** 2))
+            ss_tot = float(np.sum((y_true_values - np.mean(y_true_values)) ** 2))
+            if ss_tot > 0:
+                r2_det = 1.0 - ss_res / ss_tot
         residuals = y_true_values - y_pred_values
         ax1 = axes[0, 0]
         if publication_quality:
@@ -1318,10 +1350,11 @@ def plot_performance_curves(y_true: Union[pd.Series, np.ndarray], y_pred: np.nda
                 pass
             ax1.set_xlabel('True Values', fontsize=10, fontweight='normal')
             ax1.set_ylabel('Predicted Values', fontsize=10, fontweight='normal')
-            ax1.set_title('(A) Predicted vs True Values', fontsize=11, fontweight='bold')
-            if pearson_corr is not None:
+            if pearson_corr is not None or r2_det is not None:
                 p_text = f'p = {pearson_p:.4g}' if pearson_p is not None else 'p = N/A'
-                ax1.text(0.05, 0.95, f'r = {pearson_corr:.4f}\n{p_text}\nR² = {pearson_corr ** 2:.4f}', transform=ax1.transAxes, fontsize=8, verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', edgecolor='black', linewidth=0.8, alpha=0.9, pad=0.3))
+                r_text = f'r = {pearson_corr:.4f}' if pearson_corr is not None else 'r = N/A'
+                r2_text = f'R² = {r2_det:.4f}' if r2_det is not None else 'R² = N/A'
+                ax1.text(0.05, 0.95, f'{r_text}\n{p_text}\n{r2_text}', transform=ax1.transAxes, fontsize=8, verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', edgecolor='black', linewidth=0.8, alpha=0.9, pad=0.3))
             ax1.legend(loc='lower right', frameon=True, fancybox=False, edgecolor='black', framealpha=0.9, fontsize=8, handlelength=1.5)
         else:
             ax1.scatter(y_true_values, y_pred_values, alpha=0.5, s=20, edgecolors='black', linewidths=0.5)
@@ -1336,28 +1369,29 @@ def plot_performance_curves(y_true: Union[pd.Series, np.ndarray], y_pred: np.nda
                 pass
             ax1.set_xlabel('True Values', fontsize=12)
             ax1.set_ylabel('Predicted Values', fontsize=12)
-            ax1.set_title('Predicted vs True Values', fontsize=13)
-            if pearson_corr is not None:
+            if pearson_corr is not None or r2_det is not None:
                 p_text = f'p = {pearson_p:.4g}' if pearson_p is not None else 'p = N/A'
-                ax1.text(0.05, 0.95, f'r = {pearson_corr:.4f}\n{p_text}\nR² = {pearson_corr ** 2:.4f}', transform=ax1.transAxes, fontsize=11, verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+                r_text = f'r = {pearson_corr:.4f}' if pearson_corr is not None else 'r = N/A'
+                r2_text = f'R² = {r2_det:.4f}' if r2_det is not None else 'R² = N/A'
+                ax1.text(0.05, 0.95, f'{r_text}\n{p_text}\n{r2_text}', transform=ax1.transAxes, fontsize=11, verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
             ax1.legend(loc='lower right')
-        ax1.grid(True, alpha=0.3)
+        ax1.set_title('Predicted vs True Values', fontsize=11 if publication_quality else 13)
+        ax1.grid(False)
         ax2 = axes[0, 1]
         if publication_quality:
             ax2.scatter(y_pred_values, residuals, alpha=0.6, s=25, color='#2E86AB', edgecolors='black', linewidths=0.3)
             ax2.axhline(y=0, color='k', linestyle='--', linewidth=2, label='Zero', dashes=(5, 3))
             ax2.set_xlabel('Predicted Values', fontsize=10, fontweight='normal')
             ax2.set_ylabel('Residuals', fontsize=10, fontweight='normal')
-            ax2.set_title('(B) Residual Plot', fontsize=11, fontweight='bold')
             ax2.legend(frameon=True, fancybox=False, edgecolor='black', framealpha=0.9, fontsize=8, handlelength=1.5)
         else:
             ax2.scatter(y_pred_values, residuals, alpha=0.5, s=20, edgecolors='black', linewidths=0.5)
             ax2.axhline(y=0, color='r', linestyle='--', linewidth=2, label='Zero Residual')
             ax2.set_xlabel('Predicted Values', fontsize=12)
             ax2.set_ylabel('Residuals (True - Predicted)', fontsize=12)
-            ax2.set_title('Residual Plot', fontsize=13)
             ax2.legend()
-        ax2.grid(True, alpha=0.3)
+        ax2.set_title('Residual Plot', fontsize=11 if publication_quality else 13)
+        ax2.grid(False)
         ax3 = axes[1, 0]
         mean_residual = np.mean(residuals)
         std_residual = np.std(residuals)
@@ -1367,7 +1401,6 @@ def plot_performance_curves(y_true: Union[pd.Series, np.ndarray], y_pred: np.nda
             ax3.axvline(x=mean_residual, color='#E63946', linestyle='--', linewidth=2, label=f'Mean={mean_residual:.4f}', dashes=(5, 3))
             ax3.set_xlabel('Residuals', fontsize=10, fontweight='normal')
             ax3.set_ylabel('Frequency', fontsize=10, fontweight='normal')
-            ax3.set_title('(C) Residual Distribution', fontsize=11, fontweight='bold')
             y_min, y_max = ax3.get_ylim()
             text_x = (0 + mean_residual) / 2
             ax3.text(text_x, y_min + (y_max - y_min) * 0.05, f'Mean: {mean_residual:.4f}\nStd: {std_residual:.4f}', fontsize=8, verticalalignment='bottom', horizontalalignment='center', bbox=dict(boxstyle='round', facecolor='white', edgecolor='black', linewidth=0.8, alpha=0.9, pad=0.3))
@@ -1378,12 +1411,12 @@ def plot_performance_curves(y_true: Union[pd.Series, np.ndarray], y_pred: np.nda
             ax3.axvline(x=mean_residual, color='g', linestyle='--', linewidth=2, label=f'Mean={mean_residual:.4f}')
             ax3.set_xlabel('Residuals', fontsize=12)
             ax3.set_ylabel('Frequency', fontsize=12)
-            ax3.set_title('Residual Distribution', fontsize=13)
             y_min, y_max = ax3.get_ylim()
             text_x = (0 + mean_residual) / 2
             ax3.text(text_x, y_min + (y_max - y_min) * 0.05, f'Mean: {mean_residual:.4f}\nStd: {std_residual:.4f}', fontsize=11, verticalalignment='bottom', horizontalalignment='center', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
             ax3.legend()
-        ax3.grid(True, alpha=0.3, axis='y')
+        ax3.set_title('Residual Distribution', fontsize=11 if publication_quality else 13)
+        ax3.grid(False)
         ax4 = axes[1, 1]
         try:
             from scipy import stats
@@ -1396,18 +1429,16 @@ def plot_performance_curves(y_true: Union[pd.Series, np.ndarray], y_pred: np.nda
                     lines[1].set_linewidth(2)
                     lines[1].set_color('#E63946')
                     lines[1].set_linestyle('--')
-                ax4.set_title('(D) Q-Q Plot', fontsize=11, fontweight='bold')
                 ax4.set_xlabel('Theoretical Quantiles', fontsize=10, fontweight='normal')
                 ax4.set_ylabel('Sample Quantiles', fontsize=10, fontweight='normal')
-            else:
-                ax4.set_title('Q-Q Plot (Residual Normality Test)', fontsize=13)
-            ax4.grid(True, alpha=0.3)
+            ax4.set_title('Q-Q Plot (Residual Normality Test)', fontsize=11 if publication_quality else 13)
+            ax4.grid(False)
         except ImportError:
             ax4.text(0.5, 0.5, 'Q-Q Plot requires scipy', ha='center', va='center', transform=ax4.transAxes, fontsize=12)
-            ax4.set_title('Q-Q Plot (scipy not available)', fontsize=13)
+            ax4.set_title('Q-Q Plot (scipy not available)', fontsize=11 if publication_quality else 13)
         except Exception as e:
             ax4.text(0.5, 0.5, f'Q-Q Plot failed:\n{str(e)}', ha='center', va='center', transform=ax4.transAxes, fontsize=10)
-            ax4.set_title('Q-Q Plot (Error)', fontsize=13)
+            ax4.set_title('Q-Q Plot (Error)', fontsize=11 if publication_quality else 13)
         plt.tight_layout()
         _apply_clean_spines(plt.gcf())
         if publication_quality:
@@ -1467,8 +1498,11 @@ def plot_performance_curves(y_true: Union[pd.Series, np.ndarray], y_pred: np.nda
                 max_f1_idx = np.argmax(f1_scores)
                 max_f1_threshold = thresholds[max_f1_idx]
                 max_f1_value = f1_scores[max_f1_idx]
+                acc_color = _CV_PALETTE['accuracy']
+                f1_color = _CV_PALETTE['f1']
+                auc_color = _CV_PALETTE['auc']
                 ax1 = axes[0]
-                ax1.plot(fpr, tpr, 'b-', lw=2, label=f'ROC Curve (AUC = {roc_auc:.4f})')
+                ax1.plot(fpr, tpr, color=auc_color, lw=2, label=f'ROC Curve (AUC = {roc_auc:.4f})')
                 ax1.plot([0, 1], [0, 1], 'k--', lw=1, label='Random Guess', alpha=0.5)
                 if publication_quality:
                     ax1.set_xlabel('False Positive Rate (FPR)', fontsize=10)
@@ -1480,12 +1514,12 @@ def plot_performance_curves(y_true: Union[pd.Series, np.ndarray], y_pred: np.nda
                     ax1.set_ylabel('True Positive Rate (TPR)', fontsize=12)
                     ax1.set_title('ROC Curve (AUC)', fontsize=13)
                     ax1.legend(loc='lower right')
-                ax1.grid(True, alpha=0.3)
+                ax1.grid(False)
                 ax1.set_xlim([0, 1])
                 ax1.set_ylim([0, 1])
                 ax2 = axes[1]
-                ax2.plot(thresholds, accuracies, 'r-', lw=2, label='Accuracy')
-                ax2.axvline(x=max_acc_threshold, color='r', linestyle='--', linewidth=1.5, alpha=0.7, label=f'Max Accuracy: {max_acc_value:.4f} at {max_acc_threshold:.3f}')
+                ax2.plot(thresholds, accuracies, color=acc_color, lw=2, label='Accuracy')
+                ax2.axvline(x=max_acc_threshold, color=acc_color, linestyle='--', linewidth=1.5, alpha=0.7, label=f'Max Accuracy: {max_acc_value:.4f} at {max_acc_threshold:.3f}')
                 if publication_quality:
                     ax2.set_xlabel('Threshold', fontsize=10)
                     ax2.set_ylabel('Accuracy', fontsize=10)
@@ -1496,12 +1530,12 @@ def plot_performance_curves(y_true: Union[pd.Series, np.ndarray], y_pred: np.nda
                     ax2.set_ylabel('Accuracy', fontsize=12)
                     ax2.set_title('Accuracy Curve', fontsize=13)
                     ax2.legend(loc='best')
-                ax2.grid(True, alpha=0.3)
+                ax2.grid(False)
                 ax2.set_xlim([0, 1])
                 ax2.set_ylim([0, 1])
                 ax3 = axes[2]
-                ax3.plot(thresholds, f1_scores, 'm-', lw=2, label='F1 Score')
-                ax3.axvline(x=max_f1_threshold, color='m', linestyle='--', linewidth=1.5, alpha=0.7, label=f'Max F1: {max_f1_value:.4f} at {max_f1_threshold:.3f}')
+                ax3.plot(thresholds, f1_scores, color=f1_color, lw=2, label='F1 Score')
+                ax3.axvline(x=max_f1_threshold, color=f1_color, linestyle='--', linewidth=1.5, alpha=0.7, label=f'Max F1: {max_f1_value:.4f} at {max_f1_threshold:.3f}')
                 if publication_quality:
                     ax3.set_xlabel('Threshold', fontsize=10)
                     ax3.set_ylabel('F1 Score', fontsize=10)
@@ -1512,7 +1546,7 @@ def plot_performance_curves(y_true: Union[pd.Series, np.ndarray], y_pred: np.nda
                     ax3.set_ylabel('F1 Score', fontsize=12)
                     ax3.set_title('F1 Score Curve', fontsize=13)
                     ax3.legend(loc='best')
-                ax3.grid(True, alpha=0.3)
+                ax3.grid(False)
                 ax3.set_xlim([0, 1])
                 ax3.set_ylim([0, 1])
             else:
@@ -1535,7 +1569,7 @@ def plot_performance_curves(y_true: Union[pd.Series, np.ndarray], y_pred: np.nda
                     ax1.set_ylabel('True Positive Rate (TPR)', fontsize=12)
                     ax1.set_title('ROC Curve (AUC)', fontsize=13)
                     ax1.legend(loc='lower right')
-                ax1.grid(True, alpha=0.3)
+                ax1.grid(False)
                 for ax in [axes[1], axes[2]]:
                     ax.axis('off')
                     if publication_quality:
@@ -1587,7 +1621,7 @@ def plot_cv_training_curves(cv_results: Dict, output_dir: Union[str, Path], mode
                 logger.debug(f'  Fold {i + 1}: Invalid correlation value: {corr_val}')
         if pearson_corrs and len(pearson_corrs) > 0:
             fig.text(0.5, 0.91, _cv_brief_stats(pearson_corrs), ha='center', va='top', fontsize=10, color='#444444', transform=fig.transFigure)
-            _cv_draw_single_barplot(ax1, pearson_corrs, _CV_PALETTE['corr'], y_min=0.0, y_max=1.0, stats_text=False, show_stats=False, show_mean_legend=False, highlight_outliers=True, y_grid=True)
+            _cv_draw_single_barplot(ax1, pearson_corrs, _CV_PALETTE['corr'], y_min=0.0, y_max=1.0, stats_text=False, show_stats=False, show_mean_legend=False, highlight_outliers=True, y_grid=False)
         else:
             ax1.text(0.5, 0.5, 'No data available', ha='center', va='center', transform=ax1.transAxes, fontsize=12)
             _hide_top_right_spines(ax1)
