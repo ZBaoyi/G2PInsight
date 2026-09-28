@@ -325,16 +325,19 @@ class EnhancedGenomeVisualizer:
 
     def _detect_separator(self, file_path: Path) -> str:
         with open(file_path, 'r', encoding='utf-8') as f:
-            first_line = f.readline().strip()
-            if '\t' in first_line:
+            for line in f:
+                stripped = line.strip()
+                if not stripped or stripped.startswith('#'):
+                    continue
+                if '\t' in stripped:
+                    return '\t'
+                if ',' in stripped:
+                    return ','
                 return '\t'
-            elif ',' in first_line:
-                return ','
-            else:
-                return '\t'
+        return '\t'
 
     def _detect_columns(self, columns: List[str], sep: str='\t') -> Tuple[str, str, Optional[str]]:
-        sample_df = pd.read_csv(self.input_file, nrows=100, sep=sep)
+        sample_df = pd.read_csv(self.input_file, nrows=100, sep=sep, comment='#')
         if len(columns) >= 3:
             feature_col = None
             abs_col = None
@@ -392,7 +395,7 @@ class EnhancedGenomeVisualizer:
         sep = self._detect_separator(self.input_file)
         tab_char = '\t'
         sep_name = 'Tab' if sep == tab_char else 'Comma'
-        sample_df = pd.read_csv(self.input_file, nrows=100, sep=sep)
+        sample_df = pd.read_csv(self.input_file, nrows=100, sep=sep, comment='#')
         feature_col, abs_col, effect_col = self._detect_columns(sample_df.columns, sep=sep)
         if self.feature_col is None:
             self.feature_col = feature_col
@@ -405,7 +408,7 @@ class EnhancedGenomeVisualizer:
         dtype_dict = {self.feature_col: 'string', self.value_col: 'float32'}
         if effect_col:
             dtype_dict[effect_col] = 'int32'
-        df = pd.read_csv(self.input_file, sep=sep, usecols=cols_to_load, dtype=dtype_dict)
+        df = pd.read_csv(self.input_file, sep=sep, usecols=cols_to_load, dtype=dtype_dict, comment='#')
         if len(df) == 0:
             raise ValueError('Input file is empty')
         if df[self.value_col].isna().sum() > 0:
@@ -507,10 +510,12 @@ class EnhancedGenomeVisualizer:
 
     def _plot_static_scatter(self, output_file: str, dpi: int, **kwargs) -> None:
         sns.set(style='white')
-        fig, ax = plt.subplots(figsize=(18, 8), dpi=dpi)
+        save_dpi = max(int(dpi), 600)
+        fig, ax = plt.subplots(figsize=(18, 8))
+        fig.subplots_adjust(right=0.88)
         self._plot_scatter_static(ax, self.colors)
         self._format_axes(ax)
-        self._save_figure(fig, output_file, dpi)
+        self._save_figure(fig, output_file, save_dpi)
 
     def plot_interactive_scatter(self, output_file: str, **kwargs) -> None:
         logger.debug(f'Drawing interactive scatter: input={self.input_file}, output={output_file}, rows={len(self.df)}, feature_col={self.feature_col}, value_col={self.value_col}')
@@ -551,7 +556,7 @@ class EnhancedGenomeVisualizer:
             if draw_vlines:
                 ax.vlines(x=x_values, ymin=0, ymax=y_values, colors=color, alpha=min(0.9, alpha * 0.85), linewidths=0.5, linestyles='-', zorder=1)
             ax.scatter(x=x_values, y=y_values, c=color, s=size, alpha=alpha, edgecolors='none', label=sign, zorder=2, rasterized=n_points > 50000)
-        ax.legend(title='Effect Direction', loc='upper right')
+        ax.legend(title='Effect Direction', loc='upper left', bbox_to_anchor=(1.01, 1.0), frameon=False, borderaxespad=0.0, handlelength=1.2)
 
     def _create_interactive_scatter(self):
         size, alpha = self._dynamic_style()
@@ -583,7 +588,7 @@ class EnhancedGenomeVisualizer:
         ax.set_xlabel('Genomic Position', fontsize=16)
         x_boundaries = self._get_chromosome_boundary_xs()
         for x_boundary in x_boundaries:
-            ax.axvline(x_boundary, color='#BBBBBB', linestyle='-', linewidth=0.8, alpha=0.65, zorder=0)
+            ax.axvline(x_boundary, color='#9AA3AD', linestyle='-', linewidth=1.6, alpha=0.85, zorder=0)
         if x_boundaries.size:
             ax.set_xlim(float(x_boundaries[0]), float(x_boundaries[-1]))
         ax.set_ylabel('Feature Importance', fontsize=16)

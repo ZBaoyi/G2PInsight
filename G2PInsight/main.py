@@ -130,7 +130,7 @@ def run_unified_visualization(args) -> int:
             if top_snps_n is None:
                 top_snps_n = 20
             visualizer.plot_static_scatter(output_file=str(static_output))
-            logger.debug(f'Static feature-importance plot generated: {static_output}')
+            logger.debug(f'Static feature-importance plot(s) generated from: {static_output}')
             visualizer.plot_interactive_scatter(output_file=str(interactive_output))
             logger.debug(f'Interactive feature-importance plot generated: {interactive_output}')
             visualizer.plot_top_snps_bar(output_file=str(bar_output), top_n=int(top_snps_n))

@@ -27,7 +27,7 @@ def detect_available_fonts() -> Tuple[Optional[str], Optional[str]]:
     try:
         mpl_fonts = _collect_matplotlib_font_names()
         chinese_font_candidates = ['SimHei', 'SimSun', 'Microsoft YaHei', 'KaiTi', 'FangSong', 'STSong', 'STKaiti']
-        english_fonts = ['Arial', 'DejaVu Sans', 'Liberation Sans', 'Helvetica', 'Times New Roman', 'Calibri']
+        english_fonts = ['Times New Roman', 'Arial', 'DejaVu Sans', 'Liberation Sans', 'Helvetica', 'Calibri']
         chinese_font = None
         for font_name in chinese_font_candidates:
             if font_name in mpl_fonts:
@@ -38,32 +38,60 @@ def detect_available_fonts() -> Tuple[Optional[str], Optional[str]]:
             if font_name in mpl_fonts:
                 english_font = font_name
                 break
-        if not chinese_font:
-            chinese_font = 'DejaVu Sans'
         if not english_font:
             english_font = 'DejaVu Sans'
+        # Only keep a Chinese default when a real CJK face exists; otherwise prefer English.
+        if not chinese_font:
+            chinese_font = None
         return (chinese_font, english_font)
     except Exception:
-        return ('DejaVu Sans', 'DejaVu Sans')
+        return (None, 'DejaVu Sans')
 
 def setup_matplotlib_font(chinese_font: Optional[str]=None, english_font: Optional[str]=None) -> None:
     try:
         mpl = _load_module('matplotlib')
         mpl.use('Agg')
         plt = _load_module('matplotlib.pyplot')
-        if chinese_font is None or english_font is None:
+        if chinese_font is None and english_font is None:
             chinese_font, english_font = detect_available_fonts()
-        default_font = chinese_font if chinese_font else english_font
-        plt.rcParams['font.sans-serif'] = [default_font, english_font, 'DejaVu Sans']
+        elif chinese_font is None or english_font is None:
+            detected_cn, detected_en = detect_available_fonts()
+            if chinese_font is None:
+                chinese_font = detected_cn
+            if english_font is None:
+                english_font = detected_en
+        # Prefer real Chinese face when present; otherwise use English (e.g. Times New Roman).
+        default_font = chinese_font or english_font or 'DejaVu Sans'
+        fallback_en = english_font or 'DejaVu Sans'
+        serif_prefer = {'Times New Roman', 'Times', 'Liberation Serif', 'DejaVu Serif', 'Georgia'}
+        if default_font in serif_prefer or (not chinese_font and fallback_en in serif_prefer):
+            face = default_font if default_font in serif_prefer else fallback_en
+            plt.rcParams['font.family'] = 'serif'
+            plt.rcParams['font.serif'] = [face, 'Times New Roman', 'DejaVu Serif', 'Liberation Serif']
+            plt.rcParams['font.sans-serif'] = [fallback_en, 'DejaVu Sans']
+            # STIX math glyphs (subscripts etc.) — Times New Roman lacks Unicode ₁₀
+            plt.rcParams['mathtext.fontset'] = 'stix'
+        else:
+            plt.rcParams['font.family'] = 'sans-serif'
+            plt.rcParams['font.sans-serif'] = [default_font, fallback_en, 'DejaVu Sans']
+            if english_font:
+                plt.rcParams['font.serif'] = [english_font, 'DejaVu Serif', 'Liberation Serif']
+            plt.rcParams['mathtext.fontset'] = 'dejavusans'
         plt.rcParams['axes.unicode_minus'] = False
     except Exception:
         pass
 
 def setup_plotly_font(chinese_font: Optional[str]=None, english_font: Optional[str]=None) -> dict:
     try:
-        if chinese_font is None or english_font is None:
+        if chinese_font is None and english_font is None:
             chinese_font, english_font = detect_available_fonts()
-        default_font = chinese_font if chinese_font else english_font
+        elif chinese_font is None or english_font is None:
+            detected_cn, detected_en = detect_available_fonts()
+            if chinese_font is None:
+                chinese_font = detected_cn
+            if english_font is None:
+                english_font = detected_en
+        default_font = chinese_font or english_font or 'Arial'
         return {'family': default_font, 'size': 12}
     except Exception:
         return {'family': 'Arial', 'size': 12}

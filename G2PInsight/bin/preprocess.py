@@ -1243,6 +1243,9 @@ def run_preprocess(genotype_path: str, genotype_format: GenotypeFormat, phenotyp
                 gwas_prefix_pattern = stage_output_dir_path / 'preprocess_gwas*'
                 for gwas_file in stage_output_dir_path.glob('preprocess_gwas*'):
                     try:
+                        # Never delete retained GWAS assoc exports (e.g. {prefix}_gwas.assoc.txt)
+                        if gwas_file.is_file() and gwas_file.name.endswith('_gwas.assoc.txt'):
+                            continue
                         if gwas_file.is_file():
                             gwas_file.unlink()
                     except Exception:
@@ -1353,12 +1356,14 @@ def run_preprocess(genotype_path: str, genotype_format: GenotypeFormat, phenotyp
             raise ValueError(f'feature_selection_mode must be 1, 2, 3, or 4, got: {feature_selection_mode}')
         if feature_selection_mode != 1:
             logger.debug(f'Feature selection started (mode={feature_selection_mode})')
+        gwas_assoc_file: Optional[str] = None
         if feature_selection_mode in [2, 3, 4]:
             significant_snps: Optional[List[str]] = None
             if feature_selection_mode in [2, 4]:
                 try:
                     logger.debug(f'GWAS analysis started (training samples only: {len(pheno_df_train):,})')
-                    significant_snps = run_gwas_preprocess(plink_prefix=final_plink_prefix, pheno_df=pheno_df_train, output_dir=stage_output_dir, tmp_dir=tmp_dir, pvalue_threshold=gwas_pvalue, perform_plink_qc=filter_snps)
+                    gwas_assoc_keep = stage_output_dir / f'{output_prefix}_gwas.assoc.txt'
+                    significant_snps, gwas_assoc_file = run_gwas_preprocess(plink_prefix=final_plink_prefix, pheno_df=pheno_df_train, output_dir=stage_output_dir, tmp_dir=tmp_dir, pvalue_threshold=gwas_pvalue, perform_plink_qc=filter_snps, assoc_keep_path=gwas_assoc_keep)
                     if not significant_snps:
                         logger.warning('No significant SNPs found by GWAS; feature selection will be skipped.')
                         feature_selection_mode = 1
@@ -1413,7 +1418,7 @@ def run_preprocess(genotype_path: str, genotype_format: GenotypeFormat, phenotyp
         includes_phenotype_column = matrix_output.includes_phenotype_column
         n_snp_features = matrix_output.n_snp_features
         _warn_large_snp_count(n_snp_features, feature_selection_mode, filter_snps)
-        generate_metadata(output_prefix=str(stage_output_dir / output_prefix), plink_prefix=gwas_genotype_prefix, train_file=actual_train_file, valid_samples=matrix_output.sample_ids, genotype_format=genotype_format, task_type=task_type, preprocess_tmp_dir=tmp_dir, filter_snps=filter_snps, feature_selection_mode=feature_selection_mode, gwas_pvalue=gwas_pvalue, ld_window_kb=ld_window_kb, ld_window=ld_window, ld_window_r2=ld_window_r2, n_feature_columns=n_snp_features, includes_phenotype_column=includes_phenotype_column, sample_split=sample_split)
+        generate_metadata(output_prefix=str(stage_output_dir / output_prefix), plink_prefix=gwas_genotype_prefix, train_file=actual_train_file, valid_samples=matrix_output.sample_ids, genotype_format=genotype_format, task_type=task_type, preprocess_tmp_dir=tmp_dir, filter_snps=filter_snps, feature_selection_mode=feature_selection_mode, gwas_pvalue=gwas_pvalue, ld_window_kb=ld_window_kb, ld_window=ld_window, ld_window_r2=ld_window_r2, n_feature_columns=n_snp_features, includes_phenotype_column=includes_phenotype_column, sample_split=sample_split, gwas_assoc_file=gwas_assoc_file)
         logger.info(f'Preprocess completed: {len(matrix_output.sample_ids):,} samples × {n_snp_features:,} SNPs (mode={feature_selection_mode}, split={sample_split["mode"]})')
         gc.collect()
         cleanup_current_run()
@@ -1692,21 +1697,131 @@ def load_phenotype(pheno_path: str) -> pd.DataFrame:
     gc.collect()
     return pheno_df
 
-def determine_phenotype_type(pheno_df: pd.DataFrame, output_dir: Path) -> Literal['regression', 'classification']:
+# Shared phenotype-distribution style (aligned with visualization.py palettes)
+_PHENOTYPE_PLOT = {
+    'text': '#2C333A',
+    'muted': '#8A9199',
+    'fill': '#3E5C76',
+    'accent': '#B5533E',
+    'secondary': '#C1666B',
+    'edge': 'white',
+    'figsize': (8.2, 5.8),
+    'dpi': 200,
+    'title_size': 13,
+    'label_size': 11,
+    'tick_size': 9,
+    'legend_size': 9,
+}
+_PHENOTYPE_CLASS_COLORS = [
+    '#3E5C76',
+    '#C1666B',
+    '#5B8A72',
+    '#7B6FA6',
+    '#B5533E',
+    '#8DA9C4',
+    '#D4A373',
+    '#6B7280',
+    '#2A9D8F',
+    '#E9C46A',
+]
+
+def _setup_phenotype_matplotlib():
     try:
         import matplotlib
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
-        import numpy as np
         try:
             from G2PInsight.bin.font_utils import setup_matplotlib_font
             setup_matplotlib_font()
         except ImportError:
             pass
-        MATPLOTLIB_AVAILABLE = True
+        return plt
     except ImportError:
-        MATPLOTLIB_AVAILABLE = False
         logger.debug('matplotlib is not installed; phenotype visualization will be skipped')
+        return None
+
+def _style_phenotype_axes(ax, *, spines: bool=True) -> None:
+    ax.tick_params(labelsize=_PHENOTYPE_PLOT['tick_size'], colors=_PHENOTYPE_PLOT['text'])
+    if spines:
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['left'].set_color(_PHENOTYPE_PLOT['muted'])
+        ax.spines['bottom'].set_color(_PHENOTYPE_PLOT['muted'])
+        ax.tick_params(top=False, right=False, labeltop=False, labelright=False)
+
+def _save_phenotype_figure(fig, plot_file: Path) -> None:
+    fig.savefig(plot_file, dpi=_PHENOTYPE_PLOT['dpi'], bbox_inches='tight', facecolor='white')
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+
+def plot_classification_phenotype_distribution(phenotype_values: np.ndarray, output_dir: Path, unique_count: int) -> None:
+    """Donut chart of class proportions; shared preprocess phenotype style."""
+    plt = _setup_phenotype_matplotlib()
+    if plt is None:
+        return
+    value_counts = pd.Series(phenotype_values).value_counts().sort_index()
+    sizes = value_counts.to_numpy(dtype=float)
+    total = int(sizes.sum())
+    if total <= 0:
+        return
+    colors = [_PHENOTYPE_CLASS_COLORS[i % len(_PHENOTYPE_CLASS_COLORS)] for i in range(len(sizes))]
+
+    def _class_label(raw) -> str:
+        try:
+            f = float(raw)
+            return f'Class {int(f)}' if f == int(f) else f'Class {raw}'
+        except (TypeError, ValueError):
+            return f'Class {raw}'
+
+    class_labels = [_class_label(k) for k in value_counts.index]
+
+    def _autopct(pct: float) -> str:
+        return f'{pct:.1f}%' if pct >= 4.0 else ''
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=_PHENOTYPE_PLOT['figsize'], facecolor='white')
+    wedges, _, autotexts = ax.pie(
+        sizes,
+        labels=None,
+        autopct=_autopct,
+        startangle=90,
+        colors=colors,
+        pctdistance=0.72,
+        wedgeprops={'width': 0.40, 'edgecolor': _PHENOTYPE_PLOT['edge'], 'linewidth': 2.2},
+    )
+    for t in autotexts:
+        t.set_color(_PHENOTYPE_PLOT['text'])
+        t.set_fontsize(_PHENOTYPE_PLOT['legend_size'])
+        t.set_fontweight('semibold')
+    ax.text(0, 0.08, 'N', ha='center', va='center', fontsize=10, color=_PHENOTYPE_PLOT['muted'])
+    ax.text(0, -0.10, f'{total:,}', ha='center', va='center', fontsize=15, fontweight='bold', color=_PHENOTYPE_PLOT['text'])
+    legend_labels = [f'{lab}  ·  {int(n):,} ({100.0 * n / total:.1f}%)' for lab, n in zip(class_labels, sizes)]
+    ax.legend(
+        wedges,
+        legend_labels,
+        title='Phenotype class',
+        loc='center left',
+        bbox_to_anchor=(1.02, 0.5),
+        frameon=False,
+        fontsize=_PHENOTYPE_PLOT['legend_size'],
+        title_fontsize=10,
+        handlelength=1.1,
+        handleheight=1.1,
+        borderaxespad=0.0,
+    )
+    ax.set_title(
+        f'Phenotype Distribution (Classification)\n{unique_count} classes · {total:,} samples',
+        fontsize=_PHENOTYPE_PLOT['title_size'],
+        fontweight='semibold',
+        color=_PHENOTYPE_PLOT['text'],
+        pad=14,
+    )
+    ax.set_aspect('equal')
+    plot_file = output_dir / 'phenotype_distribution_pie.png'
+    _save_phenotype_figure(fig, plot_file)
+    logger.debug(f'Classification phenotype distribution plot saved: {plot_file}')
+
+def determine_phenotype_type(pheno_df: pd.DataFrame, output_dir: Path) -> Literal['regression', 'classification']:
     phenotype_values = pheno_df['phenotype'].values
     unique_values = np.unique(phenotype_values)
     unique_count = len(unique_values)
@@ -1717,17 +1832,8 @@ def determine_phenotype_type(pheno_df: pd.DataFrame, output_dir: Path) -> Litera
     else:
         task_type = 'regression'
         logger.info('Phenotype type: regression')
-    if MATPLOTLIB_AVAILABLE:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        if task_type == 'classification':
-            value_counts = pd.Series(phenotype_values).value_counts().sort_index()
-            plt.figure(figsize=(10, 6))
-            plt.pie(value_counts.values, labels=value_counts.index, autopct='%1.1f%%', startangle=90)
-            plt.title(f'Phenotype Distribution (Classification)\nUnique Values: {unique_count}', fontsize=14)
-            plt.axis('equal')
-            plot_file = output_dir / 'phenotype_distribution_pie.png'
-            plt.savefig(plot_file, dpi=600, bbox_inches='tight')
-            plt.close()
+    if task_type == 'classification':
+        plot_classification_phenotype_distribution(phenotype_values, output_dir, unique_count)
     return task_type
 
 def convert_phenotype_dtype(pheno_df: pd.DataFrame, task_type: Literal['regression', 'classification']) -> pd.DataFrame:
@@ -1739,46 +1845,44 @@ def convert_phenotype_dtype(pheno_df: pd.DataFrame, task_type: Literal['regressi
     return pheno_df
 
 def plot_regression_phenotype_distribution(pheno_df: pd.DataFrame, output_dir: Path) -> None:
-    try:
-        import matplotlib
-        matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
-        import numpy as np
-        try:
-            from G2PInsight.bin.font_utils import setup_matplotlib_font
-            setup_matplotlib_font()
-        except ImportError:
-            pass
-        MATPLOTLIB_AVAILABLE = True
-    except ImportError:
-        MATPLOTLIB_AVAILABLE = False
-        logger.debug('matplotlib is not installed; phenotype visualization will be skipped')
-        return
-    if not MATPLOTLIB_AVAILABLE:
+    """Histogram of continuous phenotype; shared preprocess phenotype style."""
+    plt = _setup_phenotype_matplotlib()
+    if plt is None:
         return
     phenotype_values = pheno_df['phenotype'].values
-    unique_values = np.unique(phenotype_values)
-    unique_count = len(unique_values)
+    unique_count = len(np.unique(phenotype_values))
+    n_samples = len(phenotype_values)
+    mean_val = float(np.mean(phenotype_values))
+    std_val = float(np.std(phenotype_values))
     output_dir.mkdir(parents=True, exist_ok=True)
-    plt.figure(figsize=(10, 6))
-    plt.hist(phenotype_values, bins=50, density=True, alpha=0.7, edgecolor='black')
-    plt.xlabel('Phenotype Value', fontsize=12)
-    plt.ylabel('Density', fontsize=12)
-    plt.title(f'Phenotype Distribution (Regression)\nSamples: {len(phenotype_values)}, Unique Values: {unique_count}', fontsize=14)
-    plt.grid(True, alpha=0.3)
-    mean_val = np.mean(phenotype_values)
-    std_val = np.std(phenotype_values)
-    plt.axvline(mean_val, color='r', linestyle='--', label=f'Mean: {mean_val:.2f}')
-    plt.axvline(mean_val + std_val, color='orange', linestyle='--', alpha=0.7, label=f'±1SD: {std_val:.2f}')
-    plt.axvline(mean_val - std_val, color='orange', linestyle='--', alpha=0.7)
-    plt.legend()
-    ax = plt.gca()
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.tick_params(top=False, right=False, labeltop=False, labelright=False)
+    fig, ax = plt.subplots(figsize=_PHENOTYPE_PLOT['figsize'], facecolor='white')
+    ax.hist(
+        phenotype_values,
+        bins=50,
+        density=True,
+        alpha=0.88,
+        color=_PHENOTYPE_PLOT['fill'],
+        edgecolor=_PHENOTYPE_PLOT['edge'],
+        linewidth=0.8,
+    )
+    ax.axvline(mean_val, color=_PHENOTYPE_PLOT['accent'], linestyle='--', linewidth=1.8, label=f'Mean: {mean_val:.2f}')
+    ax.axvline(mean_val + std_val, color=_PHENOTYPE_PLOT['secondary'], linestyle='--', linewidth=1.4, alpha=0.85, label=f'±1SD: {std_val:.2f}')
+    ax.axvline(mean_val - std_val, color=_PHENOTYPE_PLOT['secondary'], linestyle='--', linewidth=1.4, alpha=0.85)
+    ax.set_xlabel('Phenotype Value', fontsize=_PHENOTYPE_PLOT['label_size'], color=_PHENOTYPE_PLOT['text'])
+    ax.set_ylabel('Density', fontsize=_PHENOTYPE_PLOT['label_size'], color=_PHENOTYPE_PLOT['text'])
+    ax.set_title(
+        f'Phenotype Distribution (Regression)\n{n_samples:,} samples · {unique_count} unique',
+        fontsize=_PHENOTYPE_PLOT['title_size'],
+        fontweight='semibold',
+        color=_PHENOTYPE_PLOT['text'],
+        pad=14,
+    )
+    ax.grid(True, axis='y', color='#E6E8EB', linewidth=0.8, alpha=0.9)
+    ax.set_axisbelow(True)
+    ax.legend(frameon=False, fontsize=_PHENOTYPE_PLOT['legend_size'])
+    _style_phenotype_axes(ax)
     plot_file = output_dir / 'phenotype_distribution_histogram.png'
-    plt.savefig(plot_file, dpi=150, bbox_inches='tight')
-    plt.close()
+    _save_phenotype_figure(fig, plot_file)
     logger.debug(f'Regression phenotype distribution plot saved: {plot_file}')
 
 def filter_samples_by_phenotype(plink_prefix: str, pheno_df: pd.DataFrame, output_prefix: str) -> str:
@@ -1826,7 +1930,7 @@ def generate_gwas_phenotype_file_preprocess(pheno_df: pd.DataFrame, output_file:
             f.write(f'{sample_id}\t{pheno}\n')
     return output_path.as_posix()
 
-def run_gwas_preprocess(plink_prefix: str, pheno_df: pd.DataFrame, output_dir: Union[str, Path], tmp_dir: Union[str, Path], pvalue_threshold: float=0.01, perform_plink_qc: bool=True) -> List[str]:
+def run_gwas_preprocess(plink_prefix: str, pheno_df: pd.DataFrame, output_dir: Union[str, Path], tmp_dir: Union[str, Path], pvalue_threshold: float=0.01, perform_plink_qc: bool=True, assoc_keep_path: Optional[Union[str, Path]]=None) -> Tuple[List[str], Optional[str]]:
     output_dir_path = Path(output_dir).absolute()
     tmp_dir_path = Path(tmp_dir).absolute()
     gwas_work_dir = tmp_dir_path / 'gwas'
@@ -1855,6 +1959,16 @@ def run_gwas_preprocess(plink_prefix: str, pheno_df: pd.DataFrame, output_dir: U
     if not gwas_result_file.exists():
         logger.error('GWAS result file missing')
         raise FileNotFoundError(f'GWAS result file missing: {gwas_result_file.absolute()}')
+    kept_assoc_path: Optional[str] = None
+    if assoc_keep_path is not None:
+        keep_path = Path(assoc_keep_path).absolute()
+        try:
+            keep_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(gwas_result_file, keep_path)
+            kept_assoc_path = keep_path.as_posix()
+            logger.info(f'GWAS result retained: {kept_assoc_path}')
+        except Exception as e:
+            logger.warning(f'Failed to retain GWAS result file: {e}')
     try:
         gwas_df = pd.read_csv(gwas_result_file, sep='\t')
     except Exception as e:
@@ -1878,7 +1992,6 @@ def run_gwas_preprocess(plink_prefix: str, pheno_df: pd.DataFrame, output_dir: U
     logger.debug(f'GWAS result summary: {len(significant_snps):,} significant SNP(s)')
     try:
         logger.debug('GWAS temporary files cleanup started')
-        import shutil
         gwas_prefix_base = str(Path(gwas_output_prefix_abs))
         delete_temp_files(f'{gwas_prefix_base}_clean_geno', ['.bed', '.bim', '.fam', '.log', '.nosex'])
         delete_temp_files(f'{gwas_prefix_base}_clean_geno_filtered', ['.bed', '.bim', '.fam', '.log', '.nosex'])
@@ -1893,10 +2006,11 @@ def run_gwas_preprocess(plink_prefix: str, pheno_df: pd.DataFrame, output_dir: U
             except Exception:
                 pass
         gwas_prefix_path = Path(gwas_output_prefix_abs)
+        keep_path_resolved = Path(kept_assoc_path).resolve() if kept_assoc_path else None
         if gwas_prefix_path.parent.exists():
             for fp in gwas_prefix_path.parent.glob(f'{gwas_prefix_path.name}*'):
                 try:
-                    if fp.is_file():
+                    if fp.is_file() and (keep_path_resolved is None or fp.resolve() != keep_path_resolved):
                         fp.unlink()
                 except Exception:
                     pass
@@ -1908,7 +2022,7 @@ def run_gwas_preprocess(plink_prefix: str, pheno_df: pd.DataFrame, output_dir: U
         logger.debug('GWAS temporary files cleanup completed')
     except Exception as e:
         logger.debug('GWAS temporary files cleanup partially failed (ignored)')
-    return significant_snps
+    return significant_snps, kept_assoc_path
 
 def chr_pos_match_variants(key: str) -> set:
     key = str(key).strip()
@@ -1981,9 +2095,9 @@ def extract_snps_with_plink(plink_prefix: str, snp_list: List[str], output_prefi
         except Exception:
             pass
 
-def generate_metadata(output_prefix: str, plink_prefix: str, train_file: str, valid_samples: List[str], genotype_format: str, task_type: Optional[Literal['regression', 'classification']]=None, preprocess_tmp_dir: Optional[Union[str, Path]]=None, filter_snps: bool=True, feature_selection_mode: int=1, gwas_pvalue: Optional[float]=None, ld_window_kb: Optional[int]=None, ld_window: Optional[int]=None, ld_window_r2: Optional[float]=None, n_feature_columns: Optional[int]=None, includes_phenotype_column: bool=True, sample_split: Optional[Dict[str, Any]]=None) -> None:
+def generate_metadata(output_prefix: str, plink_prefix: str, train_file: str, valid_samples: List[str], genotype_format: str, task_type: Optional[Literal['regression', 'classification']]=None, preprocess_tmp_dir: Optional[Union[str, Path]]=None, filter_snps: bool=True, feature_selection_mode: int=1, gwas_pvalue: Optional[float]=None, ld_window_kb: Optional[int]=None, ld_window: Optional[int]=None, ld_window_r2: Optional[float]=None, n_feature_columns: Optional[int]=None, includes_phenotype_column: bool=True, sample_split: Optional[Dict[str, Any]]=None, gwas_assoc_file: Optional[str]=None) -> None:
     chr_list = auto_detect_chromosomes(plink_prefix)
-    metadata = {'preprocess_time': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'), 'genotype_format': genotype_format, 'phenotype_format': 'Two-column, no-header format (sample ID + phenotype value)', 'output_train_file': train_file, 'valid_samples': valid_samples, 'sample_count': len(valid_samples), 'chromosome_list': chr_list, 'chromosome_count': len(chr_list), 'parallel_processes': 1, 'processing_mode': 'single_thread_sequential', 'plink_memory_limit_MB': 'unlimited (no --memory passed to PLINK)', 'snp_dtype': 'int8', 'snp_naming_rule': "chromosome_physicalPosition (e.g., '1_123456')", 'plink_executable': PLINK_EXECUTABLE, 'plink_recode_param': '--recodeA', 'gwas_genotype_prefix': None, 'preprocess_tmp_dir': str(Path(preprocess_tmp_dir).absolute()) if preprocess_tmp_dir else None, 'snp_filtering': {'filtered': filter_snps, 'maf_threshold': 0.05 if filter_snps else None, 'geno_threshold': 0.2 if filter_snps else None}, 'feature_selection': {'mode': feature_selection_mode, 'description': {1: 'no GWAS/LD feature selection', 2: 'GWAS-based SNP selection', 3: 'LD-based SNP pruning', 4: 'GWAS + LD combined filtering (GWAS first, then LD)'}.get(feature_selection_mode, 'unknown'), 'gwas_pvalue_threshold': gwas_pvalue if feature_selection_mode in [2, 4] else None, 'ld_window_kb': ld_window_kb if feature_selection_mode in [3, 4] else None, 'ld_window': ld_window if feature_selection_mode in [3, 4] else None, 'ld_window_r2': ld_window_r2 if feature_selection_mode in [3, 4] else None, 'samples_used': 'training_split_only' if feature_selection_mode in [2, 3, 4] else None}}
+    metadata = {'preprocess_time': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'), 'genotype_format': genotype_format, 'phenotype_format': 'Two-column, no-header format (sample ID + phenotype value)', 'output_train_file': train_file, 'valid_samples': valid_samples, 'sample_count': len(valid_samples), 'chromosome_list': chr_list, 'chromosome_count': len(chr_list), 'parallel_processes': 1, 'processing_mode': 'single_thread_sequential', 'plink_memory_limit_MB': 'unlimited (no --memory passed to PLINK)', 'snp_dtype': 'int8', 'snp_naming_rule': "chromosome_physicalPosition (e.g., '1_123456')", 'plink_executable': PLINK_EXECUTABLE, 'plink_recode_param': '--recodeA', 'gwas_genotype_prefix': None, 'preprocess_tmp_dir': str(Path(preprocess_tmp_dir).absolute()) if preprocess_tmp_dir else None, 'snp_filtering': {'filtered': filter_snps, 'maf_threshold': 0.05 if filter_snps else None, 'geno_threshold': 0.2 if filter_snps else None}, 'feature_selection': {'mode': feature_selection_mode, 'description': {1: 'no GWAS/LD feature selection', 2: 'GWAS-based SNP selection', 3: 'LD-based SNP pruning', 4: 'GWAS + LD combined filtering (GWAS first, then LD)'}.get(feature_selection_mode, 'unknown'), 'gwas_pvalue_threshold': gwas_pvalue if feature_selection_mode in [2, 4] else None, 'gwas_assoc_file': gwas_assoc_file, 'ld_window_kb': ld_window_kb if feature_selection_mode in [3, 4] else None, 'ld_window': ld_window if feature_selection_mode in [3, 4] else None, 'ld_window_r2': ld_window_r2 if feature_selection_mode in [3, 4] else None, 'samples_used': 'training_split_only' if feature_selection_mode in [2, 3, 4] else None}}
     if task_type:
         metadata['task_type'] = task_type
     if sample_split:

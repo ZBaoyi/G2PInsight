@@ -1,6 +1,3 @@
 # Runtime dependencies are declared in pyproject.toml.
 # Install from the repo root:
 #   pip install -e .
-#   pip install -e ".[bed]"      # recommended for large preprocess jobs
-#   pip install -e ".[monitor]"  # optional memory monitoring (psutil)
-#   pip install -e ".[all]"      # bed-reader + psutil

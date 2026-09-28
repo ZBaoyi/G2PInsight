@@ -10,7 +10,7 @@ name = "G2PInsight"
 version = "1.0.6"
 description = "Genome-wide association analysis toolkit"
 readme = "README.md"
-requires-python = ">=3.8,<3.13"
+requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
     {name = "chenrf", email = "2010288571@qq.com"}
@@ -54,13 +54,7 @@ dependencies = [
     "plotly>=5.0",
     "kaleido>=0.2",
     "seaborn>=0.11",
-]
-
-[project.optional-dependencies]
-bed = ["bed-reader>=0.2"]
-monitor = ["psutil>=5.0"]
-all = [
-    "bed-reader>=0.2",
+    "bed-reader>=0.2",  # default fast PLINK .bed backend for preprocess
     "psutil>=5.0",
 ]
 

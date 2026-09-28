@@ -14,12 +14,30 @@ Supports **classification** and **regression**, optional **GWAS/LD** SNP filteri
 
 ---
 
+## Install
+
+**Audience:** end users who want to run the pipeline (no coding). Developers: see [Other install options](#other-install-options).
+
+**Need:** Python 3.8+, Linux (recommended) or macOS. PLINK and GEMMA ship with the package.
+
+**Get G2PInsight** (recommended — from [PyPI](https://pypi.org/p/G2PInsight)):
+
+```bash
+pip install G2PInsight
+G2PInsight --version
+```
+
+Then go to [Quick Start](#quick-start). Source repository: [github.com/ZBaoyi/G2PInsight](https://github.com/ZBaoyi/G2PInsight).
+
+---
+
 ## Table of Contents
 
+- [Install](#install)
 - [What you get](#what-you-get)
 - [Quick Start](#quick-start)
 - [Pipeline](#pipeline)
-- [Installation](#installation)
+- [Other install options](#other-install-options)
 - [Commands](#commands)
   - [preprocess](#1-preprocess)
   - [train](#2-train)
@@ -100,29 +118,35 @@ Use `-o my_project/` as the project folder. Preprocess writes `my_project/prepro
 
 ---
 
-## Installation
+## Other install options
 
-**Requirements:** Python 3.8–3.12, Linux (recommended) or macOS. PLINK and GEMMA are bundled.
+Use these only if the one-liner in [Install](#install) is not enough.
 
-```bash
-pip install G2PInsight
-pip install "G2PInsight[bed]"   # strongly recommended for large preprocess jobs
-# pip install "G2PInsight[all]"  # bed-reader + psutil
-```
+### From GitHub (latest commit, no local clone)
 
-From source:
+Install the newest code without keeping a local copy of the repo:
 
 ```bash
-git clone https://github.com/chenrf0407/G2P_tool.git
-cd G2P_tool && pip install -e ".[bed]"
-```
-
-```bash
+pip install "G2PInsight @ git+https://github.com/ZBaoyi/G2PInsight.git"
 G2PInsight --version
-G2PInsight -h
 ```
 
-Without `bed-reader`, preprocess falls back to slower PLINK `--recodeA`. Install with `pip install "G2PInsight[bed]"` (or `pip install bed-reader`) for the default fast `.bed` path.
+### From a local clone (editable install)
+
+**Who this is for:** people who already `git clone` the repo, want to read or change the source, and have edits take effect without reinstalling each time.
+
+**What `-e` means:** editable mode — Python imports the code from this folder. After you edit files under `G2PInsight/`, the `G2PInsight` command uses your changes immediately.
+
+```bash
+git clone https://github.com/ZBaoyi/G2PInsight.git
+cd G2PInsight
+pip install -e .
+G2PInsight --version
+```
+
+Only want to use the tool (no source edits)? Prefer `pip install G2PInsight` in [Install](#install) instead.
+
+`bed-reader` and `psutil` are included by default. If `bed-reader` is missing at runtime, preprocess falls back to slower PLINK `--recodeA`.
 
 ---
 
@@ -157,7 +181,7 @@ G2PInsight preprocess (--bfile|--file|--vcf) <genotype> -p <phenotype> -o <outpu
 G2PInsight preprocess --vcf data.vcf -p pheno.txt -o results/ -f 4
 ```
 
-**Large genome** (prefer bed-reader + SNP filtering):
+**Large genome** (SNP filtering recommended):
 
 ```bash
 G2PInsight preprocess --bfile genotype -p pheno.txt -o results/ -f 4
@@ -425,7 +449,7 @@ Default is `--shap_dependence_top 50`. Use `0` only if you need all SNPs (can be
 ### Preprocess slow or killed
 
 1. Do not use `--no-filter-snps` on whole-genome data; use `-f 2`–`4`.
-2. Install with `pip install "G2PInsight[bed]"` (or `pip install bed-reader`) for the default fast `.bed` backend.
+2. Confirm `bed-reader` is installed (it is a default dependency of `G2PInsight`); without it, preprocess falls back to slower PLINK `--recodeA`.
 
 ### predict: constant values or no feature match
 
@@ -446,7 +470,7 @@ Log lines: `Genotype conversion backend: bed` (fast) or `raw` (PLINK `--recodeA`
 ## Developer guide
 
 ```text
-assocG2P/G2PInsight/
+G2PInsight/
 ├── main.py
 └── bin/
     ├── preprocess.py
@@ -457,9 +481,13 @@ assocG2P/G2PInsight/
 ```
 
 ```bash
-pip install -e ".[bed]"
+git clone https://github.com/ZBaoyi/G2PInsight.git
+cd G2PInsight
+pip install -e .
 G2PInsight preprocess -h
 ```
+
+Bug reports and feature requests: [GitHub Issues](https://github.com/ZBaoyi/G2PInsight/issues).
 
 ---
 

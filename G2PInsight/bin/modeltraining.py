@@ -1589,7 +1589,16 @@ def filter_phenotype_from_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         return df.drop(columns=drop_cols_unique, errors='ignore')
     return df
 
-def save_training_results(model: Any, metrics: Dict, selected_snps: List[str], output_dir: str, model_type: str, task_type: str, shap_df: Optional[pd.DataFrame]=None, shap_dependence_data: Optional[Dict[str, Any]]=None, y_test: Optional[pd.Series]=None, y_pred: Optional[np.ndarray]=None, y_prob: Optional[np.ndarray]=None, cv_results: Optional[Dict]=None, cv_oof_data: Optional[Dict[str, Any]]=None, peak_ram_mb: Optional[float]=None, hyperparameter_search_enabled: Optional[bool]=None, split_mode: str='cv', evaluation_results: Optional[Dict]=None, shap_dependence_max_features: Optional[int]=None) -> None:
+def _gwas_assoc_file_from_metadata(metadata: Optional[Dict]) -> Optional[str]:
+    if not metadata:
+        return None
+    feature_selection = metadata.get('feature_selection') or {}
+    path = feature_selection.get('gwas_assoc_file')
+    if path is None or str(path).strip() == '' or str(path).strip().lower() == 'null':
+        return None
+    return str(Path(str(path)).expanduser())
+
+def save_training_results(model: Any, metrics: Dict, selected_snps: List[str], output_dir: str, model_type: str, task_type: str, shap_df: Optional[pd.DataFrame]=None, shap_dependence_data: Optional[Dict[str, Any]]=None, y_test: Optional[pd.Series]=None, y_pred: Optional[np.ndarray]=None, y_prob: Optional[np.ndarray]=None, cv_results: Optional[Dict]=None, cv_oof_data: Optional[Dict[str, Any]]=None, peak_ram_mb: Optional[float]=None, hyperparameter_search_enabled: Optional[bool]=None, split_mode: str='cv', evaluation_results: Optional[Dict]=None, shap_dependence_max_features: Optional[int]=None, gwas_assoc_file: Optional[str]=None) -> None:
     model_dir = Path(output_dir) / model_type
     model_dir.mkdir(parents=True, exist_ok=True)
     output_prefix = model_dir / model_type
@@ -1644,7 +1653,10 @@ def save_training_results(model: Any, metrics: Dict, selected_snps: List[str], o
         shap_file = Path(f'{output_prefix}_shap_values.txt')
         shap_output_df = filtered_shap_df.copy()
         shap_output_df = shap_output_df.rename(columns={'shap_abs': 'importance_abs'})
-        shap_output_df.to_csv(shap_file, sep='\t', index=False)
+        with open(shap_file, 'w', encoding='utf-8') as shap_f:
+            if gwas_assoc_file:
+                shap_f.write(f'# gwas_assoc_file={Path(gwas_assoc_file).absolute().as_posix()}\n')
+            shap_output_df.to_csv(shap_f, sep='\t', index=False)
     shap_dependence_cap = _resolve_shap_dependence_max_features(shap_dependence_max_features)
     if shap_dependence_data is not None:
         try:
@@ -1801,7 +1813,8 @@ def _run_single_model_body(input_path: str, model_type: str, output_dir: str, ta
         model_dir.mkdir(parents=True, exist_ok=True)
         selected_snps = filter_phenotype_columns(X_filtered.columns.tolist())
         peak_ram_mb = memory_tracker.stop()
-        save_training_results(model=final_model, metrics=metrics, selected_snps=selected_snps, output_dir=output_dir, model_type=model_type, task_type=task_type, shap_df=shap_df, shap_dependence_data=shap_dependence_data, y_test=y_test_combined, y_pred=y_pred_combined, y_prob=y_prob_combined, cv_results=cv_results, cv_oof_data=cv_oof_data, peak_ram_mb=peak_ram_mb, hyperparameter_search_enabled=enable_hyperparameter_search, split_mode=split_mode, evaluation_results=evaluation_results, shap_dependence_max_features=shap_dependence_max_features)
+        gwas_assoc_file = _gwas_assoc_file_from_metadata(metadata_for_split)
+        save_training_results(model=final_model, metrics=metrics, selected_snps=selected_snps, output_dir=output_dir, model_type=model_type, task_type=task_type, shap_df=shap_df, shap_dependence_data=shap_dependence_data, y_test=y_test_combined, y_pred=y_pred_combined, y_prob=y_prob_combined, cv_results=cv_results, cv_oof_data=cv_oof_data, peak_ram_mb=peak_ram_mb, hyperparameter_search_enabled=enable_hyperparameter_search, split_mode=split_mode, evaluation_results=evaluation_results, shap_dependence_max_features=shap_dependence_max_features, gwas_assoc_file=gwas_assoc_file)
         total_time = round(time.perf_counter() - start_time, 2)
         logger.info(f'Training completed for {model_type} (elapsed={total_time}s, peak RAM={peak_ram_mb} MB)')
         if CLEANUP_TEMP_FILES:
