@@ -18,7 +18,7 @@ Supports **classification** and **regression**, optional **GWAS/LD** SNP filteri
 
 **Audience:** end users who want to run the pipeline (no coding). Developers: see [Other install options](#other-install-options).
 
-**Need:** Python 3.8+, Linux (recommended) or macOS. PLINK and GEMMA ship with the package.
+**Need:** Python 3.8+ (no upper bound; dependency pins adapt by version), Linux (recommended) or macOS. PLINK and GEMMA ship with the package.
 
 **Get G2PInsight** (recommended — from [PyPI](https://pypi.org/p/G2PInsight)):
 
