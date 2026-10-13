@@ -31,15 +31,12 @@ try:
     PSUTIL_AVAILABLE = True
 except ImportError:
     PSUTIL_AVAILABLE = False
-    logger.debug('psutil not installed, memory monitoring functionality limited')
 try:
     from bed_reader import open_bed
     BED_READER_AVAILABLE = True
 except ImportError:
     BED_READER_AVAILABLE = False
 SNP_DTYPE = np.int8
-PREPROCESS_SNP_WARN_THRESHOLD = 500_000
-PREPROCESS_SNP_STRONG_WARN_THRESHOLD = 1_000_000
 TRAIN_MATRIX_COL_WRITE_CHUNK = 50_000
 TRAIN_TEST_HOLDOUT_RATIO = 0.20
 DEFAULT_SPLIT_RANDOM_STATE = 42
@@ -63,15 +60,6 @@ def _count_bim_snps(plink_prefix: str) -> int:
             count += 1
     return count
 
-def _warn_large_snp_count(n_snps: int, feature_selection_mode: int, filter_snps: bool) -> None:
-    if n_snps <= 0:
-        return
-    if not filter_snps:
-        logger.debug(f'--no-filter-snps is enabled; {n_snps:,} SNP(s) may enter the training matrix. Use default SNP QC unless you intentionally need all variants.')
-    if n_snps >= PREPROCESS_SNP_STRONG_WARN_THRESHOLD:
-        logger.debug(f'Very large SNP count: {n_snps:,}. Preprocess and training may be slow or run out of memory. Use -f 2 or -f 4 to reduce features before training.')
-    elif n_snps >= PREPROCESS_SNP_WARN_THRESHOLD and feature_selection_mode == 1:
-        logger.debug(f'Large SNP count: {n_snps:,} with -f 1 (no GWAS/LD). Consider -f 4 (GWAS + LD) before training.')
 GenotypeFormat = Literal['vcf', 'plink_binary', 'plink_text']
 GenotypeBackend = Literal['auto', 'bed', 'raw']
 
@@ -123,8 +111,6 @@ class VectorizedProcessor:
                     chunk_ranges.append((chunk_start, chunk_end))
                 arr_converted_list = []
                 for chunk_idx, (chunk_start, chunk_end) in enumerate(chunk_ranges):
-                    if chunk_idx % 10 == 0:
-                        pass
                     chunk_flat = arr.ravel()[chunk_start:chunk_end]
                     chunk_converted = VectorizedProcessor._convert_chunk(chunk_flat, is_numeric, target_dtype)
                     arr_converted_list.append(chunk_converted)
@@ -139,14 +125,11 @@ class VectorizedProcessor:
                     arr_converted = arr_flat.reshape(arr.shape)
                     arr_converted = np.nan_to_num(arr_converted, nan=-1).astype(target_dtype)
             df[cols_to_convert] = arr_converted
-        except Exception as e:
-            logger.debug(f'Bulk vectorized conversion failed, falling back to column-wise conversion: {e}')
+        except Exception:
             if total_cols > 1000:
                 batch_size = 1000
                 for i in range(0, total_cols, batch_size):
                     batch_cols = cols_to_convert[i:i + batch_size]
-                    if i // batch_size % 10 == 0:
-                        pass
                     for col in batch_cols:
                         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(-1).astype(target_dtype)
             else:
@@ -276,16 +259,6 @@ class SmartCache:
             item = self.cache.pop(key)
             self.current_size_bytes -= item['size']
 
-    def delete(self, key: str):
-        with self.lock:
-            self._delete(key)
-
-    def clear(self):
-        with self.lock:
-            self.cache.clear()
-            self.current_size_bytes = 0
-            self.stats['size_mb'] = 0
-
     def cleanup_expired(self):
         with self.lock:
             current_time = time.time()
@@ -306,15 +279,6 @@ class SmartCache:
             for key in expired_keys:
                 self._delete(key)
 
-    def get_stats(self) -> Dict:
-        with self.lock:
-            stats = self.stats.copy()
-            stats['current_items'] = len(self.cache)
-            stats['hit_ratio'] = stats['hits'] / stats['total_requests'] if stats['total_requests'] > 0 else 0
-            return stats
-
-    def print_stats(self):
-        stats = self.get_stats()
 GLOBAL_CACHE = SmartCache(max_size_mb=1024 * 4)
 
 def cached(key_func: Optional[Callable]=None, ttl_seconds: Optional[int]=None):
@@ -498,10 +462,6 @@ def _resolve_genotype_backend(genotype_backend: GenotypeBackend, plink_prefix_ab
         return 'bed'
     if BED_READER_AVAILABLE and Path(bed_file).exists():
         return 'bed'
-    if not BED_READER_AVAILABLE:
-        logger.debug('bed-reader not installed; falling back to PLINK --recodeA backend')
-    else:
-        logger.debug(f'PLINK .bed file not found ({bed_file}); falling back to PLINK --recodeA backend')
     return 'raw'
 
 def _prepare_pheno_df_loaded(pheno_df: pd.DataFrame, tmp_base: Path) -> Tuple[pd.DataFrame, str]:
@@ -521,7 +481,6 @@ def _prepare_pheno_df_loaded(pheno_df: pd.DataFrame, tmp_base: Path) -> Tuple[pd
         pheno_df_loaded = pheno_df_loaded.set_index('sample')
         return pheno_df_loaded, temp_pheno_file
     except Exception as e:
-        logger.debug(f'Cannot use feather format, using pickle: {e}')
         temp_pheno_file = str(tmp_base / 'temp_pheno.pkl')
         pheno_df.to_pickle(temp_pheno_file)
         pheno_df_loaded = pd.read_pickle(temp_pheno_file)
@@ -602,10 +561,6 @@ def _write_train_matrix_to_csv(output_file_abs: str, sample_ids: List[str], colu
     n_snps = len(column_names)
     chunk_cols = TRAIN_MATRIX_COL_WRITE_CHUNK
     pheno_str = phenotype_values.astype(str)
-    n_cells = n_samples * max(n_snps, 1)
-    if n_cells > 1_000_000:
-        logger.debug(f'Writing training matrix: {n_samples:,} samples × {n_snps:,} SNPs (compression={compression or "none"})')
-    log_every = max(1, n_samples // 20) if n_samples > 50 else 0
     with fopen(output_file_abs, mode, encoding='utf-8') as f:
         f.write('sample')
         for start in range(0, n_snps, chunk_cols):
@@ -621,10 +576,7 @@ def _write_train_matrix_to_csv(output_file_abs: str, sample_ids: List[str], colu
             f.write('\t')
             f.write(pheno_str[i])
             f.write('\n')
-            if log_every and i > 0 and (i % log_every == 0 or i == n_samples - 1):
-                logger.debug(f'  Training matrix write progress: {i + 1:,}/{n_samples:,} samples ({100 * (i + 1) / n_samples:.0f}%)')
     _validate_train_matrix_file(output_file_abs, expected_n_samples=n_samples)
-    logger.debug(f'Training matrix file validated: {output_file_abs}')
 
 def _plink_to_training_data_from_bed(plink_prefix: str, pheno_df: pd.DataFrame, output_file: str, tmp_dir: Optional[Union[str, Path]]=None, cleanup_registry: Optional[List[str]]=None) -> TrainingMatrixOutput:
     plink_prefix_abs = Path(plink_prefix).absolute().as_posix()
@@ -643,7 +595,6 @@ def _plink_to_training_data_from_bed(plink_prefix: str, pheno_df: pd.DataFrame, 
     chr_list = auto_detect_chromosomes(plink_prefix_abs)
     if not chr_list:
         raise RuntimeError('No chromosomes detected')
-    logger.debug(f'Chromosome scan completed: {len(chr_list)} chromosome(s) detected')
     pheno_df_loaded, temp_pheno_file = _prepare_pheno_df_loaded(pheno_df, tmp_base)
     mmap_path = tmp_base / 'train_matrix.mmap'
     if cleanup_registry is not None:
@@ -658,7 +609,6 @@ def _plink_to_training_data_from_bed(plink_prefix: str, pheno_df: pd.DataFrame, 
         n_snps = len(column_names)
         if n_snps == 0:
             raise RuntimeError('No SNPs found in .bim for detected chromosomes')
-        logger.debug(f'Reading genotypes from PLINK bed (direct): {n_samples:,} samples × {n_snps:,} SNPs')
         genotype_mm = np.memmap(str(mmap_path), dtype=np.int8, mode='w+', shape=(n_samples, n_snps))
         col_offset = 0
         cpu = os.cpu_count() or 1
@@ -666,7 +616,6 @@ def _plink_to_training_data_from_bed(plink_prefix: str, pheno_df: pd.DataFrame, 
         with open_bed(bed_file, fam_location=fam_file, bim_location=bim_file, count_A1=True, num_threads=bed_threads) as bed:
             for chr_idx, (chr_num, snp_indices) in enumerate(bim_index.ordered_chr_blocks(chr_list), 1):
                 n_chr_snps = len(snp_indices)
-                logger.debug(f'  Chromosome {chr_num}: reading {n_chr_snps:,} SNP(s) ({chr_idx}/{len(chr_list)})')
                 geno = bed.read(np.s_[bed_row_idx, snp_indices], dtype='int8', order='C')
                 genotype_mm[:, col_offset:col_offset + n_chr_snps] = _genotypes_bed_to_int8(geno)
                 col_offset += n_chr_snps
@@ -680,7 +629,6 @@ def _plink_to_training_data_from_bed(plink_prefix: str, pheno_df: pd.DataFrame, 
             os.remove(mmap_path)
         except Exception:
             pass
-        logger.debug(f'Final training dataset (bed backend): {n_samples:,} samples, {n_snps:,} feature SNPs')
         return TrainingMatrixOutput(train_file=output_file_abs, sample_ids=sample_ids, n_snp_features=n_snps, includes_phenotype_column=True)
     finally:
         try:
@@ -701,22 +649,17 @@ def _make_cache_key_for_bim(bim_file: str, chr_num: Optional[str]=None) -> str:
 def get_snp_chr_pos_mapping_optimized(bim_file: str, chr_num: Optional[str]=None) -> dict:
     return BimIndex.from_bim(str(Path(bim_file).absolute())).raw_column_mapping(chr_num)
 
-def get_snp_chr_pos_mapping(bim_file: str, chr_num: Optional[str]=None) -> dict:
-    return BimIndex.from_bim(str(Path(bim_file).absolute())).raw_column_mapping(chr_num)
-
 def standardize_snp_column_names(df: pd.DataFrame, bim_file: str, pheno_columns: Optional[List[str]]=None) -> pd.DataFrame:
     if df.empty:
         return df
     bim_file = str(Path(bim_file).absolute())
     if not Path(bim_file).exists():
-        logger.debug(f'standardize_snp_column_names: .bim file not found, skip renaming: {bim_file}')
         return df
     pheno_cols: set = set(pheno_columns or [])
     pheno_cols.update({'phenotype'})
     try:
         snp_mapping = get_snp_chr_pos_mapping_optimized(bim_file, chr_num=None)
     except Exception as e:
-        logger.debug(f'standardize_snp_column_names: failed to build SNP mapping from .bim: {e}')
         return df
     rename_dict: Dict[str, str] = {}
     pattern_plink = re.compile('^([^:]+):([^_]+)_[^_]+$')
@@ -736,8 +679,6 @@ def standardize_snp_column_names(df: pd.DataFrame, bim_file: str, pheno_columns:
             rename_dict[col] = new_name
     if rename_dict:
         df = df.rename(columns=rename_dict)
-    else:
-        pass
     return df
 
 def get_plink_path() -> str:
@@ -810,8 +751,6 @@ def parse_raw_file_optimized_v2(raw_file: str, chr_snp_mapping: Dict[str, str], 
             for chunk in pd.read_csv(mmap_file_obj, sep='\\s+', header=None, names=original_columns, dtype=str, engine='c', chunksize=chunk_rows, usecols=usecols_list):
                 raw_chunks.append((chunk_count, chunk))
                 chunk_count += 1
-                if chunk_count % 10 == 0:
-                    pass
             if not raw_chunks:
                 raise ValueError('No data read from file')
             processed_chunks = []
@@ -819,14 +758,10 @@ def parse_raw_file_optimized_v2(raw_file: str, chr_snp_mapping: Dict[str, str], 
                 chunk_data_list = [(idx, chunk, batch_mapping, sample_col_idx, original_columns, dtype_obj) for idx, chunk in raw_chunks]
                 with ProcessPoolExecutor(max_workers=max_workers) as executor:
                     futures = {executor.submit(_process_chunk_parallel, chunk_data): chunk_data[0] for chunk_data in chunk_data_list}
-                    completed = 0
                     for future in as_completed(futures):
                         try:
                             chunk_idx, processed_chunk = future.result()
                             processed_chunks.append((chunk_idx, processed_chunk))
-                            completed += 1
-                            if completed % max(1, chunk_count // 10) == 0:
-                                pass
                         except Exception as e:
                             chunk_idx = futures[future]
                             logger.error(f'Failed to process chunk {chunk_idx}: {e}')
@@ -839,8 +774,6 @@ def parse_raw_file_optimized_v2(raw_file: str, chr_snp_mapping: Dict[str, str], 
                     chunk_data = (chunk_idx, chunk, batch_mapping, sample_col_idx, original_columns, dtype_obj)
                     _, processed_chunk = _process_chunk_parallel(chunk_data)
                     chunks.append(processed_chunk)
-                    if (chunk_idx + 1) % 10 == 0:
-                        pass
             if len(chunks) == 1:
                 result_df = chunks[0]
             else:
@@ -864,7 +797,6 @@ def parse_raw_file_optimized_v2(raw_file: str, chr_snp_mapping: Dict[str, str], 
             result_df = VectorizedProcessor.optimize_dataframe_memory(result_df)
             if use_cache:
                 GLOBAL_CACHE.set(cache_key, result_df, file_path=raw_file_abs, ttl_seconds=1800)
-            logger.debug(f'.raw file parsing completed: shape={result_df.shape[0]:,} samples × {result_df.shape[1]:,} features')
             return result_df
         finally:
             mmapped_file.close()
@@ -915,7 +847,6 @@ def process_single_chromosome_optimized(chr_num: str, plink_prefix_abs: str, phe
         chr_snp_mapping = get_snp_chr_pos_mapping_optimized(chr_bim_file, chr_num=chr_num)
         chr_geno_df = parse_raw_file_optimized_v2(chr_geno_file, chr_snp_mapping, dtype_obj=np.int8, use_cache=False)
         if chr_geno_df is None or chr_geno_df.empty:
-            logger.debug(f'Chromosome {chr_num}: No valid data read')
             return (chr_num, None)
         if 'sample' in pheno_df.columns and pheno_df.index.name != 'sample':
             pheno_df = pheno_df.set_index('sample')
@@ -948,9 +879,7 @@ def plink_to_training_data_optimized(plink_prefix: str, pheno_df: pd.DataFrame, 
     plink_prefix_abs = Path(plink_prefix).absolute().as_posix()
     backend = _resolve_genotype_backend(genotype_backend, plink_prefix_abs)
     if backend == 'bed':
-        logger.debug('Genotype conversion backend: bed (direct .bed read)')
         return _plink_to_training_data_from_bed(plink_prefix, pheno_df, output_file, tmp_dir=tmp_dir, cleanup_registry=cleanup_registry)
-    logger.debug('Genotype conversion backend: raw (PLINK --recodeA)')
     return _plink_to_training_data_via_recodeA(plink_prefix, pheno_df, output_file, tmp_dir=tmp_dir, cleanup_registry=cleanup_registry, use_cache=use_cache, parallel_chr_recode=parallel_chr_recode, chr_recode_workers=chr_recode_workers)
 
 def _plink_to_training_data_via_recodeA(plink_prefix: str, pheno_df: pd.DataFrame, output_file: str, tmp_dir: Optional[Union[str, Path]]=None, cleanup_registry: Optional[List[str]]=None, use_cache: bool=True, parallel_chr_recode: bool=False, chr_recode_workers: Optional[int]=None) -> TrainingMatrixOutput:
@@ -967,7 +896,6 @@ def _plink_to_training_data_via_recodeA(plink_prefix: str, pheno_df: pd.DataFram
     chr_list = auto_detect_chromosomes(plink_prefix_abs)
     if not chr_list:
         raise RuntimeError('No chromosomes detected')
-    logger.debug(f'Chromosome scan completed: {len(chr_list)} chromosome(s) detected')
     chr_result_files = []
     pheno_df_loaded, temp_pheno_file = _prepare_pheno_df_loaded(pheno_df, tmp_base)
     try:
@@ -986,10 +914,8 @@ def _plink_to_training_data_via_recodeA(plink_prefix: str, pheno_df: pd.DataFram
             optimized_params['threads'] = per_plink_threads
             if per_plink_mem:
                 optimized_params['memory_mb'] = per_plink_mem
-            logger.debug('Genotype recode started (parallel mode)')
             with ProcessPoolExecutor(max_workers=recode_workers) as executor:
                 futures = {executor.submit(_plink_recodeA_single_chr_worker, chr_num, plink_prefix_abs, PLINK_EXECUTABLE, optimized_params): chr_num for chr_num in chr_list}
-                completed = 0
                 for future in as_completed(futures):
                     chr_num = futures[future]
                     try:
@@ -997,7 +923,6 @@ def _plink_to_training_data_via_recodeA(plink_prefix: str, pheno_df: pd.DataFram
                     except Exception as e:
                         logger.error(f'Chromosome {chr_num}: recodeA worker crashed: {e}')
                         continue
-                    completed += 1
                     if rc != 0:
                         logger.error(f'Chromosome {chr_num_ret}: PLINK recodeA failed: {msg}')
                         continue
@@ -1009,9 +934,7 @@ def _plink_to_training_data_via_recodeA(plink_prefix: str, pheno_df: pd.DataFram
             ok = len(chr_to_recode_prefix)
             if ok == 0:
                 raise RuntimeError('All chromosome recodeA tasks failed; no .raw generated')
-            logger.debug(f'Genotype recode completed: {ok}/{len(chr_list)} chromosome(s) succeeded')
         else:
-            logger.debug('Genotype recode started (serial mode)')
             for chr_num in chr_list:
                 chr_recode_prefix = f'{plink_prefix_abs}_chr{chr_num}'
                 base_params = PLINKOptimizer.optimize_plink_parameters()
@@ -1025,7 +948,6 @@ def _plink_to_training_data_via_recodeA(plink_prefix: str, pheno_df: pd.DataFram
                     chr_to_recode_prefix[chr_num_ret] = recode_prefix
         for chr_idx, chr_num in enumerate(chr_list, 1):
             if chr_num not in chr_to_recode_prefix:
-                logger.debug(f'Chromosome {chr_num}: .raw not generated, skipping parsing')
                 continue
             _, chr_df = process_single_chromosome_optimized(chr_num, plink_prefix_abs, pheno_df_loaded, PLINK_EXECUTABLE, use_cache=use_cache, skip_recode=True, chr_recode_prefix=chr_to_recode_prefix[chr_num], cleanup_recode_files=True)
             if chr_df is not None and (not chr_df.empty):
@@ -1033,7 +955,6 @@ def _plink_to_training_data_via_recodeA(plink_prefix: str, pheno_df: pd.DataFram
                 try:
                     chr_df.reset_index().to_feather(chr_temp_file)
                 except Exception as e:
-                    logger.debug(f'Cannot use feather format for chromosome {chr_num}, using pickle: {e}')
                     chr_temp_file = str(tmp_base / f'chr_{chr_num}_temp.pkl')
                     chr_df.to_pickle(chr_temp_file)
                 chr_result_files.append((chr_num, chr_temp_file))
@@ -1041,11 +962,8 @@ def _plink_to_training_data_via_recodeA(plink_prefix: str, pheno_df: pd.DataFram
                     cleanup_registry.append(chr_temp_file)
                 del chr_df
                 gc.collect()
-            else:
-                logger.debug(f'Chromosome {chr_num} has no valid data, skipping')
         if not chr_result_files:
             raise RuntimeError('All chromosomes have no valid data')
-        logger.debug(f'Merging chromosome results: {len(chr_result_files)} chunk(s)')
         batch_size = min(5, len(chr_result_files))
         all_batches = []
         for i in range(0, len(chr_result_files), batch_size):
@@ -1058,8 +976,8 @@ def _plink_to_training_data_via_recodeA(plink_prefix: str, pheno_df: pd.DataFram
                     else:
                         chr_df = pd.read_pickle(chr_file)
                     batch_dfs.append(chr_df)
-                except Exception as e:
-                    logger.debug(f'Failed to load chromosome {chr_num} data: {e}')
+                except Exception:
+                    pass
             if batch_dfs:
                 if len(batch_dfs) == 1:
                     batch_merged = batch_dfs[0]
@@ -1089,7 +1007,7 @@ def _plink_to_training_data_via_recodeA(plink_prefix: str, pheno_df: pd.DataFram
             pheno_columns = list(pheno_df_loaded.columns) if 'pheno_df_loaded' in locals() else None
             final_train_df = standardize_snp_column_names(final_train_df, bim_file=bim_file, pheno_columns=pheno_columns)
         except Exception:
-            logger.debug('SNP name standardization skipped due to format conversion issue')
+            pass
         output_file_abs, compression = _normalize_output_train_path(output_file_abs, len(final_train_df) * len(final_train_df.columns))
         snp_cols = [c for c in final_train_df.columns if c != 'phenotype']
         sample_ids = final_train_df.index.astype(str).tolist()
@@ -1101,9 +1019,6 @@ def _plink_to_training_data_via_recodeA(plink_prefix: str, pheno_df: pd.DataFram
         sample_ids = final_train_df.index.astype(str).tolist()
         includes_pheno = 'phenotype' in final_train_df.columns
         n_snp_features = final_train_df.shape[1] - (1 if includes_pheno else 0)
-        logger.debug(f'Final training dataset (after GWAS/LD/combined strategy if applied): {len(sample_ids):,} samples, {n_snp_features:,} feature SNPs')
-        if use_cache:
-            GLOBAL_CACHE.print_stats()
         del final_train_df
         gc.collect()
         return TrainingMatrixOutput(train_file=output_file_abs, sample_ids=sample_ids, n_snp_features=n_snp_features, includes_phenotype_column=includes_pheno)
@@ -1190,7 +1105,6 @@ def resolve_sample_split(sample_ids: List[str], pheno_df: pd.DataFrame, task_typ
         if unassigned:
             logger.warning(f'{len(unassigned)} sample(s) not listed in train/test ID files and will be excluded from feature selection and training')
         mode = 'custom_sample_ids'
-        logger.debug(f'Custom train/test split from ID files: train={len(train_ids_final)}, test={len(test_ids_final)}')
         return {'mode': mode, 'train_ids': train_ids_final, 'test_ids': test_ids_final, 'n_train': len(train_ids_final), 'n_test': len(test_ids_final), 'n_unassigned': len(unassigned), 'train_ratio': None, 'test_ratio': None, 'random_state': None, 'train_ids_file': str(Path(train_ids_file).absolute()), 'test_ids_file': str(Path(test_ids_file).absolute())}
     if len(sample_ids_str) < 5:
         raise ValueError(f'Need at least 5 samples for train/test split, got {len(sample_ids_str)}')
@@ -1205,20 +1119,17 @@ def resolve_sample_split(sample_ids: List[str], pheno_df: pd.DataFrame, task_typ
                 raise ValueError('Missing phenotype for stratification')
             stratify = y_ordered.values
         except Exception as e:
-            logger.debug(f'Stratified split unavailable ({e}); using non-stratified reproducible split')
             stratify = None
     try:
         train_ids_arr, test_ids_arr = train_test_split(ordered_ids, test_size=test_ratio, random_state=random_state, stratify=stratify)
     except ValueError as e:
         if stratify is not None:
-            logger.debug(f'Stratified train/test split failed ({e}); falling back to random split')
             train_ids_arr, test_ids_arr = train_test_split(ordered_ids, test_size=test_ratio, random_state=random_state, stratify=None)
         else:
             raise
     train_ids_final = sorted((str(x) for x in train_ids_arr), key=str)
     test_ids_final = sorted((str(x) for x in test_ids_arr), key=str)
     train_ratio = 1.0 - float(test_ratio)
-    logger.debug(f'Reproducible random hold-out split (sorted IDs, random_state={random_state}): train={len(train_ids_final)}, test={len(test_ids_final)} ({train_ratio:.0%}/{float(test_ratio):.0%})')
     return {'mode': 'random_holdout', 'train_ids': train_ids_final, 'test_ids': test_ids_final, 'n_train': len(train_ids_final), 'n_test': len(test_ids_final), 'n_unassigned': 0, 'train_ratio': train_ratio, 'test_ratio': float(test_ratio), 'random_state': int(random_state), 'train_ids_file': None, 'test_ids_file': None}
 
 def run_preprocess(genotype_path: str, genotype_format: GenotypeFormat, phenotype_file: str, output_file: str, filter_snps: bool=True, feature_selection_mode: int=1, gwas_pvalue: float=0.01, ld_config: str='50,5,0.2', train_ids_file: Optional[str]=None, test_ids_file: Optional[str]=None, random_state: int=DEFAULT_SPLIT_RANDOM_STATE) -> int:
@@ -1243,14 +1154,11 @@ def run_preprocess(genotype_path: str, genotype_format: GenotypeFormat, phenotyp
                 gwas_prefix_pattern = stage_output_dir_path / 'preprocess_gwas*'
                 for gwas_file in stage_output_dir_path.glob('preprocess_gwas*'):
                     try:
-                        # Never delete retained GWAS assoc exports (e.g. {prefix}_gwas.assoc.txt)
-                        if gwas_file.is_file() and gwas_file.name.endswith('_gwas.assoc.txt'):
-                            continue
                         if gwas_file.is_file():
                             gwas_file.unlink()
                     except Exception:
                         pass
-        except Exception as e:
+        except Exception:
             pass
         try:
             import shutil
@@ -1263,7 +1171,7 @@ def run_preprocess(genotype_path: str, genotype_format: GenotypeFormat, phenotyp
                 tmp_root_dir = tmp_dir_path.parent
                 if tmp_root_dir.exists() and tmp_root_dir.name == 'tmp':
                     shutil.rmtree(tmp_root_dir, ignore_errors=True)
-        except Exception as e:
+        except Exception:
             pass
     try:
         if not Path(phenotype_file).exists():
@@ -1301,44 +1209,33 @@ def run_preprocess(genotype_path: str, genotype_format: GenotypeFormat, phenotyp
         task_type = determine_phenotype_type(pheno_df, stage_output_dir)
         pheno_df = convert_phenotype_dtype(pheno_df, task_type)
         if task_type == 'regression':
-            original_count = len(pheno_df)
             pheno_df = pheno_df[pheno_df['phenotype'] != 0].reset_index(drop=True)
-            removed_count = original_count - len(pheno_df)
-            if removed_count > 0:
-                logger.debug(f'Regression task: removed {removed_count} samples with phenotype value = 0')
         fam_file = f'{plink_prefix}.fam'
         if Path(fam_file).exists():
             try:
                 fam_df = pd.read_csv(fam_file, sep='\\s+', header=None, dtype=str, engine='python')
                 if fam_df.shape[1] >= 2:
                     geno_samples = set(fam_df.iloc[:, 1].astype(str))
-                    original_pheno_n = len(pheno_df)
                     pheno_df = pheno_df[pheno_df['sample'].isin(geno_samples)].reset_index(drop=True)
                     if pheno_df.empty:
                         raise ValueError('No intersection between phenotype samples and genotype samples')
-                    logger.debug(f'Sample matching completed: {len(pheno_df):,} samples remaining after matching')
-            except Exception as e:
-                logger.debug(f'Sample matching failed: {e}')
+            except ValueError:
+                raise
+            except Exception:
+                pass
         if task_type == 'regression':
             plot_regression_phenotype_distribution(pheno_df, stage_output_dir)
         sample_filtered_prefix = str(tmp_dir / 'sample_filtered_plink')
         temp_prefixes.append(sample_filtered_prefix)
         sample_filtered_plink = filter_samples_by_phenotype(plink_prefix, pheno_df, sample_filtered_prefix)
-        logger.debug(f'SNP quality filter setting: filter_snps={filter_snps}')
         if filter_snps:
             filtered_plink_prefix = str(tmp_dir / 'filtered_plink')
             temp_prefixes.append(filtered_plink_prefix)
             final_plink_prefix = filter_snps_by_quality(sample_filtered_plink, filtered_plink_prefix, maf=0.05, geno=0.2)
             gwas_genotype_prefix = final_plink_prefix
-            logger.debug('SNP quality filtering completed')
         else:
             final_plink_prefix = sample_filtered_plink
             gwas_genotype_prefix = sample_filtered_plink
-            logger.debug('SNP filtering skipped')
-        post_qc_snp_count = _count_bim_snps(final_plink_prefix)
-        if post_qc_snp_count > 0:
-            logger.debug(f'SNP count after sample/QC steps: {post_qc_snp_count:,}')
-            _warn_large_snp_count(post_qc_snp_count, feature_selection_mode, filter_snps)
         sample_split = resolve_sample_split(sample_ids=pheno_df['sample'].astype(str).tolist(), pheno_df=pheno_df, task_type=task_type, train_ids_file=train_ids_file, test_ids_file=test_ids_file, test_ratio=TRAIN_TEST_HOLDOUT_RATIO, random_state=random_state)
         train_id_set = set(sample_split['train_ids'])
         pheno_df_train = pheno_df[pheno_df['sample'].astype(str).isin(train_id_set)].reset_index(drop=True)
@@ -1348,22 +1245,15 @@ def run_preprocess(genotype_path: str, genotype_format: GenotypeFormat, phenotyp
         test_ids_out = write_sample_id_list(sample_split['test_ids'], stage_output_dir / f'{output_prefix}_test_ids.txt')
         sample_split['train_ids_output'] = train_ids_out
         sample_split['test_ids_output'] = test_ids_out
-        logger.debug(f'Train/test split fixed for feature selection and training: train={sample_split["n_train"]}, test={sample_split["n_test"]} (mode={sample_split["mode"]})')
-        logger.debug('Feature selection (GWAS/LD) will use training samples only; test samples are held out for model evaluation')
         train_keep_file = write_plink_keep_file(sample_split['train_ids'], tmp_dir / 'train_samples_keep.txt')
         cleanup_registry.append(train_keep_file)
         if feature_selection_mode not in [1, 2, 3, 4]:
             raise ValueError(f'feature_selection_mode must be 1, 2, 3, or 4, got: {feature_selection_mode}')
-        if feature_selection_mode != 1:
-            logger.debug(f'Feature selection started (mode={feature_selection_mode})')
-        gwas_assoc_file: Optional[str] = None
         if feature_selection_mode in [2, 3, 4]:
             significant_snps: Optional[List[str]] = None
             if feature_selection_mode in [2, 4]:
                 try:
-                    logger.debug(f'GWAS analysis started (training samples only: {len(pheno_df_train):,})')
-                    gwas_assoc_keep = stage_output_dir / f'{output_prefix}_gwas.assoc.txt'
-                    significant_snps, gwas_assoc_file = run_gwas_preprocess(plink_prefix=final_plink_prefix, pheno_df=pheno_df_train, output_dir=stage_output_dir, tmp_dir=tmp_dir, pvalue_threshold=gwas_pvalue, perform_plink_qc=filter_snps, assoc_keep_path=gwas_assoc_keep)
+                    significant_snps = run_gwas_preprocess(plink_prefix=final_plink_prefix, pheno_df=pheno_df_train, output_dir=stage_output_dir, tmp_dir=tmp_dir, pvalue_threshold=gwas_pvalue, perform_plink_qc=filter_snps)
                     if not significant_snps:
                         logger.warning('No significant SNPs found by GWAS; feature selection will be skipped.')
                         feature_selection_mode = 1
@@ -1377,7 +1267,6 @@ def run_preprocess(genotype_path: str, genotype_format: GenotypeFormat, phenotyp
                     logger.warning('GWAS failed or no significant SNPs; skip LD filtering.')
                     feature_selection_mode = 1
                 else:
-                    logger.debug(f'LD analysis started (training samples only: {len(sample_split["train_ids"]):,})')
                     ld_output_prefix = str(Path(tmp_dir / 'ld_filtered_plink').absolute())
                     extract_snps_file = None
                     if feature_selection_mode == 4 and significant_snps:
@@ -1385,7 +1274,6 @@ def run_preprocess(genotype_path: str, genotype_format: GenotypeFormat, phenotyp
                         with open(extract_snps_file, 'w') as f:
                             for snp in significant_snps:
                                 f.write(f'{snp}\n')
-                        logger.debug(f'LD analysis scope: {len(significant_snps):,} SNP(s) from GWAS')
                     try:
                         final_plink_prefix_abs = str(Path(final_plink_prefix).absolute())
                         ld_ret = plink_ld.run_ld_filtering(input_path=final_plink_prefix_abs, output_prefix=ld_output_prefix, ld_window_kb=ld_window_kb, ld_window=ld_window, ld_window_r2=ld_window_r2, keep_intermediate=False, keep_samples_file=train_keep_file, extract_snps_file=extract_snps_file)
@@ -1404,7 +1292,6 @@ def run_preprocess(genotype_path: str, genotype_format: GenotypeFormat, phenotyp
                             except Exception:
                                 pass
             elif feature_selection_mode == 2 and significant_snps:
-                logger.debug('Applying GWAS-selected SNP extraction')
                 gwas_only_prefix = str(tmp_dir / 'gwas_filtered_plink')
                 try:
                     final_plink_prefix = extract_snps_with_plink(plink_prefix=final_plink_prefix, snp_list=significant_snps, output_prefix=gwas_only_prefix)
@@ -1412,13 +1299,12 @@ def run_preprocess(genotype_path: str, genotype_format: GenotypeFormat, phenotyp
                 except Exception as e:
                     logger.error(f'GWAS SNP extraction failed, fallback to no feature selection: {e}')
                     feature_selection_mode = 1
-        # Fixed defaults: auto backend (bed when available), in-process cache on, serial chr recode
+
         matrix_output = plink_to_training_data_optimized(final_plink_prefix, pheno_df, str(output_file_path), tmp_dir=tmp_dir, cleanup_registry=cleanup_registry, use_cache=True, parallel_chr_recode=False, chr_recode_workers=None, genotype_backend='auto')
         actual_train_file = matrix_output.train_file
         includes_phenotype_column = matrix_output.includes_phenotype_column
         n_snp_features = matrix_output.n_snp_features
-        _warn_large_snp_count(n_snp_features, feature_selection_mode, filter_snps)
-        generate_metadata(output_prefix=str(stage_output_dir / output_prefix), plink_prefix=gwas_genotype_prefix, train_file=actual_train_file, valid_samples=matrix_output.sample_ids, genotype_format=genotype_format, task_type=task_type, preprocess_tmp_dir=tmp_dir, filter_snps=filter_snps, feature_selection_mode=feature_selection_mode, gwas_pvalue=gwas_pvalue, ld_window_kb=ld_window_kb, ld_window=ld_window, ld_window_r2=ld_window_r2, n_feature_columns=n_snp_features, includes_phenotype_column=includes_phenotype_column, sample_split=sample_split, gwas_assoc_file=gwas_assoc_file)
+        generate_metadata(output_prefix=str(stage_output_dir / output_prefix), plink_prefix=gwas_genotype_prefix, train_file=actual_train_file, valid_samples=matrix_output.sample_ids, genotype_format=genotype_format, task_type=task_type, preprocess_tmp_dir=tmp_dir, filter_snps=filter_snps, feature_selection_mode=feature_selection_mode, gwas_pvalue=gwas_pvalue, ld_window_kb=ld_window_kb, ld_window=ld_window, ld_window_r2=ld_window_r2, n_feature_columns=n_snp_features, includes_phenotype_column=includes_phenotype_column, sample_split=sample_split)
         logger.info(f'Preprocess completed: {len(matrix_output.sample_ids):,} samples × {n_snp_features:,} SNPs (mode={feature_selection_mode}, split={sample_split["mode"]})')
         gc.collect()
         cleanup_current_run()
@@ -1522,7 +1408,6 @@ def _copy_plink_binary_to_prefix(genotype_path: str, output_prefix: str) -> str:
         if not src_file.exists():
             raise FileNotFoundError(f'Missing PLINK binary file: {src_file}')
         shutil.copy2(src_file, dst_file)
-    logger.debug(f'Copied PLINK binary genotype to temporary prefix: {dst_prefix}')
     return dst_prefix
 
 def genotype_to_plink(genotype_path: str, output_prefix: str, fmt: Optional[Literal['vcf', 'plink_binary', 'plink_text']]=None) -> str:
@@ -1676,7 +1561,6 @@ def load_phenotype(pheno_path: str) -> pd.DataFrame:
         original_count = len(pheno_df)
         pheno_df = pheno_df[~abnormal_mask].reset_index(drop=True)
         remaining_count = len(pheno_df)
-        logger.debug(f'Phenotype abnormal values removed: count={abnormal_count}, original={original_count}, remaining={remaining_count}')
         if pheno_df.empty:
             raise ValueError('After removing abnormal values, phenotype file has no valid data, cannot continue processing')
     pheno_df = pheno_df.drop_duplicates(subset='sample', keep='last')
@@ -1691,13 +1575,12 @@ def load_phenotype(pheno_path: str) -> pd.DataFrame:
         nan_samples = pheno_df.loc[nan_mask, 'sample'].tolist()[:10]
         pheno_df = pheno_df[~nan_mask].reset_index(drop=True)
         remaining_count_after_convert = len(pheno_df)
-        logger.debug(f'Phenotype non-numeric values removed: count={nan_count}, before={original_count_before_convert}, remaining={remaining_count_after_convert}')
         if pheno_df.empty:
             raise ValueError('After removing non-convertible samples, phenotype file has no valid data, cannot continue processing')
     gc.collect()
     return pheno_df
 
-# Shared phenotype-distribution style (aligned with visualization.py palettes)
+
 _PHENOTYPE_PLOT = {
     'text': '#2C333A',
     'muted': '#8A9199',
@@ -1737,7 +1620,6 @@ def _setup_phenotype_matplotlib():
             pass
         return plt
     except ImportError:
-        logger.debug('matplotlib is not installed; phenotype visualization will be skipped')
         return None
 
 def _style_phenotype_axes(ax, *, spines: bool=True) -> None:
@@ -1819,7 +1701,6 @@ def plot_classification_phenotype_distribution(phenotype_values: np.ndarray, out
     ax.set_aspect('equal')
     plot_file = output_dir / 'phenotype_distribution_pie.png'
     _save_phenotype_figure(fig, plot_file)
-    logger.debug(f'Classification phenotype distribution plot saved: {plot_file}')
 
 def determine_phenotype_type(pheno_df: pd.DataFrame, output_dir: Path) -> Literal['regression', 'classification']:
     phenotype_values = pheno_df['phenotype'].values
@@ -1883,7 +1764,6 @@ def plot_regression_phenotype_distribution(pheno_df: pd.DataFrame, output_dir: P
     _style_phenotype_axes(ax)
     plot_file = output_dir / 'phenotype_distribution_histogram.png'
     _save_phenotype_figure(fig, plot_file)
-    logger.debug(f'Regression phenotype distribution plot saved: {plot_file}')
 
 def filter_samples_by_phenotype(plink_prefix: str, pheno_df: pd.DataFrame, output_prefix: str) -> str:
     output_prefix_abs = Path(output_prefix).absolute().as_posix()
@@ -1910,11 +1790,6 @@ def filter_snps_by_quality(plink_prefix: str, output_prefix: str, maf: float=0.0
             error_msg = result.stderr or result.stdout or 'Unknown error'
             logger.error(f'SNP quality filtering failed: {error_msg[:500]}')
             raise RuntimeError(f'SNP quality filtering failed: {error_msg[:500]}')
-        bim_file = f'{output_prefix_abs}.bim'
-        if Path(bim_file).exists():
-            snp_count = sum((1 for _ in open(bim_file)))
-        else:
-            logger.debug('Cannot count filtered SNPs')
         if 'temp_plink' in plink_prefix:
             delete_temp_files(plink_prefix, ['.bed', '.bim', '.fam', '.log', '.nosex'])
         return output_prefix_abs
@@ -1930,7 +1805,7 @@ def generate_gwas_phenotype_file_preprocess(pheno_df: pd.DataFrame, output_file:
             f.write(f'{sample_id}\t{pheno}\n')
     return output_path.as_posix()
 
-def run_gwas_preprocess(plink_prefix: str, pheno_df: pd.DataFrame, output_dir: Union[str, Path], tmp_dir: Union[str, Path], pvalue_threshold: float=0.01, perform_plink_qc: bool=True, assoc_keep_path: Optional[Union[str, Path]]=None) -> Tuple[List[str], Optional[str]]:
+def run_gwas_preprocess(plink_prefix: str, pheno_df: pd.DataFrame, output_dir: Union[str, Path], tmp_dir: Union[str, Path], pvalue_threshold: float=0.01, perform_plink_qc: bool=True) -> List[str]:
     output_dir_path = Path(output_dir).absolute()
     tmp_dir_path = Path(tmp_dir).absolute()
     gwas_work_dir = tmp_dir_path / 'gwas'
@@ -1950,7 +1825,6 @@ def run_gwas_preprocess(plink_prefix: str, pheno_df: pd.DataFrame, output_dir: U
     original_cwd = os.getcwd()
     try:
         os.chdir(output_dir_path)
-        logger.debug('GWAS workflow running')
         gemma_gwas.run_complete_gwas_pipeline(input_plink_prefix=plink_prefix_abs, phenotype_file=pheno_file_abs, output_prefix=gwas_output_prefix_abs, perform_plink_qc=perform_plink_qc)
     except Exception as e:
         raise RuntimeError(f'GEMMA GWAS pipeline failed: {str(e)}') from e
@@ -1959,16 +1833,6 @@ def run_gwas_preprocess(plink_prefix: str, pheno_df: pd.DataFrame, output_dir: U
     if not gwas_result_file.exists():
         logger.error('GWAS result file missing')
         raise FileNotFoundError(f'GWAS result file missing: {gwas_result_file.absolute()}')
-    kept_assoc_path: Optional[str] = None
-    if assoc_keep_path is not None:
-        keep_path = Path(assoc_keep_path).absolute()
-        try:
-            keep_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(gwas_result_file, keep_path)
-            kept_assoc_path = keep_path.as_posix()
-            logger.info(f'GWAS result retained: {kept_assoc_path}')
-        except Exception as e:
-            logger.warning(f'Failed to retain GWAS result file: {e}')
     try:
         gwas_df = pd.read_csv(gwas_result_file, sep='\t')
     except Exception as e:
@@ -1987,11 +1851,8 @@ def run_gwas_preprocess(plink_prefix: str, pheno_df: pd.DataFrame, output_dir: U
             break
     if not snp_col:
         snp_col = gwas_df.columns[0]
-        logger.debug(f"'rs'/'SNP' column not found; using the first column '{snp_col}' as SNP ID")
     significant_snps = gwas_df[gwas_df[pvalue_col] < pvalue_threshold][snp_col].dropna().astype(str).unique().tolist()
-    logger.debug(f'GWAS result summary: {len(significant_snps):,} significant SNP(s)')
     try:
-        logger.debug('GWAS temporary files cleanup started')
         gwas_prefix_base = str(Path(gwas_output_prefix_abs))
         delete_temp_files(f'{gwas_prefix_base}_clean_geno', ['.bed', '.bim', '.fam', '.log', '.nosex'])
         delete_temp_files(f'{gwas_prefix_base}_clean_geno_filtered', ['.bed', '.bim', '.fam', '.log', '.nosex'])
@@ -2006,11 +1867,10 @@ def run_gwas_preprocess(plink_prefix: str, pheno_df: pd.DataFrame, output_dir: U
             except Exception:
                 pass
         gwas_prefix_path = Path(gwas_output_prefix_abs)
-        keep_path_resolved = Path(kept_assoc_path).resolve() if kept_assoc_path else None
         if gwas_prefix_path.parent.exists():
             for fp in gwas_prefix_path.parent.glob(f'{gwas_prefix_path.name}*'):
                 try:
-                    if fp.is_file() and (keep_path_resolved is None or fp.resolve() != keep_path_resolved):
+                    if fp.is_file():
                         fp.unlink()
                 except Exception:
                     pass
@@ -2019,10 +1879,9 @@ def run_gwas_preprocess(plink_prefix: str, pheno_df: pd.DataFrame, output_dir: U
                 shutil.rmtree(gwas_work_dir, ignore_errors=True)
         except Exception:
             pass
-        logger.debug('GWAS temporary files cleanup completed')
-    except Exception as e:
-        logger.debug('GWAS temporary files cleanup partially failed (ignored)')
-    return significant_snps, kept_assoc_path
+    except Exception:
+        pass
+    return significant_snps
 
 def chr_pos_match_variants(key: str) -> set:
     key = str(key).strip()
@@ -2060,9 +1919,7 @@ def extract_snps_by_chr_pos_with_plink(plink_prefix: str, chr_pos_keys: List[str
         raise ValueError('chr_pos_keys list is empty')
     snp_ids = resolve_bim_snp_ids_for_chr_pos_keys(plink_prefix, chr_pos_keys)
     if not snp_ids:
-        logger.debug(f'No PLINK SNP IDs matched {len(chr_pos_keys):,} training chr_pos key(s); skipping --extract')
         return Path(plink_prefix).absolute().as_posix()
-    logger.debug(f'PLINK --extract: {len(snp_ids):,} SNP ID(s) resolved from {len(chr_pos_keys):,} training chr_pos key(s)')
     return extract_snps_with_plink(plink_prefix, snp_ids, output_prefix)
 
 def extract_snps_with_plink(plink_prefix: str, snp_list: List[str], output_prefix: str) -> str:
@@ -2087,7 +1944,6 @@ def extract_snps_with_plink(plink_prefix: str, snp_list: List[str], output_prefi
         for fp in [bed_file, bim_file, fam_file]:
             if not Path(fp).exists():
                 raise FileNotFoundError(f'Expected PLINK file not generated: {fp}')
-        logger.debug(f'PLINK extract completed: {len(snp_list):,} SNPs retained')
         return output_prefix_abs
     finally:
         try:
@@ -2095,9 +1951,9 @@ def extract_snps_with_plink(plink_prefix: str, snp_list: List[str], output_prefi
         except Exception:
             pass
 
-def generate_metadata(output_prefix: str, plink_prefix: str, train_file: str, valid_samples: List[str], genotype_format: str, task_type: Optional[Literal['regression', 'classification']]=None, preprocess_tmp_dir: Optional[Union[str, Path]]=None, filter_snps: bool=True, feature_selection_mode: int=1, gwas_pvalue: Optional[float]=None, ld_window_kb: Optional[int]=None, ld_window: Optional[int]=None, ld_window_r2: Optional[float]=None, n_feature_columns: Optional[int]=None, includes_phenotype_column: bool=True, sample_split: Optional[Dict[str, Any]]=None, gwas_assoc_file: Optional[str]=None) -> None:
+def generate_metadata(output_prefix: str, plink_prefix: str, train_file: str, valid_samples: List[str], genotype_format: str, task_type: Optional[Literal['regression', 'classification']]=None, preprocess_tmp_dir: Optional[Union[str, Path]]=None, filter_snps: bool=True, feature_selection_mode: int=1, gwas_pvalue: Optional[float]=None, ld_window_kb: Optional[int]=None, ld_window: Optional[int]=None, ld_window_r2: Optional[float]=None, n_feature_columns: Optional[int]=None, includes_phenotype_column: bool=True, sample_split: Optional[Dict[str, Any]]=None) -> None:
     chr_list = auto_detect_chromosomes(plink_prefix)
-    metadata = {'preprocess_time': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'), 'genotype_format': genotype_format, 'phenotype_format': 'Two-column, no-header format (sample ID + phenotype value)', 'output_train_file': train_file, 'valid_samples': valid_samples, 'sample_count': len(valid_samples), 'chromosome_list': chr_list, 'chromosome_count': len(chr_list), 'parallel_processes': 1, 'processing_mode': 'single_thread_sequential', 'plink_memory_limit_MB': 'unlimited (no --memory passed to PLINK)', 'snp_dtype': 'int8', 'snp_naming_rule': "chromosome_physicalPosition (e.g., '1_123456')", 'plink_executable': PLINK_EXECUTABLE, 'plink_recode_param': '--recodeA', 'gwas_genotype_prefix': None, 'preprocess_tmp_dir': str(Path(preprocess_tmp_dir).absolute()) if preprocess_tmp_dir else None, 'snp_filtering': {'filtered': filter_snps, 'maf_threshold': 0.05 if filter_snps else None, 'geno_threshold': 0.2 if filter_snps else None}, 'feature_selection': {'mode': feature_selection_mode, 'description': {1: 'no GWAS/LD feature selection', 2: 'GWAS-based SNP selection', 3: 'LD-based SNP pruning', 4: 'GWAS + LD combined filtering (GWAS first, then LD)'}.get(feature_selection_mode, 'unknown'), 'gwas_pvalue_threshold': gwas_pvalue if feature_selection_mode in [2, 4] else None, 'gwas_assoc_file': gwas_assoc_file, 'ld_window_kb': ld_window_kb if feature_selection_mode in [3, 4] else None, 'ld_window': ld_window if feature_selection_mode in [3, 4] else None, 'ld_window_r2': ld_window_r2 if feature_selection_mode in [3, 4] else None, 'samples_used': 'training_split_only' if feature_selection_mode in [2, 3, 4] else None}}
+    metadata = {'preprocess_time': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'), 'genotype_format': genotype_format, 'phenotype_format': 'Two-column, no-header format (sample ID + phenotype value)', 'output_train_file': train_file, 'valid_samples': valid_samples, 'sample_count': len(valid_samples), 'chromosome_list': chr_list, 'chromosome_count': len(chr_list), 'parallel_processes': 1, 'processing_mode': 'single_thread_sequential', 'plink_memory_limit_MB': 'unlimited (no --memory passed to PLINK)', 'snp_dtype': 'int8', 'snp_naming_rule': "chromosome_physicalPosition (e.g., '1_123456')", 'plink_executable': PLINK_EXECUTABLE, 'plink_recode_param': '--recodeA', 'gwas_genotype_prefix': None, 'preprocess_tmp_dir': str(Path(preprocess_tmp_dir).absolute()) if preprocess_tmp_dir else None, 'snp_filtering': {'filtered': filter_snps, 'maf_threshold': 0.05 if filter_snps else None, 'geno_threshold': 0.2 if filter_snps else None}, 'feature_selection': {'mode': feature_selection_mode, 'description': {1: 'no GWAS/LD feature selection', 2: 'GWAS-based SNP selection', 3: 'LD-based SNP pruning', 4: 'GWAS + LD combined filtering (GWAS first, then LD)'}.get(feature_selection_mode, 'unknown'), 'gwas_pvalue_threshold': gwas_pvalue if feature_selection_mode in [2, 4] else None, 'ld_window_kb': ld_window_kb if feature_selection_mode in [3, 4] else None, 'ld_window': ld_window if feature_selection_mode in [3, 4] else None, 'ld_window_r2': ld_window_r2 if feature_selection_mode in [3, 4] else None, 'samples_used': 'training_split_only' if feature_selection_mode in [2, 3, 4] else None}}
     if task_type:
         metadata['task_type'] = task_type
     if sample_split:
@@ -2106,7 +1962,6 @@ def generate_metadata(output_prefix: str, plink_prefix: str, train_file: str, va
     metadata_file = f'{output_prefix}_metadata.json'
     with open(metadata_file, 'w', encoding='utf-8') as f:
         json.dump(metadata, f, indent=2, ensure_ascii=False)
-    logger.debug('Metadata file generated successfully')
 
 def validate_plink_files(genotype_path: str, fmt: str) -> None:
     required = {'plink_binary': ['.bed', '.bim', '.fam'], 'plink_text': ['.map', '.ped']}.get(fmt, [])
@@ -2132,7 +1987,6 @@ def main(argv: Optional[List[str]]=None) -> int:
     args = parser.parse_args(argv)
     try:
         genotype_path, genotype_format = resolve_genotype_input(args)
-        logger.debug('Starting preprocessing')
         return run_preprocess(genotype_path=genotype_path, genotype_format=genotype_format, phenotype_file=args.phenotype, output_file=args.output, filter_snps=not args.no_filter_snps, feature_selection_mode=args.feature_selection_mode, gwas_pvalue=args.gwas_pvalue, ld_config=args.ld_config, train_ids_file=getattr(args, 'train_ids_file', None), test_ids_file=getattr(args, 'test_ids_file', None), random_state=getattr(args, 'random_state', DEFAULT_SPLIT_RANDOM_STATE))
     except Exception as e:
         logger.error(f'Preprocessing failed: {e}')

@@ -67,7 +67,7 @@ Then go to [Quick Start](#quick-start). Source repository: [github.com/ZBaoyi/G2
 
 - **train** / **train-all** need preprocess `*_metadata.json` (`-j`) — not a raw matrix path alone.
 - GWAS/LD runs in **preprocess only**; training does not re-filter SNPs.
-- Wait for preprocess to finish (`Metadata file generated successfully`) before training. In batch jobs, use `set -e`.
+- Wait for preprocess to finish (look for `Preprocess completed: …` / `Operation completed successfully`) before training. In batch jobs, use `set -e`.
 - **Large SNP counts:** use preprocess `-f 2`–`4`; for **train-all**, prefer `--parallel_models 1` unless job memory is very large (each parallel worker copies the full matrix).
 
 ---
@@ -164,6 +164,7 @@ Turns VCF / PLINK genotypes plus a two-column phenotype file into a **sample × 
 |------|---------|
 | `{prefix}_train_data.txt` | Tab-delimited matrix (`sample` index, SNP columns, `phenotype`); may be `.txt.gz` if large |
 | `{prefix}_metadata.json` | Paths, sample list, SNP count, task type — **required for train** |
+| `{prefix}_train_ids.txt` / `{prefix}_test_ids.txt` | Fixed train/test sample IDs |
 | `phenotype_distribution_pie.png` | Classification: class proportions |
 | `phenotype_distribution_histogram.png` | Regression: trait distribution (after sample matching) |
 
@@ -254,7 +255,7 @@ G2PInsight train -j results/preprocess/results_metadata.json -m LightGBM -o resu
 | `--shap_dependence_top` | `50` | Cap SNPs in dependence file when features > 1000 (`0` = all) |
 | `--random_state` | `42` | Seed for CV / model fitting (not for train/test split; that comes from preprocess) |
 
-Before loading data, **train** checks metadata and logs memory guidance.
+Before loading data, **train** validates preprocess metadata (e.g. rejects a truncated gzip training matrix).
 
 ---
 
@@ -390,6 +391,8 @@ results/
 ├── preprocess/
 │   ├── results_train_data.txt[.gz]
 │   ├── results_metadata.json       ← train -j
+│   ├── results_train_ids.txt
+│   ├── results_test_ids.txt
 │   └── phenotype_distribution_*.png
 ├── train/
 │   ├── LightGBM/                   ← or only BestModel/ after train-all
@@ -461,9 +464,9 @@ Default is `--shap_dependence_top 50`. Use `0` only if you need all SNPs (can be
 
 Use training-generated `*_shap_values.txt` with `feature`, `importance_abs`, `effect`.
 
-### Which preprocess backend was used?
+### Which preprocess genotype backend is used?
 
-Log lines: `Genotype conversion backend: bed` (fast) or `raw` (PLINK `--recodeA`).
+Preprocess uses **`auto`**: `bed-reader` when the package is installed and a `.bed` is available (default dependency), otherwise PLINK `--recodeA`. There is no separate backend log line.
 
 ---
 

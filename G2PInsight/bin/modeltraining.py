@@ -3,7 +3,6 @@ import os
 import sys
 import json
 import logging
-import subprocess
 import time
 import shutil
 import gc
@@ -19,7 +18,7 @@ warnings.filterwarnings('ignore')
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import KFold, StratifiedKFold, RandomizedSearchCV, PredefinedSplit, train_test_split
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, mean_squared_error, mean_absolute_error, r2_score
+from sklearn.metrics import accuracy_score, recall_score, f1_score, roc_auc_score, mean_squared_error, mean_absolute_error, r2_score
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.svm import SVC, SVR
 from sklearn.linear_model import LogisticRegression
@@ -106,7 +105,7 @@ class PeakMemoryTracker:
         return rss
 
     def _can_poll(self) -> bool:
-        # Poll whenever we can read current RSS (not lifetime-only ru_maxrss).
+
         if PSUTIL_AVAILABLE:
             return True
         return self._proc_self_rss_bytes() is not None
@@ -114,7 +113,7 @@ class PeakMemoryTracker:
     def _update_peak(self) -> None:
         rss = self._sample_rss_bytes()
         self._peak_bytes = max(self._peak_bytes, rss)
-        # Only credit ru_maxrss when it advances past the value at start().
+
         ru_now = self._ru_maxrss_bytes()
         if ru_now > self._ru_baseline:
             self._peak_bytes = max(self._peak_bytes, ru_now)
@@ -144,7 +143,7 @@ class PeakMemoryTracker:
 PUB_QUALITY_MODE: bool = True
 CLEANUP_TEMP_FILES = True
 DEFAULT_N_JOBS = 1
-TRAIN_ALL_MAX_AUTO_WORKERS = 4  # upper cap when user explicitly sets --parallel_models > 1
+TRAIN_ALL_MAX_AUTO_WORKERS = 4
 _MAIN_PROCESS_PID = os.getpid()
 
 def _is_main_process() -> bool:
@@ -180,9 +179,6 @@ MODEL_HP_SEARCH_N_ITER: Dict[str, int] = {'RandomForest': 15, 'SVM': 20}
 HIGH_DIM_FEATURE_RF_THRESHOLD = 1000
 HIGH_DIM_SHAP_DEPENDENCE_THRESHOLD = 1000
 SHAP_DEPENDENCE_MAX_FEATURES = 50
-TRAIN_SNP_WARN_THRESHOLD = 500_000
-TRAIN_SNP_STRONG_WARN_THRESHOLD = 1_000_000
-TRAIN_SVM_IMPRACTICAL_THRESHOLD = 10_000
 
 def _resolve_shap_dependence_max_features(value: Optional[int]) -> int:
     if value is None:
@@ -216,7 +212,6 @@ class TempFileManager:
         self._cleanup_registered = True
 
     def _signal_handler(self, signum, frame):
-        logger.debug(f'Received signal {signum}, cleaning up temporary files...')
         self.cleanup_on_exit()
         signal.signal(signum, signal.SIG_DFL)
         os.kill(os.getpid(), signum)
@@ -251,13 +246,13 @@ class TempFileManager:
                     try:
                         if fp.exists():
                             fp.unlink()
-                    except Exception as e:
+                    except Exception:
                         pass
                 for dp in reversed(self.temp_dirs):
                     try:
                         if dp.exists():
                             shutil.rmtree(dp, ignore_errors=True)
-                    except Exception as e:
+                    except Exception:
                         pass
                 self.temp_files.clear()
                 self.temp_dirs.clear()
@@ -267,11 +262,11 @@ class TempFileManager:
                     try:
                         if dp.exists():
                             shutil.rmtree(dp, ignore_errors=True)
-                    except Exception as e:
+                    except Exception:
                         pass
                 self.preprocess_tmp_dirs.clear()
-        except Exception as e:
-            logger.debug(f'Error during temporary file cleanup (ignored): {e}')
+        except Exception:
+            pass
 
     def clear(self):
         self.temp_files.clear()
@@ -308,9 +303,6 @@ def _training_dimensions_from_metadata(metadata: Optional[Dict]) -> Tuple[Option
         n_samples = int(n_samples)
     return (n_features, n_samples)
 
-def _estimate_matrix_ram_gb(n_samples: int, n_features: int, dtype_bytes: int=1) -> float:
-    return n_samples * n_features * dtype_bytes / 1024 ** 3
-
 def _verify_compressed_train_file(train_file: str, expected_n_samples: Optional[int]=None) -> None:
     """Fail fast when a gzip training matrix is truncated before pandas load."""
     if not (str(train_file).endswith('.gz')):
@@ -338,42 +330,13 @@ def _verify_compressed_train_file(train_file: str, expected_n_samples: Optional[
             raise ValueError(f'Training matrix row count mismatch: file has {data_rows} data row(s), metadata expects {expected_n_samples} ({train_file}).\nRe-run preprocess to regenerate a complete training matrix.')
 
 def check_training_metadata_guardrails(metadata: Optional[Dict], *, model_type: Optional[str]=None, task_type: Optional[str]=None, parallel_models: Optional[int]=None, enable_hyperparameter_search: bool=False, n_folds: int=5, threads: Optional[int]=None) -> None:
-    n_features, n_samples = _training_dimensions_from_metadata(metadata)
-    file_format = (metadata or {}).get('train_file_format') or {}
-    is_gzip = file_format.get('compression') == 'gzip' or str((metadata or {}).get('output_train_file', '')).endswith('.gz')
-    if n_features is None:
-        logger.debug('[TRAIN] Metadata has no n_feature_columns; cannot pre-check matrix size before load')
+    """Validate training matrix integrity from preprocess metadata (e.g. truncated gzip)."""
+    if not metadata:
         return
-    logger.debug(f'[TRAIN] Metadata guardrail: {n_samples or "?"} samples × {n_features:,} SNP features')
-    if n_samples is not None:
-        est_gb = _estimate_matrix_ram_gb(n_samples, n_features, dtype_bytes=1)
-        logger.debug(f'[TRAIN] Estimated feature matrix size (int8): ~{est_gb:.2f} GB')
-        if est_gb >= 2.0:
-            logger.debug(f'[TRAIN] Large feature matrix (~{est_gb:.1f} GB int8). Ensure job memory is well above this (CV/SHAP/workers add overhead).')
-    train_file = (metadata or {}).get('output_train_file')
+    _, n_samples = _training_dimensions_from_metadata(metadata)
+    train_file = metadata.get('output_train_file')
     if train_file and str(train_file).endswith('.gz'):
         _verify_compressed_train_file(str(train_file), expected_n_samples=n_samples)
-    if n_features >= TRAIN_SNP_STRONG_WARN_THRESHOLD:
-        logger.debug(f'[TRAIN] Very high SNP count ({n_features:,}). Training will be slow and memory-heavy; consider stronger SNP filtering in preprocess (-f 2 or -f 4).')
-    elif n_features >= TRAIN_SNP_WARN_THRESHOLD:
-        logger.debug(f'[TRAIN] High SNP count ({n_features:,}). Prefer tree models (LightGBM/XGBoost/CatBoost) and conservative parallelism.')
-    if is_gzip:
-        logger.debug('[TRAIN] Training matrix is gzip-compressed; load is slower than uncompressed .txt. Re-run preprocess without compression if you train repeatedly.')
-    parallel_count = 1 if parallel_models is None else max(1, int(parallel_models))
-    if parallel_count > 1 and n_features >= HIGH_DIM_FEATURE_RF_THRESHOLD:
-        logger.debug(f'[TRAIN] parallel_models={parallel_count} with {n_features:,} features: each worker holds a full matrix copy; ensure job memory is large enough or use --parallel_models 1.')
-    if model_type == 'SVM' and n_features > TRAIN_SVM_IMPRACTICAL_THRESHOLD:
-        logger.debug(f'[TRAIN] SVM on {n_features:,} features is usually impractical (time/memory). Prefer LightGBM for high-dimensional GWAS matrices.')
-    if model_type == 'RandomForest' and n_features > HIGH_DIM_FEATURE_RF_THRESHOLD:
-        logger.debug(f'[TRAIN] RandomForest on {n_features:,} features is slow at this scale; LightGBM/XGBoost are usually faster.')
-    if enable_hyperparameter_search and n_features >= TRAIN_SNP_WARN_THRESHOLD:
-        logger.debug('[TRAIN] Hyperparameter search on a very wide matrix is expensive; omit --hyperparameter_search for a faster first run.')
-    if n_folds > 3 and n_features >= TRAIN_SNP_WARN_THRESHOLD:
-        logger.debug(f'[TRAIN] {n_folds}-fold CV multiplies full-matrix fits on high-dimensional data; expect longer runtime and higher peak RAM.')
-    if threads is not None and int(threads) > 4 and n_features >= TRAIN_SNP_WARN_THRESHOLD:
-        logger.debug(f'[TRAIN] --threads {int(threads)} increases per-model CPU/memory pressure on wide matrices; --threads 4 is often enough.')
-    if model_type is None and task_type == 'regression' and n_features > TRAIN_SVM_IMPRACTICAL_THRESHOLD:
-        logger.debug('[TRAIN] train-all will include SVM on a wide matrix; expect SVM to fail or run extremely long. Train LightGBM alone first: G2PInsight train -m LightGBM ...')
 
 def parse_train_input_path(input_path: str) -> Dict:
     input_path = Path(input_path).absolute().as_posix()
@@ -393,7 +356,6 @@ def parse_train_input_path(input_path: str) -> Dict:
         if train_file_path.parent.exists():
             for metadata_file in train_file_path.parent.glob('*_metadata.json'):
                 possible_metadata_paths.append(str(metadata_file))
-        metadata_found = False
         for metadata_path in possible_metadata_paths:
             if Path(metadata_path).exists():
                 try:
@@ -403,12 +365,9 @@ def parse_train_input_path(input_path: str) -> Dict:
                     result['task_type'] = metadata.get('task_type')
                     result['preprocess_tmp_dir'] = metadata.get('preprocess_tmp_dir')
                     result['_metadata_file_path'] = metadata_path
-                    metadata_found = True
                     break
-                except Exception as e:
+                except Exception:
                     continue
-        if not metadata_found:
-            pass
     if not Path(result['train_file']).exists():
         raise FileNotFoundError(f"Training file does not exist: {result['train_file']}")
     return result
@@ -482,7 +441,6 @@ def _apply_feature_column_names(X: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str
             snp_name_mapping[orig] = cleaned
     if X.columns.duplicated().any():
         dup_count = int(X.columns.duplicated().sum())
-        logger.debug(f'  {dup_count} duplicate chr_pos column(s) after rename; keeping the first occurrence')
         X = X.loc[:, ~X.columns.duplicated(keep='first')]
     return X, snp_name_mapping
 
@@ -555,7 +513,6 @@ def _resolve_snp_storage_dtype(file_format: Optional[Dict]) -> np.dtype:
     try:
         return np.dtype(name)
     except (TypeError, ValueError):
-        logger.debug(f'Unrecognized snp_dtype={dtype_name!r} in metadata; defaulting to int8')
         return default
 
 def _is_int8_dtype(dtype: Any) -> bool:
@@ -587,14 +544,8 @@ def _merge_oof_probabilities(prob_frames: List[pd.DataFrame], y_test_index: pd.I
         return None
     y_prob_df = pd.concat(prob_frames, axis=0)
     if y_prob_df.index.duplicated().any():
-        logger.debug('  Duplicate sample indices in OOF probabilities; keeping the last occurrence per sample')
         y_prob_df = y_prob_df[~y_prob_df.index.duplicated(keep='last')]
-    missing = y_test_index.difference(y_prob_df.index)
-    if len(missing) > 0:
-        logger.debug(f'  {len(missing)} sample(s) missing OOF probabilities after index alignment')
     aligned = y_prob_df.reindex(y_test_index)
-    if aligned.isna().any().any():
-        logger.debug('  NaN values in aligned OOF probabilities (missing folds/samples)')
     return aligned.to_numpy()
 
 def load_training_data(train_file: str, valid_samples: List[str]=None, file_format: Optional[Dict]=None, chr_pos_filter: Optional[set]=None) -> Tuple[pd.DataFrame, pd.Series, Dict[str, str]]:
@@ -612,12 +563,7 @@ def load_training_data(train_file: str, valid_samples: List[str]=None, file_form
         expected_n_samples = len(valid_samples)
     if is_compressed:
         _verify_compressed_train_file(train_file, expected_n_samples=expected_n_samples)
-    read_t0 = time.perf_counter()
     read_engine = _training_file_read_engine(is_compressed)
-    if is_compressed:
-        logger.debug('Training file is compressed (.gz); using python CSV engine for load')
-    else:
-        logger.debug('Training file is uncompressed; using C CSV engine for load')
     snp_storage_dtype = _resolve_snp_storage_dtype(file_format)
     try:
         import csv
@@ -646,7 +592,6 @@ def load_training_data(train_file: str, valid_samples: List[str]=None, file_form
         metadata_delimiter = _delimiter_from_metadata(file_format)
         if metadata_delimiter is not None:
             delimiter = metadata_delimiter
-            logger.debug(f'Using training file delimiter from metadata: {repr(delimiter)}')
         else:
             delimiter = '\t'
             try:
@@ -677,12 +622,10 @@ def load_training_data(train_file: str, valid_samples: List[str]=None, file_form
                 first_line = sample_lines[0].strip()
                 field_count = len(first_line.split(delimiter))
                 if field_count < 2:
-                    logger.debug(f'Detected field count ({field_count}) is too low, trying alternative delimiters')
                     for alt_sep in ['\t', ',', ' ']:
                         if alt_sep != delimiter:
                             alt_count = len(first_line.split(alt_sep))
                             if alt_count >= 2:
-                                logger.debug(f'Switching to delimiter {repr(alt_sep)} (field count: {alt_count})')
                                 delimiter = alt_sep
                                 break
         usecols = None
@@ -690,7 +633,6 @@ def load_training_data(train_file: str, valid_samples: List[str]=None, file_form
             header_columns = _read_header_columns(train_file, delimiter, is_compressed)
             usecols = _usecols_for_chr_pos_keys(header_columns, chr_pos_filter)
             n_snp_cols = max(0, len(usecols) - (1 if 'sample' in usecols else 0))
-            logger.debug(f'  chr_pos filter: loading {n_snp_cols} of {max(0, len(header_columns) - 1)} SNP column(s) from file header')
         df = None
         read_errors = []
         read_csv_kwargs = {'sep': delimiter, 'index_col': 'sample', 'na_filter': False, 'engine': read_engine, 'compression': 'gzip' if is_compressed else 'infer'}
@@ -778,19 +720,8 @@ def load_training_data(train_file: str, valid_samples: List[str]=None, file_form
                         raise ValueError(error_msg) from e4
         if df is None or df.empty:
             raise ValueError(f'Failed to read data from {train_file} or file is empty')
-        if file_format:
-            expected_snp = file_format.get('n_feature_columns')
-            includes_pheno = bool(file_format.get('includes_phenotype_column', False))
-            if expected_snp is not None:
-                expected_cols = int(expected_snp) + (1 if includes_pheno else 0)
-                actual_cols = len(df.columns)
-                if actual_cols != expected_cols:
-                    logger.debug(f'Training matrix column count differs from metadata: read {actual_cols} column(s), metadata expects {expected_cols} (n_feature_columns={expected_snp}, includes_phenotype_column={includes_pheno})')
-                else:
-                    logger.debug(f'Training matrix column count matches metadata ({actual_cols} columns)')
         if df.index.name != 'sample' and 'sample' not in str(df.index.name).lower():
             if 'sample' in df.columns:
-                logger.debug("Found 'sample' column but not as index. Attempting to set it as index...")
                 df = df.set_index('sample')
             else:
                 raise ValueError(f"File {train_file} does not have 'sample' column/index as required.\nCurrent index name: {df.index.name}\nCurrent columns: {list(df.columns[:10])}{('...' if len(df.columns) > 10 else '')}\nThis file format is not compatible with model training/prediction.\nExpected format: Tab-separated file with 'sample' column as index (from preprocess module output).")
@@ -809,9 +740,6 @@ def load_training_data(train_file: str, valid_samples: List[str]=None, file_form
         if X.isnull().any().any():
             X = X.fillna(-1)
         X = _convert_feature_matrix_dtype(X, snp_storage_dtype)
-        read_elapsed = time.perf_counter() - read_t0
-        feature_dtype = X.dtypes.iloc[0] if len(X.columns) > 0 else 'n/a'
-        logger.debug(f'Training matrix loaded: {X.shape[0]:,} samples × {X.shape[1]:,} features, feature_dtype={feature_dtype}, read_engine={read_engine}, elapsed={read_elapsed:.2f}s')
         return (X, y, snp_name_mapping)
     except EOFError as e:
         msg = (f'Compressed training matrix ended unexpectedly: {train_file}\nThe gzip file is truncated or corrupt. Delete it and re-run preprocess (prefer -f 4 for GWAS+LD filtering).\nWith millions of SNP columns, also ensure sufficient disk space and memory during preprocess export.')
@@ -841,7 +769,6 @@ def _persist_training_matrix_for_workers(X: pd.DataFrame, y: pd.Series, cache_di
     y_path = cache_dir / 'train_y.npy'
     np.save(y_path, np.asarray(y.values))
     bundle = {'_shared_matrix': True, 'shared_matrix_dir': str(cache_dir.absolute()), 'x_mmap_path': str(x_path.absolute()), 'x_shape': [int(n_samples), int(n_features)], 'index_path': str(index_path.absolute()), 'columns_path': str(columns_path.absolute()), 'y_path': str(y_path.absolute())}
-    logger.debug(f'[TRAIN_ALL] Shared training matrix persisted: {n_samples:,} samples × {n_features:,} features ({x_path.name})')
     return bundle
 
 def _load_training_data_from_shared(bundle: Dict[str, Any]) -> Tuple[pd.DataFrame, pd.Series]:
@@ -858,7 +785,6 @@ def _load_training_data_from_shared(bundle: Dict[str, Any]) -> Tuple[pd.DataFram
     X = pd.DataFrame(np.asarray(x_arr), index=index, columns=columns)
     y_values = np.load(bundle['y_path'])
     y = pd.Series(y_values, index=index, name='phenotype')
-    logger.debug(f'[TRAIN_ALL] Worker attached to shared training matrix: {X.shape[0]:,} samples × {X.shape[1]:,} features')
     return (X, y)
 
 def _cleanup_shared_training_matrix(bundle: Optional[Dict[str, Any]]) -> None:
@@ -895,24 +821,22 @@ def _cleanup_train_all_temp_dirs(base_output_dir: Optional[Path], *, shared_matr
             tmp_root_dir = Path(base_output_dir) / 'tmp'
             if tmp_root_dir.exists():
                 shutil.rmtree(tmp_root_dir, ignore_errors=True)
-                logger.debug(f'[TRAIN_ALL] Cleaned temporary directory: {tmp_root_dir}')
-        except Exception as e:
-            logger.debug(f'[TRAIN_ALL] Failed to clean temporary directory (ignored): {e}')
+        except Exception:
+            pass
     if preprocess_tmp_dir:
         try:
             preprocess_tmp_dir_path = Path(preprocess_tmp_dir).absolute()
             if preprocess_tmp_dir_path.exists():
                 shutil.rmtree(preprocess_tmp_dir_path, ignore_errors=True)
-                logger.debug(f'[TRAIN_ALL] Deleted preprocess temporary directory: {preprocess_tmp_dir_path}')
-        except Exception as e:
-            logger.debug(f'[TRAIN_ALL] Failed to delete preprocess temporary directory (ignored): {e}')
+        except Exception:
+            pass
     if output_dir is not None:
         gwas_output_dir = Path(output_dir) / 'output'
         if gwas_output_dir.exists():
             try:
                 shutil.rmtree(gwas_output_dir, ignore_errors=True)
-            except Exception as e:
-                logger.debug(f'[TRAIN_ALL] Failed to delete GWAS output directory (ignored): {e}')
+            except Exception:
+                pass
 
 ALL_MODEL_TYPES = ['LightGBM', 'RandomForest', 'XGBoost', 'SVM', 'CatBoost', 'Logistic']
 CLASSIFICATION_ONLY_MODELS = frozenset[str]({'Logistic'})
@@ -966,7 +890,6 @@ def get_param_grid(model_type: str, task_type: str, n_features: Optional[int]=No
         grid['max_depth'] = [5, 10, 20]
         grid['max_features'] = ['sqrt', 'log2']
         grid['n_estimators'] = [50, 100]
-        logger.debug(f'  RandomForest search grid capped for high-dimensional data ({n_features:,} features)')
     return grid
 
 def _make_cv_splitter(task_type: str, n_folds: int, random_state: int):
@@ -974,29 +897,11 @@ def _make_cv_splitter(task_type: str, n_folds: int, random_state: int):
         return StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
     return KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
 
-def perform_grid_search(model_type: str, task_type: str, X_train: pd.DataFrame, y_train: pd.Series, param_grid: Dict, n_iter: int=20, cv: int=3, random_state: int=42, scoring: Optional[str]=None, cpu_cores: Optional[int]=None) -> RandomizedSearchCV:
-    base_model = init_model(model_type, task_type, random_state=random_state, cpu_cores=cpu_cores)
-    if scoring is None:
-        if task_type == 'classification':
-            scoring = 'roc_auc' if len(y_train.unique()) == 2 else 'f1_macro'
-        else:
-            scoring = 'neg_mean_squared_error'
-    cv_splitter = cv if hasattr(cv, 'split') else _make_cv_splitter(task_type, int(cv), random_state)
-    search = RandomizedSearchCV(estimator=base_model, param_distributions=param_grid, n_iter=n_iter, cv=cv_splitter, scoring=scoring, n_jobs=DEFAULT_N_JOBS, random_state=random_state, verbose=0)
-    search.fit(X_train, y_train)
-    return search
-
-def fit_model_on_data(model_type: str, task_type: str, X_train: pd.DataFrame, y_train: pd.Series, random_state: int=42, cpu_cores: Optional[int]=None) -> Any:
-    model = init_model(model_type, task_type, random_state=random_state, cpu_cores=cpu_cores)
-    model.fit(X_train, y_train)
-    return model
-
 def resolve_training_hyperparameters(model_type: str, task_type: str, X_train: pd.DataFrame, y_train: pd.Series, enable_hyperparameter_search: bool, n_folds: int, random_state: int, cpu_cores: Optional[int]=None, *, search_n_iter: Optional[int]=None, search_cv: Optional[int]=None) -> Tuple[Any, Dict[str, Any]]:
     default_model = init_model(model_type, task_type, random_state=random_state, cpu_cores=cpu_cores)
     if not enable_hyperparameter_search:
         return (default_model, default_model.get_params())
     if len(X_train) < 10:
-        logger.debug('Training set too small for hold-out hyperparameter tuning; using default parameters')
         return (default_model, default_model.get_params())
     n_iter = _resolve_hp_search_n_iter(model_type) if search_n_iter is None else search_n_iter
     param_grid = get_param_grid(model_type, task_type, n_features=X_train.shape[1])
@@ -1005,7 +910,6 @@ def resolve_training_hyperparameters(model_type: str, task_type: str, X_train: p
     try:
         inner_train_idx, inner_val_idx = train_test_split(position_idx, test_size=0.2, random_state=random_state, stratify=stratify)
     except ValueError as e:
-        logger.debug(f'Hold-out split for hyperparameter tuning failed ({e}); using default parameters')
         return (default_model, default_model.get_params())
     ordered_idx = np.concatenate([inner_train_idx, inner_val_idx])
     X_search = X_train.iloc[ordered_idx]
@@ -1018,7 +922,6 @@ def resolve_training_hyperparameters(model_type: str, task_type: str, X_train: p
     else:
         scoring = 'neg_mean_squared_error'
     base_model = init_model(model_type, task_type, random_state=random_state, cpu_cores=cpu_cores)
-    logger.debug(f'Hyperparameter tuning on training-set hold-out ({len(inner_train_idx)}/{len(inner_val_idx)} train/val); {n_iter} candidate(s), then {n_folds}-fold CV for reporting')
     search = RandomizedSearchCV(estimator=base_model, param_distributions=param_grid, n_iter=n_iter, cv=cv_splitter, scoring=scoring, n_jobs=DEFAULT_N_JOBS, random_state=random_state, verbose=0)
     search.fit(X_search, y_search)
     tuned_model = search.best_estimator_
@@ -1040,14 +943,12 @@ def split_train_test_holdout(X: pd.DataFrame, y: pd.Series, task_type: str, test
         train_idx, test_idx = train_test_split(X_ordered.index, test_size=test_ratio, random_state=random_state, stratify=stratify)
     except ValueError as e:
         if stratify is not None:
-            logger.debug(f'Stratified train/test split failed ({e}); falling back to random split')
             train_idx, test_idx = train_test_split(X_ordered.index, test_size=test_ratio, random_state=random_state, stratify=None)
         else:
             raise
     train_idx_list = list(train_idx)
     test_idx_list = list(test_idx)
     train_ratio = 1.0 - test_ratio
-    logger.debug(f'Train/test hold-out split: train={len(train_idx_list)}, test={len(test_idx_list)} ({train_ratio:.0%} train / {test_ratio:.0%} test)')
     return {'train_idx': train_idx_list, 'test_idx': test_idx_list, 'random_state': random_state, 'train_ratio': train_ratio, 'test_ratio': test_ratio, 'n_train': len(train_idx_list), 'n_test': len(test_idx_list), 'split_source': 'fallback_random_holdout'}
 
 def holdout_from_sample_split(X: pd.DataFrame, y: pd.Series, sample_split: Dict[str, Any]) -> Dict[str, Any]:
@@ -1079,7 +980,6 @@ def holdout_from_sample_split(X: pd.DataFrame, y: pd.Series, sample_split: Dict[
     unassigned = len(X) - len(train_idx) - len(test_idx)
     if unassigned > 0:
         logger.warning(f'{unassigned} sample(s) in matrix are not in preprocess train/test split and will be excluded')
-    logger.debug(f'Using preprocess sample_split (mode={sample_split.get("mode")}): train={len(train_idx)}, test={len(test_idx)}')
     return {'train_idx': train_idx, 'test_idx': test_idx, 'split_source': 'preprocess_metadata', 'mode': sample_split.get('mode'), 'random_state': sample_split.get('random_state'), 'train_ratio': sample_split.get('train_ratio'), 'test_ratio': sample_split.get('test_ratio'), 'n_train': len(train_idx), 'n_test': len(test_idx), 'n_unassigned': unassigned}
 
 def resolve_holdout_split_from_metadata(X: pd.DataFrame, y: pd.Series, metadata: Optional[Dict[str, Any]], task_type: str, random_state: int=42) -> Dict[str, Any]:
@@ -1106,8 +1006,8 @@ def _predict_with_optional_proba(model: Any, X: pd.DataFrame, task_type: str) ->
                 y_prob = np.column_stack([prob_neg, prob_pos])
             else:
                 y_prob = softmax(decision_scores)
-    except Exception as e:
-        logger.debug(f'  Failed to obtain prediction probabilities: {e}')
+    except Exception:
+        pass
     return (y_pred, y_prob)
 
 def _fit_model_with_params(model_type: str, task_type: str, X_train: pd.DataFrame, y_train: pd.Series, best_params: Dict[str, Any], random_state: int, cpu_cores: Optional[int]) -> Any:
@@ -1115,7 +1015,7 @@ def _fit_model_with_params(model_type: str, task_type: str, X_train: pd.DataFram
     try:
         model.set_params(**best_params)
     except ValueError as e:
-        logger.debug(f'  Failed to apply best_params to model: {e}')
+        pass
     model.fit(X_train, y_train)
     return model
 
@@ -1126,28 +1026,25 @@ def evaluate_model(y_true: pd.Series, y_pred: np.ndarray, y_prob: np.ndarray, ta
             y_true_array = _ensure_numpy_array(y_true)
             y_pred_array = _ensure_numpy_array(y_pred)
             if len(y_true_array) == 0 or len(y_pred_array) == 0:
-                logger.debug('  True values or predictions are empty, cannot calculate metrics')
                 metrics['accuracy'] = 'N/A'
                 metrics['recall'] = 'N/A'
                 metrics['f1'] = 'N/A'
             elif len(y_true_array) != len(y_pred_array):
-                logger.debug(f'  True values and predictions length mismatch: {len(y_true_array)} vs {len(y_pred_array)}')
                 metrics['accuracy'] = 'N/A'
                 metrics['recall'] = 'N/A'
                 metrics['f1'] = 'N/A'
             else:
                 metrics['accuracy'] = round(accuracy_score(y_true_array, y_pred_array), 4)
-                # binary: positive-class recall/F1 (≠ accuracy); macro: equal-weight multi-class average
+
                 unique_labels = np.unique(y_true_array)
                 if len(unique_labels) == 2:
-                    pos_label = unique_labels[1]  # align with AUC using predict_proba[:, 1]
+                    pos_label = unique_labels[1]
                     metrics['recall'] = round(recall_score(y_true_array, y_pred_array, average='binary', pos_label=pos_label, zero_division=0), 4)
                     metrics['f1'] = round(f1_score(y_true_array, y_pred_array, average='binary', pos_label=pos_label, zero_division=0), 4)
                 else:
                     metrics['recall'] = round(recall_score(y_true_array, y_pred_array, average='macro', zero_division=0), 4)
                     metrics['f1'] = round(f1_score(y_true_array, y_pred_array, average='macro', zero_division=0), 4)
         except Exception as e:
-            logger.debug(f'  Failed to calculate classification metrics: {str(e)}')
             metrics['accuracy'] = 'N/A'
             metrics['recall'] = 'N/A'
             metrics['f1'] = 'N/A'
@@ -1159,7 +1056,6 @@ def evaluate_model(y_true: pd.Series, y_pred: np.ndarray, y_prob: np.ndarray, ta
                 if len(y_prob_array.shape) == 1:
                     y_prob_array = y_prob_array.reshape(-1, 1)
                 if len(y_true_array) != len(y_prob_array):
-                    logger.debug(f'  True values and probabilities length mismatch: {len(y_true_array)} vs {len(y_prob_array)}')
                     metrics['auc'] = 'N/A'
                 else:
                     unique_labels = np.unique(y_true_array)
@@ -1175,7 +1071,6 @@ def evaluate_model(y_true: pd.Series, y_pred: np.ndarray, y_prob: np.ndarray, ta
                             else:
                                 metrics['auc'] = 'N/A'
                         except Exception as e:
-                            logger.debug(f'  Binary classification AUC calculation failed: {str(e)}')
                             metrics['auc'] = 'N/A'
                     else:
                         try:
@@ -1187,25 +1082,19 @@ def evaluate_model(y_true: pd.Series, y_pred: np.ndarray, y_prob: np.ndarray, ta
                             else:
                                 metrics['auc'] = round(roc_auc_score(y_true_binarized, y_prob_array, average='macro', multi_class='ovr'), 4)
                         except Exception as e:
-                            logger.debug(f'  Multi-class AUC calculation failed: {str(e)}')
                             metrics['auc'] = 'N/A'
             else:
                 metrics['auc'] = 'N/A'
-                if task_type == 'classification':
-                    pass
-        except Exception as e:
-            logger.debug(f'  Failed to calculate AUC: {str(e)}')
+        except Exception:
             metrics['auc'] = 'N/A'
     else:
         try:
             y_true_array = _ensure_numpy_array(y_true)
             y_pred_array = _ensure_numpy_array(y_pred)
             if len(y_true_array) == 0 or len(y_pred_array) == 0:
-                logger.debug('  True values or predictions are empty, cannot calculate Pearson correlation')
                 metrics['pearson_correlation'] = 'N/A'
                 metrics['pearson_p_value'] = 'N/A'
             elif len(y_true_array) != len(y_pred_array):
-                logger.debug(f'  True values and predictions length mismatch: {len(y_true_array)} vs {len(y_pred_array)}')
                 metrics['pearson_correlation'] = 'N/A'
                 metrics['pearson_p_value'] = 'N/A'
             else:
@@ -1222,12 +1111,10 @@ def evaluate_model(y_true: pd.Series, y_pred: np.ndarray, y_prob: np.ndarray, ta
                     metrics['rmse'] = round(float(np.sqrt(mean_squared_error(y_true_array, y_pred_array))), 4)
                     metrics['mae'] = round(float(mean_absolute_error(y_true_array, y_pred_array)), 4)
                 except Exception as e:
-                    logger.debug(f'  Failed to calculate regression error metrics: {str(e)}')
                     metrics.setdefault('r2', 'N/A')
                     metrics.setdefault('rmse', 'N/A')
                     metrics.setdefault('mae', 'N/A')
         except Exception as e:
-            logger.debug(f'  Failed to calculate Pearson correlation coefficient: {str(e)}')
             metrics['pearson_correlation'] = 'N/A'
             metrics['pearson_p_value'] = 'N/A'
     return metrics
@@ -1292,7 +1179,7 @@ def _run_one_cv_fold(fold_idx: int, n_folds: int, train_idx: np.ndarray, val_idx
     try:
         model_fold.set_params(**best_params)
     except ValueError as e:
-        logger.debug(f'[Fold {fold_idx}] Failed to apply best_params to model: {e}')
+        pass
     y_pred_fold = None
     y_prob_fold = None
     try:
@@ -1311,8 +1198,8 @@ def _run_one_cv_fold(fold_idx: int, n_folds: int, train_idx: np.ndarray, val_idx
                         y_prob_fold = np.column_stack([prob_neg, prob_pos])
                     else:
                         y_prob_fold = softmax(decision_scores)
-            except Exception as e:
-                logger.debug(f'[Fold {fold_idx}] Failed to obtain prediction probabilities: {str(e)}')
+            except Exception:
+                pass
     except Exception as e:
         logger.error(f'[Fold {fold_idx}] Error during training/evaluation: {str(e)}', exc_info=True)
         return (fold_idx, {}, None, None, None)
@@ -1320,11 +1207,9 @@ def _run_one_cv_fold(fold_idx: int, n_folds: int, train_idx: np.ndarray, val_idx
     if task_type == 'regression':
         corr = fold_metrics.get('pearson_correlation', 'N/A')
         pval = fold_metrics.get('pearson_p_value', 'N/A')
-        logger.debug(f'[{fold_idx}/{n_folds}] Pearson correlation: {corr}, p-value: {pval}')
     else:
         acc = fold_metrics.get('accuracy', 'N/A')
         auc = fold_metrics.get('auc', 'N/A')
-        logger.debug(f'[{fold_idx}/{n_folds}] CV on train — Accuracy: {acc}, AUC: {auc}')
     return (fold_idx, fold_metrics, y_val_fold, y_pred_fold, y_prob_fold)
 
 def _run_kfold_cv_evaluation(model_type: str, task_type: str, X_train_cv: pd.DataFrame, y_train_cv: pd.Series, best_params: Dict[str, Any], n_folds: int, random_state: int, cpu_cores: Optional[int]) -> Tuple[List[Dict], Optional[Dict[str, Any]], Dict[str, float]]:
@@ -1336,10 +1221,9 @@ def _run_kfold_cv_evaluation(model_type: str, task_type: str, X_train_cv: pd.Dat
         splits = list(kf.split(X_train_cv, y_train_cv))
     fold_workers, cores_per_fold = _resolve_cv_fold_parallelism(n_folds, cpu_cores)
     mode = 'parallel' if fold_workers > 1 else 'serial'
-    logger.debug(f'Starting {n_folds}-fold cross-validation on training set with fixed hyperparameters ({mode}: fold_workers={fold_workers}, cores/fold={cores_per_fold})')
     fold_args = [(fold_idx, train_idx, val_idx) for fold_idx, (train_idx, val_idx) in enumerate(splits, 1)]
     fold_results: List[Tuple[int, Dict, Optional[pd.Series], Optional[np.ndarray], Optional[np.ndarray]]] = []
-    # Cap native libs to per-fold budget so parallel folds do not oversubscribe CPUs.
+
     prev_thread_env = _set_native_thread_env(cores_per_fold)
     try:
         if fold_workers == 1:
@@ -1382,11 +1266,11 @@ def _run_kfold_cv_evaluation(model_type: str, task_type: str, X_train_cv: pd.Dat
             if all_cv_y_prob_frames:
                 try:
                     oof_y_prob = _merge_oof_probabilities(all_cv_y_prob_frames, oof_y_true.index)
-                except Exception as e:
-                    logger.debug(f'  Failed to align CV OOF probabilities by sample ID: {e}')
+                except Exception:
+                    pass
             cv_oof_data = {'y_true': oof_y_true, 'y_pred': oof_y_pred, 'y_prob': oof_y_prob}
-        except Exception as e:
-            logger.debug(f'  Failed to assemble training-set CV OOF predictions: {e}')
+        except Exception:
+            pass
     return (cv_fold_metrics, cv_oof_data, avg_metrics)
 
 def _cv_results_for_json(cv_results: Dict[str, Any]) -> Dict[str, Any]:
@@ -1407,7 +1291,6 @@ def _save_shap_dependence_tsv(output_prefix: Path, shap_dependence_data: Dict[st
         mean_abs = np.abs(shap_kept).mean(axis=0)
         top_local = np.argsort(mean_abs)[::-1][:feature_cap]
         keep_idx = [keep_idx[int(i)] for i in top_local]
-        logger.debug(f'  SHAP dependence TSV capped to top {feature_cap} features (from {n_features:,}) to limit disk use')
     names_kept = [str(names[i]) for i in keep_idx]
     shap_kept = shap_arr[:, keep_idx]
     x_kept = x_arr[:, keep_idx]
@@ -1417,7 +1300,6 @@ def _save_shap_dependence_tsv(output_prefix: Path, shap_dependence_data: Dict[st
     dep_df = pd.DataFrame({'sample_index': sample_idx, 'feature': np.asarray(names_kept, dtype=object)[feat_idx], 'feature_value': x_kept.ravel(), 'shap_value': shap_kept.ravel()})
     dep_file = Path(f'{output_prefix}_shap_dependence.tsv')
     dep_df.to_csv(dep_file, sep='\t', index=False)
-    logger.debug(f'  SHAP dependence data saved: {dep_file} ({n_samples:,} samples x {n_feats:,} features)')
 
 def _save_test_predictions_tsv(path: Path, y_test: pd.Series, y_pred: np.ndarray, y_prob: Optional[np.ndarray], task_type: str) -> None:
     if isinstance(y_test, pd.Series):
@@ -1507,7 +1389,6 @@ def calculate_shap_values(model: Any, model_type: str, feature_names: List[str],
             if len(X_sur) > 5000:
                 X_sur = X_sur.sample(n=5000, random_state=42)
             y_sur = y_shap.loc[X_sur.index]
-            logger.debug(f'  [SHAP][SVM] Fixed mode: linear surrogate + LinearExplainer (surrogate_samples={len(X_sur):,}, features={X_sur.shape[1]:,}, task={task_type})')
             if task_type == 'classification':
                 surrogate = LinearSVC(C=1.0, dual=True, max_iter=5000)
             else:
@@ -1516,20 +1397,12 @@ def calculate_shap_values(model: Any, model_type: str, feature_names: List[str],
             explainer = shap.LinearExplainer(surrogate, X_sur, feature_perturbation='interventional')
             shap_values = explainer.shap_values(X_input)
         else:
-            logger.debug(f'  {model_type} model uses KernelExplainer for SHAP values, may be slow')
             background_size = min(100, len(X_shap))
             background = X_shap[feature_names].sample(n=background_size, random_state=42) if feature_names else X_shap.sample(n=background_size, random_state=42)
             explainer = shap.KernelExplainer(model.predict if task_type == 'regression' else lambda x: model.predict_proba(x)[:, 1] if hasattr(model, 'predict_proba') else model.predict(x), background)
             shap_values = explainer.shap_values(X_input)
-        raw_shap = shap_values
         shap_values = _shap_values_sample_by_feature(shap_values, task_type)
         shap_values = np.asarray(shap_values)
-        if task_type == 'classification':
-            is_binary = isinstance(raw_shap, list) and len(raw_shap) == 2
-            if not is_binary and hasattr(raw_shap, 'shape') and (len(np.asarray(raw_shap).shape) == 3):
-                is_binary = np.asarray(raw_shap).shape[-1] == 2
-            if is_binary:
-                logger.debug('  Using positive-class SHAP values (class index 1)')
         mean_shap_abs = np.abs(shap_values).mean(axis=0)
         mean_shap_signed = shap_values.mean(axis=0)
         sign_effect = np.sign(mean_shap_signed)
@@ -1539,8 +1412,6 @@ def calculate_shap_values(model: Any, model_type: str, feature_names: List[str],
         n_features_from_names = len(feature_list)
         n_features_from_sign = len(sign_effect)
         min_len = min(n_features_from_shap, n_features_from_names, n_features_from_sign)
-        if not n_features_from_shap == n_features_from_names == n_features_from_sign:
-            logger.debug(f' SHAP feature-length mismatch; aligning by minimum length: shap={n_features_from_shap}, names={n_features_from_names}, sign={n_features_from_sign}')
         feature_list = feature_list[:min_len]
         mean_shap_abs = mean_shap_abs[:min_len]
         sign_effect = sign_effect[:min_len]
@@ -1549,11 +1420,9 @@ def calculate_shap_values(model: Any, model_type: str, feature_names: List[str],
         shap_df = shap_df.sort_values('shap_abs', ascending=False)
         shap_df = shap_df.reset_index(drop=True)
         dependence_bundle = {'shap_values': shap_values.astype(np.float32), 'X_values': np.asarray(X_input.iloc[:, :min_len].values, dtype=np.float32), 'feature_names': np.array(feature_list, dtype=object)}
-        logger.debug(f'  SHAP values calculation completed (samples_used={len(X_input):,}, elapsed={time.perf_counter() - shap_t0:.2f}s)')
         return (shap_df, dependence_bundle)
     except Exception as e:
         logger.error(f'  SHAP values calculation failed: {str(e)}')
-        import traceback
         return (pd.DataFrame(), None)
 
 def _ensure_numpy_array(data: Any) -> np.ndarray:
@@ -1585,20 +1454,10 @@ def filter_phenotype_from_dataframe(df: pd.DataFrame) -> pd.DataFrame:
                 drop_cols_unique.append(c)
         if index_artifact_cols:
             cols_suffix = '...' if len(index_artifact_cols) > 5 else ''
-            logger.debug(f'Detected and removed index artifact columns from features: {index_artifact_cols[:5]}{cols_suffix}')
         return df.drop(columns=drop_cols_unique, errors='ignore')
     return df
 
-def _gwas_assoc_file_from_metadata(metadata: Optional[Dict]) -> Optional[str]:
-    if not metadata:
-        return None
-    feature_selection = metadata.get('feature_selection') or {}
-    path = feature_selection.get('gwas_assoc_file')
-    if path is None or str(path).strip() == '' or str(path).strip().lower() == 'null':
-        return None
-    return str(Path(str(path)).expanduser())
-
-def save_training_results(model: Any, metrics: Dict, selected_snps: List[str], output_dir: str, model_type: str, task_type: str, shap_df: Optional[pd.DataFrame]=None, shap_dependence_data: Optional[Dict[str, Any]]=None, y_test: Optional[pd.Series]=None, y_pred: Optional[np.ndarray]=None, y_prob: Optional[np.ndarray]=None, cv_results: Optional[Dict]=None, cv_oof_data: Optional[Dict[str, Any]]=None, peak_ram_mb: Optional[float]=None, hyperparameter_search_enabled: Optional[bool]=None, split_mode: str='cv', evaluation_results: Optional[Dict]=None, shap_dependence_max_features: Optional[int]=None, gwas_assoc_file: Optional[str]=None) -> None:
+def save_training_results(model: Any, metrics: Dict, selected_snps: List[str], output_dir: str, model_type: str, task_type: str, shap_df: Optional[pd.DataFrame]=None, shap_dependence_data: Optional[Dict[str, Any]]=None, y_test: Optional[pd.Series]=None, y_pred: Optional[np.ndarray]=None, y_prob: Optional[np.ndarray]=None, cv_results: Optional[Dict]=None, cv_oof_data: Optional[Dict[str, Any]]=None, peak_ram_mb: Optional[float]=None, hyperparameter_search_enabled: Optional[bool]=None, split_mode: str='cv', evaluation_results: Optional[Dict]=None, shap_dependence_max_features: Optional[int]=None) -> None:
     model_dir = Path(output_dir) / model_type
     model_dir.mkdir(parents=True, exist_ok=True)
     output_prefix = model_dir / model_type
@@ -1631,45 +1490,39 @@ def save_training_results(model: Any, metrics: Dict, selected_snps: List[str], o
         try:
             with open(cv_results_file, 'w', encoding='utf-8') as f:
                 json.dump(_cv_results_for_json(cv_results), f, indent=2, ensure_ascii=False, default=str)
-            logger.debug(f'  Training-set CV results saved: {cv_results_file}')
-        except Exception as e:
-            logger.debug(f'  Failed to save CV results JSON (ignored): {e}')
+        except Exception:
+            pass
         if cv_oof_data is not None and cv_oof_data.get('y_true') is not None and cv_oof_data.get('y_pred') is not None:
             try:
                 cv_oof_file = model_dir / f'{model_type}_cv_oof.tsv'
                 _save_cv_oof_tsv(cv_oof_file, cv_oof_data)
-                logger.debug(f'  Training-set CV OOF predictions saved: {cv_oof_file}')
-            except Exception as e:
-                logger.debug(f'  Failed to save CV OOF predictions (ignored): {e}')
+            except Exception:
+                pass
     try:
         features_file = Path(f'{output_prefix}_training_features.json')
         feature_name_list = list(selected_snps) if selected_snps is not None else []
         with open(features_file, 'w') as f:
             json.dump({'model_type': model_type, 'task_type': task_type, 'feature_names': feature_name_list, 'feature_chr_pos_keys': build_feature_chr_pos_keys(feature_name_list), 'snp_naming_rule': 'chromosome_physicalPosition (chr_pos, e.g. 1_123456)', 'saved_time': time.strftime('%Y-%m-%d %H:%M:%S')}, f, indent=2)
-    except Exception as e:
-        logger.debug(f'   Failed to save training feature names (ignored): {e}')
+    except Exception:
+        pass
     if shap_df is not None and (not shap_df.empty):
         filtered_shap_df = shap_df[shap_df['feature'].astype(str).apply(lambda x: 'phenotype' not in x.lower())]
         shap_file = Path(f'{output_prefix}_shap_values.txt')
         shap_output_df = filtered_shap_df.copy()
         shap_output_df = shap_output_df.rename(columns={'shap_abs': 'importance_abs'})
-        with open(shap_file, 'w', encoding='utf-8') as shap_f:
-            if gwas_assoc_file:
-                shap_f.write(f'# gwas_assoc_file={Path(gwas_assoc_file).absolute().as_posix()}\n')
-            shap_output_df.to_csv(shap_f, sep='\t', index=False)
+        shap_output_df.to_csv(shap_file, sep='\t', index=False)
     shap_dependence_cap = _resolve_shap_dependence_max_features(shap_dependence_max_features)
     if shap_dependence_data is not None:
         try:
             _save_shap_dependence_tsv(output_prefix, shap_dependence_data, max_features=shap_dependence_cap)
-        except Exception as e:
-            logger.debug(f'   Failed to save SHAP dependence data (ignored): {e}')
+        except Exception:
+            pass
     if y_test is not None and y_pred is not None:
         test_pred_file = Path(f'{output_prefix}_test_predictions.tsv')
         plotting_meta_file = Path(f'{output_prefix}_plotting_data.json')
         try:
             _save_test_predictions_tsv(test_pred_file, y_test, y_pred, y_prob, task_type)
         except Exception as e:
-            logger.debug(f'  Failed to save test predictions TSV (ignored): {e}')
             test_pred_file = None
         plotting_payload: Dict[str, Any] = {'model_type': model_type, 'task_type': task_type, 'split_mode': split_mode, 'publication_quality': PUB_QUALITY_MODE, 'shap_dependence_top': shap_dependence_cap}
         if shap_dependence_data is not None:
@@ -1681,10 +1534,8 @@ def save_training_results(model: Any, metrics: Dict, selected_snps: List[str], o
         try:
             with open(plotting_meta_file, 'w', encoding='utf-8') as f:
                 json.dump(plotting_payload, f, indent=2, ensure_ascii=False)
-            logger.debug(f'  Plotting metadata saved: {plotting_meta_file}')
-        except Exception as e:
-            logger.debug(f'  Failed to save plotting metadata JSON (ignored): {e}')
-    logger.debug(f'  Results saved successfully: {model_dir}')
+        except Exception:
+            pass
 
 def run_single_model(input_path: str, model_type: str, output_dir: str, task_type: Optional[str]=None, n_folds: int=5, random_state: int=42, preloaded_data: Optional[Dict[str, Any]]=None, cpu_cores: Optional[int]=None, enable_hyperparameter_search: bool=False, shap_dependence_max_features: Optional[int]=None) -> int:
     return _run_single_model_body(input_path=input_path, model_type=model_type, output_dir=output_dir, task_type=task_type, n_folds=n_folds, random_state=random_state, preloaded_data=preloaded_data, cpu_cores=cpu_cores, enable_hyperparameter_search=enable_hyperparameter_search, shap_dependence_max_features=shap_dependence_max_features)
@@ -1741,7 +1592,6 @@ def _run_single_model_body(input_path: str, model_type: str, output_dir: str, ta
                 return 'regression'
             if task_type is None:
                 task_type = preloaded_data.get('task_type') or infer_task_type_from_y(y)
-                logger.debug(f'Task type: {task_type}')
             validate_model_for_task(model_type, task_type)
         else:
             input_info = parse_train_input_path(input_path)
@@ -1762,7 +1612,6 @@ def _run_single_model_body(input_path: str, model_type: str, output_dir: str, ta
                 return 'regression'
             if task_type is None:
                 task_type = infer_task_type_from_y(y)
-                logger.debug(f'Task type: {task_type}')
             validate_model_for_task(model_type, task_type)
         X_filtered = X
         metadata_for_split = None
@@ -1788,11 +1637,7 @@ def _run_single_model_body(input_path: str, model_type: str, output_dir: str, ta
         X_model_train = X_train_cv
         y_model_train = y_train_cv
         logger.info(f'Dataset: {X.shape[0]:,} samples × {X.shape[1]:,} features ({task_type}); train={len(train_idx_holdout)}, test={len(test_idx_holdout)}')
-        if enable_hyperparameter_search:
-            logger.debug('Starting hyperparameter search on training set (hold-out tuning)...')
         _, best_params = resolve_training_hyperparameters(model_type=model_type, task_type=task_type, X_train=X_train_cv, y_train=y_train_cv, enable_hyperparameter_search=enable_hyperparameter_search, n_folds=n_folds, random_state=random_state, cpu_cores=cpu_cores)
-        if enable_hyperparameter_search:
-            logger.debug('Hyperparameter search completed, starting cross-validation on training set with tuned parameters')
         cv_fold_metrics, cv_oof_data, avg_metrics = _run_kfold_cv_evaluation(model_type=model_type, task_type=task_type, X_train_cv=X_train_cv, y_train_cv=y_train_cv, best_params=best_params, n_folds=n_folds, random_state=random_state, cpu_cores=cpu_cores)
         logger.info(f'{n_folds}-fold CV average: {avg_metrics}')
         final_model = _fit_model_with_params(model_type=model_type, task_type=task_type, X_train=X_train_cv, y_train=y_train_cv, best_params=best_params, random_state=random_state, cpu_cores=cpu_cores)
@@ -1813,8 +1658,7 @@ def _run_single_model_body(input_path: str, model_type: str, output_dir: str, ta
         model_dir.mkdir(parents=True, exist_ok=True)
         selected_snps = filter_phenotype_columns(X_filtered.columns.tolist())
         peak_ram_mb = memory_tracker.stop()
-        gwas_assoc_file = _gwas_assoc_file_from_metadata(metadata_for_split)
-        save_training_results(model=final_model, metrics=metrics, selected_snps=selected_snps, output_dir=output_dir, model_type=model_type, task_type=task_type, shap_df=shap_df, shap_dependence_data=shap_dependence_data, y_test=y_test_combined, y_pred=y_pred_combined, y_prob=y_prob_combined, cv_results=cv_results, cv_oof_data=cv_oof_data, peak_ram_mb=peak_ram_mb, hyperparameter_search_enabled=enable_hyperparameter_search, split_mode=split_mode, evaluation_results=evaluation_results, shap_dependence_max_features=shap_dependence_max_features, gwas_assoc_file=gwas_assoc_file)
+        save_training_results(model=final_model, metrics=metrics, selected_snps=selected_snps, output_dir=output_dir, model_type=model_type, task_type=task_type, shap_df=shap_df, shap_dependence_data=shap_dependence_data, y_test=y_test_combined, y_pred=y_pred_combined, y_prob=y_prob_combined, cv_results=cv_results, cv_oof_data=cv_oof_data, peak_ram_mb=peak_ram_mb, hyperparameter_search_enabled=enable_hyperparameter_search, split_mode=split_mode, evaluation_results=evaluation_results, shap_dependence_max_features=shap_dependence_max_features)
         total_time = round(time.perf_counter() - start_time, 2)
         logger.info(f'Training completed for {model_type} (elapsed={total_time}s, peak RAM={peak_ram_mb} MB)')
         if CLEANUP_TEMP_FILES:
@@ -1845,19 +1689,16 @@ def _run_single_model_body(input_path: str, model_type: str, output_dir: str, ta
                             preprocess_tmp_dir_path = Path(preprocess_tmp_dir)
                             if preprocess_tmp_dir_path.exists():
                                 shutil.rmtree(preprocess_tmp_dir_path, ignore_errors=True)
-                                logger.debug(f'Deleted preprocess temporary directory: {preprocess_tmp_dir_path}')
-                        except Exception as e:
-                            logger.debug(f'Failed to delete preprocess temporary directory (ignored): {e}')
+                        except Exception:
+                            pass
                     gwas_output_dir = output_dir_path / 'output'
                     if gwas_output_dir.exists():
                         try:
                             shutil.rmtree(gwas_output_dir, ignore_errors=True)
-                        except Exception as e:
-                            logger.debug(f'Failed to delete GWAS output directory (ignored): {e}')
-            except Exception as cleanup_err:
+                        except Exception:
+                            pass
+            except Exception:
                 pass
-        else:
-            pass
         if CLEANUP_TEMP_FILES:
             try:
                 import shutil
@@ -1876,7 +1717,7 @@ def _run_single_model_body(input_path: str, model_type: str, output_dir: str, ta
                             shutil.rmtree(tmp_root_dir, ignore_errors=True)
                     except Exception:
                         pass
-            except Exception as e:
+            except Exception:
                 pass
         return 0
     except Exception as e:
@@ -1904,10 +1745,8 @@ def _run_single_model_body(input_path: str, model_type: str, output_dir: str, ta
                             shutil.rmtree(tmp_root_dir, ignore_errors=True)
                     except Exception:
                         pass
-            except Exception as cleanup_err:
+            except Exception:
                 pass
-        else:
-            pass
         return 1
 
 def _run_single_model_silent(*args, **kwargs) -> int:
@@ -1944,7 +1783,6 @@ def _run_train_all_models_serial(supported_models: List[str], input_path: str, o
     results: Dict[str, str] = {}
     mp_ctx = mp.get_context('spawn')
     for model_type in supported_models:
-        logger.debug(f'[TRAIN_ALL] Model training started: {model_type}')
         model_start = time.perf_counter()
         result_queue = mp_ctx.Queue()
         proc = mp_ctx.Process(target=_train_all_model_process_entry, args=(model_type, input_path, output_dir, task_type, n_folds, random_state, preloaded_data, cpu_cores, enable_hyperparameter_search, result_queue))
@@ -1958,17 +1796,14 @@ def _run_train_all_models_serial(supported_models: List[str], input_path: str, o
         status = 'success' if ret_code == 0 else 'failed'
         results[model_type] = status
         logger.info(f'[TRAIN_ALL] Model training completed: model={model_type}, status={status}, elapsed={time.perf_counter() - model_start:.1f}s')
-    failed_models = [m for m, s in results.items() if s == 'failed']
-    if failed_models:
-        logger.debug(f'[TRAIN_ALL] {len(failed_models)} model(s) failed and were skipped: {", ".join(failed_models)}')
     return results
 
 def run_all_models(input_path: str, output_dir: str, task_type: Optional[str]=None, n_folds: int=5, random_state: int=42, parallel_models: Optional[int]=None, threads: Optional[int]=None, enable_hyperparameter_search: bool=False, shap_dependence_max_features: Optional[int]=None) -> int:
     return _run_all_models_body(input_path=input_path, output_dir=output_dir, task_type=task_type, n_folds=n_folds, random_state=random_state, parallel_models=parallel_models, threads=threads, enable_hyperparameter_search=enable_hyperparameter_search, shap_dependence_max_features=shap_dependence_max_features)
 
 def _run_all_models_body(input_path: str, output_dir: str, task_type: Optional[str]=None, n_folds: int=5, random_state: int=42, parallel_models: Optional[int]=None, threads: Optional[int]=None, enable_hyperparameter_search: bool=False, shap_dependence_max_features: Optional[int]=None) -> int:
-    # Process-tree peak for the whole train-all job (parent + worker children when parallel).
-    # Failures in sampling must never change train-all success/failure.
+
+
     job_memory_tracker: Optional[PeakMemoryTracker] = PeakMemoryTracker(include_children=True)
     job_peak_ram_mb: Optional[float] = None
     base_output_dir: Optional[Path] = None
@@ -1998,8 +1833,8 @@ def _run_all_models_body(input_path: str, output_dir: str, task_type: Optional[s
         temps_cleaned = True
         try:
             _cleanup_train_all_temp_dirs(base_output_dir, shared_matrix_bundle=shared_matrix_bundle, preprocess_tmp_dir=preprocess_tmp_dir_str, output_dir=output_dir_path)
-        except Exception as e:
-            logger.debug(f'[TRAIN_ALL] Temp cleanup failed (ignored): {e}')
+        except Exception:
+            pass
         shared_matrix_bundle = None
 
     try:
@@ -2013,8 +1848,6 @@ def _run_all_models_body(input_path: str, output_dir: str, task_type: Optional[s
         preprocess_tmp_dir_str = input_info.get('preprocess_tmp_dir')
         if task_type is None:
             task_type = input_info.get('task_type') or 'regression'
-            if not input_info.get('task_type'):
-                logger.debug('  task_type not specified and no task_type information in metadata, using default: regression')
         check_training_metadata_guardrails(input_info.get('metadata'), task_type=task_type, parallel_models=parallel_models, enable_hyperparameter_search=enable_hyperparameter_search, n_folds=n_folds, threads=threads)
         output_dir_path = Path(output_dir)
         output_dir_path.mkdir(parents=True, exist_ok=True)
@@ -2030,8 +1863,6 @@ def _run_all_models_body(input_path: str, output_dir: str, task_type: Optional[s
         gc.collect()
         preloaded_data = _build_train_all_preloaded_data(train_file=train_file, valid_samples=valid_samples, metadata=input_info['metadata'], preprocess_tmp_dir=preprocess_tmp_dir_str, task_type=task_type, holdout_split=holdout_split, shared_matrix=shared_matrix_bundle, shap_dependence_max_features=shap_dependence_max_features)
         supported_models = get_supported_models(task_type)
-        if task_type == 'regression':
-            logger.debug('Logistic model skipped (classification only)')
         results = {}
         model_metrics_summary = {}
         model_peak_ram_summary: Dict[str, float] = {}
@@ -2042,8 +1873,6 @@ def _run_all_models_body(input_path: str, output_dir: str, task_type: Optional[s
         use_parallel = parallel_model_count > 1
         mode_label = 'Parallel' if use_parallel else 'Serial'
         logger.info(f'[TRAIN_ALL] {mode_label} training: {len(supported_models)} models, parallel={parallel_model_count}, cores/worker={cpu_cores_per_worker}, task={task_type}')
-        logger.debug('[TRAIN_ALL] Workers attach to shared training-matrix memmap (single TSV parse in parent process)')
-        logger.debug('[TRAIN_ALL] Using spawn workers to isolate native libraries (LightGBM/XGBoost/SHAP/matplotlib) between models')
         model_start_times = {m: time.perf_counter() for m in supported_models}
         pool_resource_failure = False
         if use_parallel:
@@ -2053,7 +1882,6 @@ def _run_all_models_body(input_path: str, output_dir: str, task_type: Optional[s
                 with ProcessPoolExecutor(max_workers=parallel_model_count, mp_context=mp_ctx) as executor:
                     futures = {}
                     for model_type in supported_models:
-                        logger.debug(f'[TRAIN_ALL] Model training started: {model_type}')
                         model_start_times[model_type] = time.perf_counter()
                         futures[executor.submit(_train_all_model_task, model_type, input_path, output_dir, task_type, n_folds, random_state, preloaded_data, cpu_cores_per_worker, enable_hyperparameter_search)] = model_type
                     for future in as_completed(futures):
@@ -2086,7 +1914,7 @@ def _run_all_models_body(input_path: str, output_dir: str, task_type: Optional[s
             results.update(_run_train_all_models_serial(supported_models, input_path, output_dir, task_type, n_folds, random_state, preloaded_data, cpu_cores_per_worker, enable_hyperparameter_search))
         logger.info(f'[TRAIN_ALL] {mode_label} training phase completed, elapsed_total={time.perf_counter() - start_time:.1f}s')
         _stop_job_memory_tracker()
-        # Free shared memmap / tmp early on the success path (idempotent; finally will no-op).
+
         _cleanup_temps()
         best_model_type = None
         best_score = None
@@ -2096,13 +1924,11 @@ def _run_all_models_body(input_path: str, output_dir: str, task_type: Optional[s
             model_dir = output_dir_path / model_type
             metrics_file = model_dir / f'{model_type}_metrics.json'
             if not metrics_file.exists():
-                logger.debug(f'  Metrics file not found for model {model_type}: {metrics_file}')
                 continue
             try:
                 with open(metrics_file, 'r') as f:
                     metrics_data = json.load(f)
             except Exception as e:
-                logger.debug(f'  Failed to load metrics for model {model_type}: {e}')
                 continue
             metrics = metrics_data.get('metrics', {}) or {}
             model_metrics_summary[model_type] = metrics
@@ -2149,16 +1975,15 @@ def _run_all_models_body(input_path: str, output_dir: str, task_type: Optional[s
             try:
                 with open(cv_file, 'r') as f:
                     all_models_cv_results[model_type] = json.load(f)
-            except Exception as e:
-                logger.debug(f'  Failed to load CV results for {model_type}: {e}')
+            except Exception:
+                pass
         if all_models_cv_results:
             aggregate_cv_file = output_dir_path / 'all_models_cv_results.json'
             try:
                 with open(aggregate_cv_file, 'w', encoding='utf-8') as f:
                     json.dump({'task_type': task_type, 'n_folds': n_folds, 'cv_scope': 'training_set', 'final_evaluation_scope': 'held_out_test_set', 'models': all_models_cv_results, 'generated_time': time.strftime('%Y-%m-%d %H:%M:%S')}, f, indent=2, ensure_ascii=False, default=str)
-                logger.debug(f'  Aggregated CV results saved for train-all: {aggregate_cv_file} ({len(all_models_cv_results)} models)')
-            except Exception as e:
-                logger.debug(f'  Failed to save aggregated CV results: {e}')
+            except Exception:
+                pass
         if best_model_type is not None:
             best_model_dir = output_dir_path / best_model_type
             best_model_src = best_model_dir / f'{best_model_type}_model.pkl'
@@ -2168,10 +1993,8 @@ def _run_all_models_body(input_path: str, output_dir: str, task_type: Optional[s
                     with open(best_info_file, 'w', encoding='utf-8') as f:
                         json.dump({'task_type': task_type, 'best_model_type': best_model_type, 'best_metric_name': best_metric_name, 'best_metric_value': best_score, 'all_model_metrics': model_metrics_summary, 'generated_time': time.strftime('%Y-%m-%d %H:%M:%S')}, f, indent=2, ensure_ascii=False, default=str)
                     logger.info(f'Best model: {best_model_type} ({best_metric_name}={best_score})')
-                except Exception as e:
-                    logger.debug(f'  Failed to save best_model_info.json: {e}')
-            else:
-                logger.debug(f'  Best model file not found for model {best_model_type}: {best_model_src}')
+                except Exception:
+                    pass
             for model_type in supported_models:
                 if model_type == best_model_type:
                     continue
@@ -2179,11 +2002,8 @@ def _run_all_models_body(input_path: str, output_dir: str, task_type: Optional[s
                 if model_dir.exists():
                     try:
                         shutil.rmtree(model_dir, ignore_errors=True)
-                        logger.debug(f'  Removed model directory for non-best model: {model_type}')
-                    except Exception as e:
-                        logger.debug(f'  Failed to remove model directory {model_dir}: {e}')
-        else:
-            logger.debug('  No valid metrics found to select the best model.')
+                    except Exception:
+                        pass
         output_dir_path = Path(output_dir)
         output_dir_path.mkdir(parents=True, exist_ok=True)
         report_file = output_dir_path / 'model_comparison_report.json'
@@ -2195,7 +2015,6 @@ def _run_all_models_body(input_path: str, output_dir: str, task_type: Optional[s
                 report_payload['model_peak_ram_mb'] = model_peak_ram_summary
                 report_payload['model_peak_ram_mb_max'] = round(max(model_peak_ram_summary.values()), 2)
             json.dump(report_payload, f, indent=2, ensure_ascii=False)
-        logger.debug('  All models training completed')
         if any(status == 'failed' for status in results.values()):
             logger.error('[TRAIN_ALL] One or more models failed; see logs above for details.')
             return 1
@@ -2231,23 +2050,17 @@ def _genotype_to_prediction_train_file(genotype_input: str, train_chr_pos_keys: 
     tmp_dir.mkdir(parents=True, exist_ok=True)
     plink_tmp_prefix = str(tmp_dir / 'predict_plink')
     if is_vcf:
-        logger.debug('  Step 1: Converting VCF to PLINK format (temporary copy)...')
         plink_prefix = genotype_to_plink(genotype_input, plink_tmp_prefix, fmt='vcf')
     else:
         src_prefix = _resolve_plink_genotype_prefix(genotype_input)
         if src_prefix is None:
             raise FileNotFoundError(f'PLINK binary files not found for prefix: {genotype_input}')
-        logger.debug(f'  Copying PLINK binary genotype to temporary prefix: {plink_tmp_prefix}')
         plink_prefix = genotype_to_plink(src_prefix, plink_tmp_prefix, fmt='plink_binary')
     normalize_chromosome_names(plink_prefix)
     plink_for_recode = plink_prefix
     if train_chr_pos_keys:
-        logger.debug(f'  PLINK --extract on {len(train_chr_pos_keys):,} training chr_pos key(s) before recode...')
         extracted_prefix = str(tmp_dir / 'predict_plink_extracted')
         plink_for_recode = extract_snps_by_chr_pos_with_plink(plink_prefix, train_chr_pos_keys, extracted_prefix)
-    else:
-        logger.debug('  No training chr_pos keys available; recoding full genotype (may be slow and memory-intensive)')
-    logger.debug('  Converting extracted PLINK subset to training-matrix format...')
     fam_file = f'{plink_for_recode}.fam'
     if not Path(fam_file).exists():
         raise FileNotFoundError(f'PLINK .fam file not found: {fam_file}')
@@ -2256,7 +2069,6 @@ def _genotype_to_prediction_train_file(genotype_input: str, train_chr_pos_keys: 
     pheno_df = pd.DataFrame({'sample': sample_ids, 'phenotype': [0] * len(sample_ids)}).set_index('sample')
     temp_train_file = str(tmp_dir / 'predict_train_data.txt')
     actual_train_file = plink_to_training_data_optimized(plink_prefix=plink_for_recode, pheno_df=pheno_df, output_file=temp_train_file, tmp_dir=str(tmp_dir), use_cache=True).train_file
-    logger.debug(f'  Genotype conversion completed: {actual_train_file}')
     return actual_train_file
 
 def predict_with_model(input_path: str, model_path: str, output_dir: str, task_type: str) -> int:
@@ -2282,30 +2094,22 @@ def predict_with_model(input_path: str, model_path: str, output_dir: str, task_t
                     feature_info = json.load(f)
                 train_features = feature_info.get('feature_names') or []
                 train_chr_pos_keys = feature_info.get('feature_chr_pos_keys') or []
-            except Exception as e:
-                logger.debug(f'  Failed to load training_features.json: {e}')
+            except Exception:
+                pass
         if train_features and (not train_chr_pos_keys):
             train_chr_pos_keys = build_feature_chr_pos_keys(train_features)
-            logger.debug('  feature_chr_pos_keys not in model bundle; derived from feature_names')
         if is_genotype_input:
-            input_label = 'VCF' if is_vcf_input else 'PLINK binary'
-            logger.debug(f'Detected {input_label} genotype input: {input_path}')
             output_dir_path = Path(output_dir)
             tmp_dir = output_dir_path / 'tmp_predict'
             tmp_dir_to_clean = tmp_dir
             genotype_source = input_path if is_vcf_input else plink_prefix_input
             input_path = _genotype_to_prediction_train_file(genotype_source, train_chr_pos_keys, tmp_dir, is_vcf=is_vcf_input)
-        if not train_features:
-            logger.debug('  training_features.json not found or empty; feature alignment may be unreliable.')
         chr_pos_filter = set(train_chr_pos_keys) if train_chr_pos_keys else None
         X, _, _ = load_training_data(input_path, chr_pos_filter=chr_pos_filter)
         if not train_features:
             train_features = list(X.columns)
             train_chr_pos_keys = build_feature_chr_pos_keys(train_features)
         X_aligned, matched_count, missing_count = align_features_by_chr_pos(X, train_features, train_chr_pos_keys)
-        input_chr_pos_keys = {column_to_chr_pos(str(c)) or str(c) for c in X.columns}
-        extra_in_predict = len(input_chr_pos_keys - set(train_chr_pos_keys))
-        logger.debug(f'  Feature alignment (chr_pos): {matched_count} matched, {missing_count} missing (filled with 0), {extra_in_predict} extra chr_pos key(s) in input ignored')
         if matched_count == 0:
             logger.warning(f'  WARNING: No features matched between training and prediction data!\n  This will result in all-zero feature matrix and constant predictions.\n  Training chr_pos keys (first 20): {train_chr_pos_keys[:20]}\n  Input chr_pos keys (first 20): {[column_to_chr_pos(c) or c for c in X.columns[:20]]}')
         if missing_count > matched_count:
@@ -2315,26 +2119,15 @@ def predict_with_model(input_path: str, model_path: str, output_dir: str, task_t
         non_zero_counts = (X_aligned != 0).sum(axis=1)
         if (non_zero_counts == 0).all():
             logger.error(f'  ERROR: All feature values are zero! This will result in constant predictions.\n  Matched features: {matched_count}\n  Missing features: {missing_count}\n  Please check if chr_pos keys match between training and prediction data.')
-        elif missing_count:
-            missing_examples = [k for k in train_chr_pos_keys if k not in {column_to_chr_pos(c) or c for c in X.columns}][:5]
-            logger.debug(f'  {missing_count} training SNP(s) missing in predict input; filled with 0. Example chr_pos: {missing_examples}')
         if not model_file.exists():
             raise FileNotFoundError(f'Model file not found: {model_file}')
         import joblib
         model = joblib.load(model_file)
-        logger.debug('  Loading pre-trained model')
-        feature_variance = X_aligned.var()
-        zero_variance_features = (feature_variance == 0).sum()
-        if zero_variance_features > 0:
-            logger.debug(f'  WARNING: {zero_variance_features} features have zero variance (constant values)')
         y_pred = model.predict(X_aligned)
         y_prob = model.predict_proba(X_aligned) if task_type == 'classification' and hasattr(model, 'predict_proba') else None
         unique_predictions = len(np.unique(y_pred))
-        logger.debug(f'  Prediction statistics: {unique_predictions} unique values out of {len(y_pred)} samples')
         if unique_predictions == 1:
             logger.error(f"  ERROR: All predictions are the same value: {y_pred[0]}\n  This usually indicates one of the following issues:\n  1. chr_pos keys don't match between training and prediction data\n  2. All feature values are zero (check matched features: {matched_count})\n  3. Model is predicting a constant value for all samples\n  Please check the feature alignment logs above.")
-        else:
-            logger.debug(f'  Prediction range: [{np.min(y_pred):.4f}, {np.max(y_pred):.4f}], mean: {np.mean(y_pred):.4f}')
         pred_output_dir = Path(output_dir)
         pred_output_dir.mkdir(parents=True, exist_ok=True)
         pred_file = pred_output_dir / f'{model_type}_predictions.tsv'
@@ -2347,7 +2140,7 @@ def predict_with_model(input_path: str, model_path: str, output_dir: str, task_t
         if is_genotype_input and tmp_dir_to_clean and tmp_dir_to_clean.exists():
             try:
                 shutil.rmtree(tmp_dir_to_clean, ignore_errors=True)
-            except Exception as e:
+            except Exception:
                 pass
         return 0
     except Exception as e:

@@ -2,13 +2,13 @@
 
 本目录的 `meta.yaml` 可直接复制到 [bioconda-recipes](https://github.com/bioconda/bioconda-recipes) 的 `recipes/g2pinsight/`。
 
-当前对应 PyPI 版本：**1.0.8**（sha256 已写入 `meta.yaml`）。
+当前对应 PyPI 版本：**1.0.9**（发版后需更新 `meta.yaml` 的 sha256）。
 
 ---
 
 ## 第 0 步：前置检查（本仓库已就绪）
 
-- [x] 已发布到 PyPI：`pip install G2PInsight==1.0.8`
+- [ ] 已发布到 PyPI：`pip install G2PInsight==1.0.9`
 - [x] sdist 含 `LICENSE`
 - [x] 入口脚本：`G2PInsight`
 - [x] 本目录已有 `meta.yaml`

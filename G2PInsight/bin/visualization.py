@@ -44,24 +44,24 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# 1. Shared palettes & axis helpers
-# ---------------------------------------------------------------------------
 
-# Cohesive palette for SHAP / genome-wide visualizations
+
+
+
+
 _SHAP_PALETTE = {
     'positive': '#B5533E',
     'negative': '#3E5C76',
     'neutral': '#5C677D',
     'zero_line': '#BBBBBB',
 }
-# SNP genotype feature values: 0, 1, 2 (discrete colors, no gradient)
+
 _GENOTYPE_VALUE_COLORS = ['#3E5C76', '#8DA9C4', '#C1666B']
 _GENOTYPE_CMAP = ListedColormap(_GENOTYPE_VALUE_COLORS)
 _GENOTYPE_NORM = BoundaryNorm(boundaries=[-0.5, 0.5, 1.5, 2.5], ncolors=len(_GENOTYPE_VALUE_COLORS))
 _GENOTYPE_SCATTER_KW = {'cmap': _GENOTYPE_CMAP, 'norm': _GENOTYPE_NORM, 'alpha': 0.78, 'edgecolors': 'none'}
 
-# Cohesive palette for CV / performance bar charts
+
 _CV_PALETTE = {
     'corr': '#3E5C76',
     'accuracy': '#3E5C76',
@@ -76,10 +76,10 @@ _CV_BAR_KW = {'alpha': 0.92, 'edgecolor': 'white', 'linewidth': 0.7}
 _CV_GROUP_BAR_KW = {'alpha': 0.92, 'edgecolor': 'white', 'linewidth': 0.7}
 _CV_BAR_WIDTH_COMPACT = 0.58
 
-# Palette / bar style for held-out *test* metric bars (*_test_metrics.png)
-# Classification metrics reuse _CV_PALETTE so test / CV plots stay consistent.
+
+
 _TEST_METRIC_PALETTE = {
-    'test': '#4EB5FF',  # regression / fallback
+    'test': '#4EB5FF',
     'accuracy': _CV_PALETTE['accuracy'],
     'recall': _CV_PALETTE['recall'],
     'f1': _CV_PALETTE['f1'],
@@ -92,7 +92,7 @@ _TEST_METRIC_REG_YMIN = -1.05
 _TEST_METRIC_REG_YMAX = 1.08
 _TEST_METRIC_LABEL_PAD = 0.015
 
-# Confusion matrix heatmap
+
 _CONFUSION_CMAP = 'Blues'
 
 def _test_metric_score_limits(task_type: str) -> Tuple[float, float]:
@@ -257,7 +257,6 @@ def _warn_missing_regression_test_metrics(test_metrics: Dict) -> None:
     missing = [label for key, label, _ in _regression_test_bar_specs() if key != 'pearson_correlation' and _metric_float(test_metrics.get(key)) is None]
     if not missing:
         return
-    logger.debug('  Held-out test metrics missing from saved training results (not inferred): %s. Re-run train to compute R²/RMSE/MAE, then visualize again.', ', '.join(missing))
 
 def _plot_test_metric_bar_panel(ax: Axes, metric_names: List[str], vals: List[float], *, ylabel: str, ylim: Tuple[float, float], fmt: str='.4f') -> None:
     x = np.arange(len(metric_names))
@@ -290,9 +289,9 @@ def _resolve_output_prefix(output_dir: Path, output_prefix: Optional[Union[str, 
         output_prefix_path = output_dir / output_prefix_path.name
     return output_dir / output_prefix_path.name
 
-# ---------------------------------------------------------------------------
-# 2. Genome-wide importance (CLI -i)
-# ---------------------------------------------------------------------------
+
+
+
 
 class EnhancedGenomeVisualizer:
 
@@ -315,13 +314,6 @@ class EnhancedGenomeVisualizer:
     def _initialize_data(self):
         self.df = self._load_and_process()
         self.threshold = self._calculate_threshold()
-        try:
-            effect_col_display = self.effect_col or 'None'
-            logger.debug(f'Visualization data loaded: file={self.input_file}, rows={len(self.df)}, feature_col={self.feature_col}, value_col={self.value_col}, effect_col={effect_col_display}')
-            logger.debug(f'Significance threshold (abs value, 99th percentile): {self.threshold:.4g}')
-        except Exception:
-            pass
-
 
     def _detect_separator(self, file_path: Path) -> str:
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -412,14 +404,9 @@ class EnhancedGenomeVisualizer:
         if len(df) == 0:
             raise ValueError('Input file is empty')
         if df[self.value_col].isna().sum() > 0:
-            logger.debug(f'Value column {self.value_col} contains {df[self.value_col].isna().sum():,} missing values, will be automatically removed')
             df = df.dropna(subset=[self.value_col])
             if len(df) == 0:
                 raise ValueError('No data remaining after removing missing values')
-        value_range = df[self.value_col].max() - df[self.value_col].min()
-        if value_range < 1e-09:
-            logger.debug(f'Value column {self.value_col} has a very small range, which may affect visualization quality')
-        logger.debug(f'Loading all data points: {len(df):,} features')
         snp_series = df[self.feature_col].astype(str)
         snp_clean = snp_series.str.replace('^chr', '', case=False, regex=True)
         chrom_pos = snp_clean.str.extract('^(?P<chrom>[0-9A-Za-z]+)[_:](?P<pos>\\d+)$')
@@ -439,7 +426,6 @@ class EnhancedGenomeVisualizer:
         if invalid_mask.any():
             invalid_count = int(invalid_mask.sum())
             invalid_samples = df.loc[invalid_mask, self.feature_col].head(3).tolist()
-            logger.debug(f"Detected invalid feature name(s) that do not match 'chrom_pos' format; will be dropped. invalid={invalid_count:,}/{len(df):,}, samples={invalid_samples}")
             df = df.loc[~invalid_mask].copy()
             chrom_pos = chrom_pos.loc[~invalid_mask]
             chrom_num_series = chrom_num_series.loc[~invalid_mask]
@@ -487,7 +473,7 @@ class EnhancedGenomeVisualizer:
         n = len(self.df)
         log_n = math.log10(n + 1)
         size = max(4, min(52, 260 / (1 + log_n * 0.82)))
-        # Tiered opacity: keep markers visible when SNP count is high (avoid alpha -> 0)
+
         if n <= 5000:
             alpha = 0.88
         elif n <= 50000:
@@ -501,7 +487,6 @@ class EnhancedGenomeVisualizer:
         return (size, alpha)
 
     def plot_static_scatter(self, output_file: str, dpi: int=1200, **kwargs) -> None:
-        logger.debug(f'Drawing static scatter: input={self.input_file}, output={output_file}, rows={len(self.df)}, feature_col={self.feature_col}, value_col={self.value_col}')
         try:
             self._plot_static_scatter(output_file, dpi, **kwargs)
         except Exception as e:
@@ -518,7 +503,6 @@ class EnhancedGenomeVisualizer:
         self._save_figure(fig, output_file, save_dpi)
 
     def plot_interactive_scatter(self, output_file: str, **kwargs) -> None:
-        logger.debug(f'Drawing interactive scatter: input={self.input_file}, output={output_file}, rows={len(self.df)}, feature_col={self.feature_col}, value_col={self.value_col}')
         try:
             self._plot_interactive_scatter(output_file, **kwargs)
         except Exception as e:
@@ -605,7 +589,6 @@ class EnhancedGenomeVisualizer:
         return 'shap' in self.input_file.name.lower()
 
     def plot_top_snps_bar(self, output_file: str, top_n: int=20, dpi: int=300, **kwargs) -> None:
-        logger.debug(f'Drawing top-SNPs bar chart: input={self.input_file}, output={output_file}, top_n={top_n}, rows={len(self.df)}')
         try:
             self._plot_top_snps_bar(output_file, top_n=top_n, dpi=dpi, **kwargs)
         except Exception as e:
@@ -642,13 +625,11 @@ class EnhancedGenomeVisualizer:
 
     def plot_top_snps_dependence(self, dependence_npz: Union[str, Path], output_dir: Union[str, Path], output_prefix: Union[str, Path], top_n: int=20, dpi: int=300) -> List[Path]:
         top_features = self.df.nlargest(min(int(top_n), len(self.df)), 'value_abs')['feature'].astype(str).tolist()
-        logger.debug(f'Drawing top-SNPs dependence plots: npz={dependence_npz}, top_n={len(top_features)}, output_prefix={output_prefix}')
         return plot_top_snps_dependence(dependence_npz=dependence_npz, top_features=top_features, output_dir=output_dir, output_prefix=output_prefix, dpi=dpi)
 
     def plot_shap_summary(self, dependence_npz: Union[str, Path], output_dir: Union[str, Path], output_prefix: Union[str, Path], top_n: int=20, dpi: int=300) -> Optional[Path]:
         top_features = self.df.nlargest(min(int(top_n), len(self.df)), 'value_abs')['feature'].astype(str).tolist()
         out_file = Path(output_dir) / f'{Path(output_prefix).name}_shap_summary.png'
-        logger.debug(f'Drawing SHAP summary plot: npz={dependence_npz}, top_n={len(top_features)}, output={out_file}')
         return plot_shap_summary(dependence_npz=dependence_npz, top_features=top_features, output_file=out_file, dpi=dpi)
 
     def _save_figure(self, fig, output_path: str, dpi: int):
@@ -672,9 +653,9 @@ class EnhancedGenomeVisualizer:
             logger.error(f'Save failed: {str(e)}')
             raise
 
-# ---------------------------------------------------------------------------
-# 3. SHAP dependence / summary (needs *_shap_dependence.tsv)
-# ---------------------------------------------------------------------------
+
+
+
 
 def _normalize_snp_name(name: str) -> str:
     import re
@@ -938,7 +919,6 @@ def _resolve_top_feature_indices(top_features: List[str], feature_names: np.ndar
         if idx is None:
             idx = name_to_idx.get(_normalize_snp_name(key))
         if idx is None:
-            logger.debug(f'  Skip SHAP plot for {feature}: Feature not found in dependence data')
             continue
         if idx in seen:
             continue
@@ -952,10 +932,8 @@ def plot_shap_summary(dependence_npz: Union[str, Path], top_features: List[str],
         return None
     shap_values, X_values, feature_names = _load_shap_dependence_data(dependence_npz)
     n_samples = len(shap_values)
-    logger.debug(f'Summary plot input: {n_samples:,} sample(s) x {len(feature_names):,} SNP(s) in saved data')
     indices, _ = _resolve_top_feature_indices(top_features, feature_names)
     if not indices:
-        logger.debug('No valid features for SHAP summary plot')
         return None
     mean_abs = np.abs(shap_values[:, indices]).mean(axis=0)
     order = np.argsort(mean_abs)[::-1]
@@ -1000,7 +978,6 @@ def plot_shap_summary(dependence_npz: Union[str, Path], top_features: List[str],
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=dpi, bbox_inches='tight', facecolor='white')
     plt.close(fig)
-    logger.debug(f'SHAP summary plot saved: {out_path} ({n_show} SNPs, {n_samples:,} samples per SNP row)')
     return out_path
 
 def plot_top_snps_dependence(dependence_npz: Union[str, Path], top_features: List[str], output_dir: Union[str, Path], output_prefix: Union[str, Path], dpi: int=300) -> List[Path]:
@@ -1008,13 +985,11 @@ def plot_top_snps_dependence(dependence_npz: Union[str, Path], top_features: Lis
         return []
     shap_values, X_values, feature_names = _load_shap_dependence_data(dependence_npz)
     n_samples = len(shap_values)
-    logger.debug(f'Dependence plot input: {n_samples:,} sample(s) x {len(feature_names):,} SNP(s) in saved data')
     prefix = Path(output_prefix)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     indices, plotted_features = _resolve_top_feature_indices(top_features, feature_names)
     if not indices:
-        logger.debug('No valid features for SHAP dependence plot (check feature name match between shap_values.txt and shap_dependence.tsv)')
         return []
     n_plots = len(indices)
     n_cols = min(4, n_plots)
@@ -1043,12 +1018,11 @@ def plot_top_snps_dependence(dependence_npz: Union[str, Path], top_features: Lis
     out_file = output_dir / f'{prefix.name}_dependence.png'
     fig.savefig(out_file, dpi=dpi, bbox_inches='tight', pad_inches=0.25, facecolor='white')
     plt.close(fig)
-    logger.debug(f'SHAP dependence plot saved: {out_file} ({n_plots - n_failed}/{n_plots} panels, {n_samples:,} samples per panel)')
     return [out_file]
 
-# ---------------------------------------------------------------------------
-# 4. Performance / CV plots (CLI -I)
-# ---------------------------------------------------------------------------
+
+
+
 
 def _setup_matplotlib() -> Tuple[bool, Any]:
     try:
@@ -1062,7 +1036,6 @@ def _setup_matplotlib() -> Tuple[bool, Any]:
             pass
         return (True, plt)
     except ImportError:
-        logger.debug('  matplotlib not installed, skipping plotting functionality')
         return (False, None)
 
 def _ensure_numpy_array(data: Any) -> np.ndarray:
@@ -1082,7 +1055,6 @@ def load_cv_results_from_model_dir(model_dir: Union[str, Path], model_type: str)
         with open(json_path, 'r', encoding='utf-8') as f:
             return json.load(f)
     except Exception as e:
-        logger.debug(f'  Failed to load CV results from {json_path}: {e}')
         return None
 
 def load_plotting_data(plotting_data_file: Union[str, Path]) -> Dict:
@@ -1144,7 +1116,6 @@ def plot_test_set_metrics(test_metrics: Dict, output_dir: Union[str, Path], mode
         _, corr_names, corr_vals = _collect_metric_bar_values(test_metrics, corr_specs)
         _, err_names, err_vals = _collect_metric_bar_values(test_metrics, err_specs)
         if not corr_names and not err_names:
-            logger.debug('  Held-out test metrics plot: no plottable metrics')
             return None
         n_panels = int(bool(corr_names)) + int(bool(err_names))
         fig, axes = plt.subplots(1, n_panels, figsize=(4.2 * n_panels, 4.6), squeeze=False)
@@ -1170,7 +1141,6 @@ def plot_test_set_metrics(test_metrics: Dict, output_dir: Union[str, Path], mode
         specs = _task_metric_specs(task_type)
         metric_keys, metric_names, test_vals = _collect_metric_bar_values(test_metrics, specs)
         if not metric_names:
-            logger.debug('  Held-out test metrics plot: no plottable metrics')
             return None
         x = np.arange(len(metric_names))
         colors = _classification_metric_colors(metric_keys)
@@ -1187,7 +1157,6 @@ def plot_test_set_metrics(test_metrics: Dict, output_dir: Union[str, Path], mode
     plot_file = Path(f'{output_prefix_path}_test_metrics.png')
     fig.savefig(plot_file, dpi=300, bbox_inches='tight', facecolor='white')
     plt.close(fig)
-    logger.debug(f'   Held-out test metrics plot saved: {plot_file}')
     return plot_file
 
 def plot_confusion_matrix(y_true: Union[pd.Series, np.ndarray], y_pred: np.ndarray, output_dir: Union[str, Path], model_type: str, output_prefix: Optional[Union[str, Path]]=None, *, dpi: int=300) -> Optional[Path]:
@@ -1200,17 +1169,14 @@ def plot_confusion_matrix(y_true: Union[pd.Series, np.ndarray], y_pred: np.ndarr
     y_true_values = _ensure_numpy_array(y_true)
     y_pred_values = np.asarray(y_pred)
     if len(y_true_values) == 0 or len(y_pred_values) == 0:
-        logger.debug('  Confusion matrix: empty true or predicted labels')
         return None
     if len(y_true_values) != len(y_pred_values):
-        logger.debug(f'  Confusion matrix: label length mismatch ({len(y_true_values)} vs {len(y_pred_values)})')
         return None
     try:
         from sklearn.metrics import confusion_matrix, accuracy_score
         labels = sorted(np.unique(np.concatenate([y_true_values, y_pred_values])), key=lambda x: (isinstance(x, str), x))
         cm = confusion_matrix(y_true_values, y_pred_values, labels=labels)
         if cm.size == 0:
-            logger.debug('  Confusion matrix: no data to plot')
             return None
         row_sums = cm.sum(axis=1, keepdims=True)
         cm_norm = np.divide(cm.astype(float), row_sums, where=row_sums != 0)
@@ -1234,10 +1200,8 @@ def plot_confusion_matrix(y_true: Union[pd.Series, np.ndarray], y_pred: np.ndarr
         plot_file = Path(f'{output_prefix_path}_confusion_matrix.png')
         fig.savefig(plot_file, dpi=dpi, bbox_inches='tight', facecolor='white')
         plt.close(fig)
-        logger.debug(f'   Confusion matrix plot saved: {plot_file}')
         return plot_file
     except Exception as e:
-        logger.debug(f'  Failed to draw confusion matrix: {e}')
         try:
             plt.close()
         except Exception:
@@ -1246,11 +1210,9 @@ def plot_confusion_matrix(y_true: Union[pd.Series, np.ndarray], y_pred: np.ndarr
 
 def plot_cv_average_metrics(cv_results: Dict, output_dir: Union[str, Path], model_type: str, task_type: str, output_prefix: Optional[Union[str, Path]]=None) -> Optional[Path]:
     if task_type == 'regression':
-        logger.debug('  Skipping CV mean bar chart for regression (use cv_training_curves for per-fold Pearson r)')
         return None
     avg_metrics = cv_results.get('average_metrics') or {}
     if not avg_metrics:
-        logger.debug('  Training-set CV average metrics plot: no data')
         return None
     output_dir = Path(output_dir)
     output_prefix_path = _resolve_output_prefix(output_dir, output_prefix)
@@ -1291,7 +1253,6 @@ def plot_cv_average_metrics(cv_results: Dict, output_dir: Union[str, Path], mode
     plot_file = Path(f'{output_prefix_path}_cv_average_metrics.png')
     fig.savefig(plot_file, dpi=300, bbox_inches='tight', facecolor='white')
     plt.close(fig)
-    logger.debug(f'   Training-set CV average metrics plot saved: {plot_file}')
     return plot_file
 
 def plot_performance_curves(y_true: Union[pd.Series, np.ndarray], y_pred: np.ndarray, y_prob: Optional[np.ndarray], output_dir: Union[str, Path], model_type: str, task_type: str, publication_quality: bool=True, output_prefix: Optional[Union[str, Path]]=None) -> None:
@@ -1325,10 +1286,9 @@ def plot_performance_curves(y_true: Union[pd.Series, np.ndarray], y_pred: np.nda
                 pearson_corr = float(pearson_corr)
                 pearson_p = float(pearson_p) if not np.isnan(pearson_p) else None
         except Exception as e:
-            logger.debug(f'  Failed to calculate Pearson correlation coefficient: {str(e)}')
             pearson_corr = None
             pearson_p = None
-        # Coefficient of determination: R² = 1 - SS_res / SS_tot (not Pearson r²)
+
         r2_det = None
         try:
             from sklearn.metrics import r2_score
@@ -1351,7 +1311,7 @@ def plot_performance_curves(y_true: Union[pd.Series, np.ndarray], y_pred: np.nda
                 z = np.polyfit(y_true_values, y_pred_values, 1)
                 p = np.poly1d(z)
                 ax1.plot(y_true_values, p(y_true_values), '#E63946', linewidth=2, label=f'Fit (slope={z[0]:.3f})')
-            except:
+            except Exception:
                 pass
             ax1.set_xlabel('True Values', fontsize=10, fontweight='normal')
             ax1.set_ylabel('Predicted Values', fontsize=10, fontweight='normal')
@@ -1370,7 +1330,7 @@ def plot_performance_curves(y_true: Union[pd.Series, np.ndarray], y_pred: np.nda
                 z = np.polyfit(y_true_values, y_pred_values, 1)
                 p = np.poly1d(z)
                 ax1.plot(y_true_values, p(y_true_values), 'b-', linewidth=1.5, alpha=0.7, label=f'Fit Line (slope={z[0]:.3f})')
-            except:
+            except Exception:
                 pass
             ax1.set_xlabel('True Values', fontsize=12)
             ax1.set_ylabel('Predicted Values', fontsize=12)
@@ -1455,7 +1415,6 @@ def plot_performance_curves(y_true: Union[pd.Series, np.ndarray], y_pred: np.nda
                 plot_file_png = output_dir / 'performance_curves.png'
             plt.savefig(plot_file_pdf, dpi=300, bbox_inches='tight', format='pdf')
             plt.savefig(plot_file_png, dpi=300, bbox_inches='tight', format='png')
-            logger.debug(f'  Publication-quality plots saved: {plot_file_pdf} and {plot_file_png}')
         else:
             if output_prefix_path is not None:
                 plot_file = Path(f'{output_prefix_path}_performance_curves.png')
@@ -1465,7 +1424,6 @@ def plot_performance_curves(y_true: Union[pd.Series, np.ndarray], y_pred: np.nda
         plt.close()
     else:
         if y_prob is None:
-            logger.debug(' Classification task requires predicted probabilities, skip performance curves')
             return
         unique_classes = np.unique(y_true_values)
         n_classes = len(unique_classes)
@@ -1590,7 +1548,7 @@ def plot_performance_curves(y_true: Union[pd.Series, np.ndarray], y_pred: np.nda
             plt.savefig(plot_file1, dpi=150, bbox_inches='tight')
             plt.close()
         except Exception as e:
-            logger.debug(f' Failed to draw performance curves: {str(e)}')
+            logger.error(f'Performance curves generation failed: {str(e)}', exc_info=True)
 
 def plot_cv_training_curves(cv_results: Dict, output_dir: Union[str, Path], model_type: str, task_type: str, output_prefix: Optional[Union[str, Path]]=None) -> None:
     output_dir = Path(output_dir)
@@ -1611,7 +1569,6 @@ def plot_cv_training_curves(cv_results: Dict, output_dir: Union[str, Path], mode
         return
     n_folds = len(cv_results.get('fold_metrics', []))
     if n_folds == 0:
-        logger.debug('  No cross-validation results, skipping training curve plotting')
         return
     if task_type == 'regression':
         fig, ax1 = plt.subplots(1, 1, figsize=(8, 5.5))
@@ -1622,8 +1579,6 @@ def plot_cv_training_curves(cv_results: Dict, output_dir: Union[str, Path], mode
             corr_val = fold_metric.get('pearson_correlation')
             if isinstance(corr_val, (int, float)) and (not np.isnan(corr_val)):
                 pearson_corrs.append(corr_val)
-            else:
-                logger.debug(f'  Fold {i + 1}: Invalid correlation value: {corr_val}')
         if pearson_corrs and len(pearson_corrs) > 0:
             fig.text(0.5, 0.91, _cv_brief_stats(pearson_corrs), ha='center', va='top', fontsize=10, color='#444444', transform=fig.transFigure)
             _cv_draw_single_barplot(ax1, pearson_corrs, _CV_PALETTE['corr'], y_min=0.0, y_max=1.0, stats_text=False, show_stats=False, show_mean_legend=False, highlight_outliers=True, y_grid=False)
@@ -1734,9 +1689,7 @@ def plot_cv_training_curves(cv_results: Dict, output_dir: Union[str, Path], mode
             plot_file = output_dir / 'cv_training_curves.png'
         try:
             plt.savefig(plot_file, dpi=300, bbox_inches='tight', facecolor='white', format='png')
-            if plot_file.exists() and plot_file.stat().st_size > 0:
-                logger.debug(f'   Cross-validation bar plot saved: {plot_file} (size: {plot_file.stat().st_size:,} bytes)')
-            else:
+            if not plot_file.exists() or plot_file.stat().st_size == 0:
                 logger.error(f'   File save failed or file is empty: {plot_file}')
                 if plot_file.exists():
                     plot_file.unlink()
@@ -1745,7 +1698,6 @@ def plot_cv_training_curves(cv_results: Dict, output_dir: Union[str, Path], mode
             try:
                 plot_file_backup = output_dir / 'cv_training_curves_backup.png'
                 plt.savefig(plot_file_backup, dpi=150, bbox_inches='tight', facecolor='white', format='png')
-                logger.debug(f'   Backup file saved: {plot_file_backup}')
             except Exception as backup_error:
                 logger.error(f'   Backup save also failed: {str(backup_error)}')
         finally:
@@ -1754,7 +1706,7 @@ def plot_cv_training_curves(cv_results: Dict, output_dir: Union[str, Path], mode
         logger.error(f'   Error occurred while plotting cross-validation curves: {str(e)}', exc_info=True)
         try:
             plt.close()
-        except:
+        except Exception:
             pass
 
 def plot_model_performance_from_file(plotting_data_file: Union[str, Path], output_dir: Optional[Union[str, Path]]=None, publication_quality: Optional[bool]=None, output_prefix: Optional[Union[str, Path]]=None) -> int:
@@ -1776,7 +1728,6 @@ def plot_model_performance_from_file(plotting_data_file: Union[str, Path], outpu
             publication_quality = plotting_data['publication_quality']
         if plotting_data['y_test'] is not None and plotting_data['y_pred'] is not None:
             plot_performance_curves(plotting_data['y_test'], plotting_data['y_pred'], plotting_data['y_prob'], output_dir, plotting_data['model_type'], plotting_data['task_type'], publication_quality, output_prefix=output_prefix_path)
-            logger.debug(f'Performance evaluation curves generated: {output_prefix_path}_performance_curves.png')
             if plotting_data['task_type'] == 'classification':
                 plot_confusion_matrix(plotting_data['y_test'], plotting_data['y_pred'], output_dir, plotting_data['model_type'], output_prefix=output_prefix_path)
         if plotting_data['cv_results'] is not None:
@@ -1790,7 +1741,6 @@ def plot_model_performance_from_file(plotting_data_file: Union[str, Path], outpu
                 plot_test_set_metrics(test_metrics, output_dir, plotting_data['model_type'], plotting_data['task_type'], output_prefix=output_prefix_path)
             plot_cv_average_metrics(cv_results, output_dir, plotting_data['model_type'], plotting_data['task_type'], output_prefix=output_prefix_path)
             plot_cv_training_curves(cv_results, output_dir, plotting_data['model_type'], plotting_data['task_type'], output_prefix=output_prefix_path)
-            logger.debug(f'Cross-validation curves generated (training-set CV, diagnostic): {output_prefix_path}_cv_training_curves.png')
         return 0
     except FileNotFoundError as e:
         logger.error(f'File error: {str(e)}')

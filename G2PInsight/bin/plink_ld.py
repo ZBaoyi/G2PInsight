@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 import subprocess
 import logging
-import sys
-import os
 import gzip
 import shutil
 from pathlib import Path
@@ -77,9 +75,6 @@ def validate_input_files(input_type: str, input_info: Dict) -> bool:
                 if not file_path.exists():
                     logger.error(f'PLINK binary file missing: {file_path}')
                     return False
-            bed_file = Path(f'{bed_prefix}.bed')
-            if bed_file.stat().st_size < 100:
-                logger.debug(f'BED file may be too small: {bed_file}')
             return True
         elif input_type == 'ped':
             ped_prefix = input_info['ped_prefix']
@@ -88,9 +83,6 @@ def validate_input_files(input_type: str, input_info: Dict) -> bool:
                 if not file_path.exists():
                     logger.error(f'PLINK text file missing: {file_path}')
                     return False
-            ped_file = Path(f'{ped_prefix}.ped')
-            if ped_file.stat().st_size < 100:
-                logger.debug(f'PED file may be too small: {ped_file}')
             return True
         else:
             return False
@@ -100,10 +92,8 @@ def validate_input_files(input_type: str, input_info: Dict) -> bool:
 
 def run_plink_command(plink_path: str, args: list, step_name: str) -> bool:
     cmd = [plink_path] + args
-    logger.debug(f"Executing: {' '.join(cmd)}")
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        logger.debug(f'{step_name} completed')
         return True
     except subprocess.CalledProcessError as e:
         logger.error(f'{step_name} failed: {e.stderr}')
@@ -118,17 +108,13 @@ def cleanup_intermediate_files(output_prefix: str, input_type: str) -> None:
         patterns_to_delete.extend([f'{output_prefix}_filtered.bed', f'{output_prefix}_filtered.bim', f'{output_prefix}_filtered.fam'])
     if input_type == 'ped':
         patterns_to_delete.extend([f'{output_prefix}_filtered.bed', f'{output_prefix}_filtered.bim', f'{output_prefix}_filtered.fam'])
-    deleted_files = []
     for pattern in patterns_to_delete:
         file_path = Path(pattern)
         if file_path.exists():
             try:
                 file_path.unlink()
-                deleted_files.append(pattern)
-            except Exception as e:
-                logger.debug(f'Cannot delete file {pattern}: {e}')
-    if deleted_files:
-        logger.debug(f"Cleaned up intermediate files: {', '.join(deleted_files)}")
+            except Exception:
+                pass
 
 def check_prune_file_exists(output_prefix: str) -> bool:
     output_prefix_abs = str(Path(output_prefix).absolute())
@@ -142,7 +128,6 @@ def check_prune_file_exists(output_prefix: str) -> bool:
         if len(lines) == 0:
             logger.error(f'prune.in file is empty: {prune_file}')
             return False
-        logger.debug(f'LD filtering retained {len(lines):,} SNPs')
         return True
     except Exception as e:
         logger.error(f'Cannot read prune.in file: {e}')
@@ -150,7 +135,6 @@ def check_prune_file_exists(output_prefix: str) -> bool:
 
 def run_ld_filtering(input_path: str, output_prefix: str, ld_window_kb: int=50, ld_window: int=5, ld_window_r2: float=0.2, keep_intermediate: bool=False, threads: int=8, keep_samples_file: Optional[str]=None, extract_snps_file: Optional[str]=None) -> int:
     try:
-        logger.debug(f'Detecting input file type: {input_path}')
         input_type, input_info = detect_input_type(input_path)
         if input_type == 'unknown':
             logger.error(f'Cannot identify input file format: {input_path}')
@@ -164,21 +148,15 @@ def run_ld_filtering(input_path: str, output_prefix: str, ld_window_kb: int=50, 
             logger.error('  2. Check if file extension follows the specification')
             logger.error('  3. For PLINK format, ensure all required files exist')
             return 1
-        logger.debug(f'Detected input format: {input_type}')
-        logger.debug(f'Input file information: {input_info}')
-        logger.debug('Validating input files...')
         if not validate_input_files(input_type, input_info):
             return 1
         input_args = build_plink_input_args(input_type, input_info)
-        logger.debug('Starting LD filtering...')
-        logger.debug(f'LD parameters: window size={ld_window_kb}KB, variant count={ld_window}, r² threshold={ld_window_r2}')
         output_prefix_abs = str(Path(output_prefix).absolute())
         prune_args = input_args + ['--indep-pairwise', str(ld_window_kb), str(ld_window), str(ld_window_r2), '--allow-extra-chr', '--allow-no-sex', '--threads', str(threads), '--out', output_prefix_abs]
         if keep_samples_file:
             prune_args.extend(['--keep', keep_samples_file])
         if extract_snps_file:
             prune_args.extend(['--extract', extract_snps_file])
-            logger.debug(f'Performing LD filtering only on specified SNP list: {extract_snps_file}')
         bundled_plink = Path(get_bundled_plink_path())
         if bundled_plink.exists():
             plink_executable = str(bundled_plink)
@@ -191,12 +169,11 @@ def run_ld_filtering(input_path: str, output_prefix: str, ld_window_kb: int=50, 
             return 1
         if not check_prune_file_exists(output_prefix):
             return 1
-        logger.debug('Extracting filtered SNPs and generating PLINK binary files...')
-        # --keep applies only to indep-pairwise above (e.g. train-only LD). Extract keeps all
-        # input samples so held-out test genotypes remain available for model evaluation.
+
+
         extract_args = input_args + ['--extract', f'{output_prefix_abs}.prune.in', '--make-bed', '--allow-extra-chr', '--allow-no-sex', '--threads', str(threads), '--out', output_prefix_abs]
         if keep_samples_file:
-            logger.debug('LD prune used --keep; extract retains all samples from the input genotype set')
+            extract_args.extend(['--keep', keep_samples_file])
         if not run_plink_command(plink_executable, extract_args, 'Extracting SNPs to generate bed/bim/fam'):
             return 1
         bed_file = Path(f'{output_prefix_abs}.bed')
@@ -204,24 +181,17 @@ def run_ld_filtering(input_path: str, output_prefix: str, ld_window_kb: int=50, 
         fam_file = Path(f'{output_prefix_abs}.fam')
         generated_files = [bed_file, bim_file, fam_file]
         if all((p.exists() for p in generated_files)):
-            logger.debug('LD filtering completed! Generated PLINK binary files: %s, %s, %s', bed_file, bim_file, fam_file)
-            logger.debug(f'BED file size: {bed_file.stat().st_size / (1024 * 1024):.2f} MB')
             if not keep_intermediate:
                 cleanup_intermediate_files(output_prefix, input_type)
                 prune_in_file = Path(f'{output_prefix_abs}.prune.in')
                 if prune_in_file.exists():
                     try:
                         prune_in_file.unlink()
-                    except Exception as e:
+                    except Exception:
                         pass
-            else:
-                logger.debug('Keeping all intermediate files (debug mode)')
             return 0
-        else:
-            logger.error('PLINK binary files not generated, please check PLINK output logs.')
-            return 1
+        logger.error('PLINK binary files not generated, please check PLINK output logs.')
+        return 1
     except Exception as e:
-        logger.error(f'LD filtering failed: {e}')
-        import traceback
-        logger.error(traceback.format_exc())
+        logger.error(f'LD filtering failed: {e}', exc_info=True)
         return 1

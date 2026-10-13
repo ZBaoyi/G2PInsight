@@ -40,7 +40,7 @@ def detect_available_fonts() -> Tuple[Optional[str], Optional[str]]:
                 break
         if not english_font:
             english_font = 'DejaVu Sans'
-        # Only keep a Chinese default when a real CJK face exists; otherwise prefer English.
+
         if not chinese_font:
             chinese_font = None
         return (chinese_font, english_font)
@@ -60,7 +60,7 @@ def setup_matplotlib_font(chinese_font: Optional[str]=None, english_font: Option
                 chinese_font = detected_cn
             if english_font is None:
                 english_font = detected_en
-        # Prefer real Chinese face when present; otherwise use English (e.g. Times New Roman).
+
         default_font = chinese_font or english_font or 'DejaVu Sans'
         fallback_en = english_font or 'DejaVu Sans'
         serif_prefer = {'Times New Roman', 'Times', 'Liberation Serif', 'DejaVu Serif', 'Georgia'}
@@ -69,7 +69,7 @@ def setup_matplotlib_font(chinese_font: Optional[str]=None, english_font: Option
             plt.rcParams['font.family'] = 'serif'
             plt.rcParams['font.serif'] = [face, 'Times New Roman', 'DejaVu Serif', 'Liberation Serif']
             plt.rcParams['font.sans-serif'] = [fallback_en, 'DejaVu Sans']
-            # STIX math glyphs (subscripts etc.) — Times New Roman lacks Unicode ₁₀
+
             plt.rcParams['mathtext.fontset'] = 'stix'
         else:
             plt.rcParams['font.family'] = 'sans-serif'

@@ -105,7 +105,6 @@ def run_unified_visualization(args) -> int:
                 logger.error(f'Model plotting data file does not exist: {plotting_data_file}')
                 result_code = 1
             else:
-                logger.debug(f'Loading model plotting data from file: {plotting_data_file}')
                 perf_result = plot_model_performance_from_file(plotting_data_file=plotting_data_file, output_dir=output_dir, publication_quality=None, output_prefix=output_prefix)
                 if perf_result != 0:
                     result_code = perf_result
@@ -130,34 +129,14 @@ def run_unified_visualization(args) -> int:
             if top_snps_n is None:
                 top_snps_n = 20
             visualizer.plot_static_scatter(output_file=str(static_output))
-            logger.debug(f'Static feature-importance plot(s) generated from: {static_output}')
             visualizer.plot_interactive_scatter(output_file=str(interactive_output))
-            logger.debug(f'Interactive feature-importance plot generated: {interactive_output}')
             visualizer.plot_top_snps_bar(output_file=str(bar_output), top_n=int(top_snps_n))
-            logger.debug(f'Top-SNPs bar chart generated: {bar_output}')
             if is_shap_input:
                 from G2PInsight.bin.visualization import resolve_shap_dependence_file
                 dep_file = resolve_shap_dependence_file(importance_file)
                 if dep_file.exists():
-                    plotting_meta_file = importance_file.parent / importance_file.name.replace('_shap_values.txt', '_plotting_data.json')
-                    if plotting_meta_file.exists():
-                        try:
-                            import json
-                            with open(plotting_meta_file, 'r', encoding='utf-8') as meta_f:
-                                plotting_meta = json.load(meta_f)
-                            dep_cap = plotting_meta.get('shap_dependence_top')
-                            if dep_cap and int(top_snps_n) > int(dep_cap):
-                                logger.debug(f'--top_snps {int(top_snps_n)} exceeds training --shap_dependence_top {int(dep_cap)}; dependence/summary plots cover at most {int(dep_cap)} SNPs')
-                        except Exception:
-                            pass
-                    dep_saved = visualizer.plot_top_snps_dependence(dependence_npz=str(dep_file), output_dir=str(output_dir), output_prefix=str(output_prefix), top_n=int(top_snps_n))
-                    if dep_saved:
-                        logger.debug(f'SHAP dependence plot generated: {dep_saved[0]} ({len(dep_saved)} panel file, {int(top_snps_n)} SNPs)')
-                    summary_path = visualizer.plot_shap_summary(dependence_npz=str(dep_file), output_dir=str(output_dir), output_prefix=str(output_prefix), top_n=int(top_snps_n))
-                    if summary_path:
-                        logger.debug(f'SHAP summary plot generated: {summary_path}')
-                else:
-                    logger.debug(f'SHAP dependence data not found: {dep_file}. Re-run model training to produce *_shap_dependence.tsv, then visualize again.')
+                    visualizer.plot_top_snps_dependence(dependence_npz=str(dep_file), output_dir=str(output_dir), output_prefix=str(output_prefix), top_n=int(top_snps_n))
+                    visualizer.plot_shap_summary(dependence_npz=str(dep_file), output_dir=str(output_dir), output_prefix=str(output_prefix), top_n=int(top_snps_n))
             logger.info('Feature-importance visualization completed')
         except ImportError as e:
             logger.error(f'Module import error: {str(e)}')
@@ -201,14 +180,6 @@ class _HelpFormatter(argparse.RawDescriptionHelpFormatter):
             return ''
         return super()._format_action_invocation(action)
 
-def add_genotype_input_arguments(parser: argparse.ArgumentParser, *, required: bool=True) -> argparse._MutuallyExclusiveGroup:
-    """Lightweight CLI helper (kept in main to avoid importing preprocess for -h)."""
-    group = parser.add_mutually_exclusive_group(required=required)
-    group.add_argument('--bfile', metavar='PREFIX', dest='bfile', help='PLINK binary prefix (.bed/.bim/.fam)')
-    group.add_argument('--file', metavar='PREFIX', dest='file', help='PLINK text prefix (.map/.ped)')
-    group.add_argument('--vcf', metavar='PATH', dest='vcf', help='VCF file (.vcf / .vcf.gz)')
-    return group
-
 def _add_subparser(subparsers: argparse._SubParsersAction, name: str, *, help: str, description: str, epilog: Optional[str]=None) -> argparse.ArgumentParser:
     return subparsers.add_parser(name, help=help, description=description, epilog=epilog, formatter_class=_HelpFormatter)
 
@@ -227,7 +198,7 @@ Run "G2PInsight <command> -h" for command-specific options.
     parser = argparse.ArgumentParser(prog='G2PInsight', description='G2PInsight — genotype–phenotype ML toolkit', formatter_class=_HelpFormatter, epilog=top_epilog)
     parser.add_argument('--version', action='version', version=f'G2PInsight {__version__}')
     subparsers = parser.add_subparsers(title='commands', dest='command', metavar='COMMAND')
-    # Longer one-line helps avoid awkward wraps under the COMMAND column
+
     _cmd_help = {
         'preprocess': 'QC + optional GWAS/LD → matrix & metadata',
         'train': 'Train one model (fixed 5-fold CV)',
@@ -236,7 +207,7 @@ Run "G2PInsight <command> -h" for command-specific options.
         'visualize': 'Plots from SHAP / plotting JSON',
     }
 
-    # --- preprocess ---
+
     preprocess_parser = _add_subparser(subparsers, 'preprocess', help=_cmd_help['preprocess'], description='Build the sample×SNP training matrix and metadata JSON.\nAfter QC, fixes a reproducible train/test split; GWAS/LD use train only.', epilog='Example:\n  G2PInsight preprocess --bfile geno -p pheno.txt -o results/ -f 4')
     geno_g = preprocess_parser.add_argument_group('genotype (choose one)')
     geno_mx = geno_g.add_mutually_exclusive_group(required=True)
@@ -257,7 +228,7 @@ Run "G2PInsight <command> -h" for command-specific options.
     split_g.add_argument('--random_state', type=int, default=42, metavar='N', help='Seed for default sorted-ID 80/20 split (default: 42)')
     preprocess_parser.set_defaults(func=run_preprocess)
 
-    # --- train ---
+
     train_parser = _add_subparser(subparsers, 'train', help=_cmd_help['train'], description='Train one model using preprocess metadata.\nUses fixed 5-fold CV on the train split; test set is evaluation-only.', epilog='Example:\n  G2PInsight train -j results/preprocess/results_metadata.json -m LightGBM -o results/')
     train_req = train_parser.add_argument_group('required')
     train_req.add_argument('-j', '--json', required=True, metavar='FILE', help='Preprocess *_metadata.json')
@@ -271,7 +242,7 @@ Run "G2PInsight <command> -h" for command-specific options.
     train_opt.add_argument('--hyperparameter_search', dest='hyperparameter_search', action='store_true', help='Enable RandomizedSearchCV (off by default)')
     train_parser.set_defaults(hyperparameter_search=False, func=run_training)
 
-    # --- train-all ---
+
     train_all_parser = _add_subparser(subparsers, 'train-all', help=_cmd_help['train-all'], description='Train every supported model on the same preprocess split.\nKeeps the best model by held-out test metrics.', epilog='Example:\n  G2PInsight train-all -j results/preprocess/results_metadata.json -o results/ --threads 4')
     ta_req = train_all_parser.add_argument_group('required')
     ta_req.add_argument('-j', '--json', required=True, metavar='FILE', help='Preprocess *_metadata.json')
@@ -285,7 +256,7 @@ Run "G2PInsight <command> -h" for command-specific options.
     ta_opt.add_argument('--hyperparameter_search', dest='hyperparameter_search', action='store_true', help='Enable RandomizedSearchCV (off by default)')
     train_all_parser.set_defaults(hyperparameter_search=False, func=run_train_all)
 
-    # --- predict ---
+
     predict_parser = _add_subparser(subparsers, 'predict', help=_cmd_help['predict'], description='Apply a saved .pkl model to new samples.\nWrites <output_dir>/predict/{Model}_predictions.tsv.', epilog='Example:\n  G2PInsight predict -i new_geno -m results/train/LightGBM/LightGBM_model.pkl -o results/')
     pred_req = predict_parser.add_argument_group('required')
     pred_req.add_argument('-i', '--input', required=True, metavar='PATH', help='Input matrix (.txt/.gz) or genotype prefix/VCF')
@@ -295,7 +266,7 @@ Run "G2PInsight <command> -h" for command-specific options.
     pred_opt.add_argument('--task_type', metavar='TYPE', choices=['classification', 'regression'], help='classification | regression (optional)')
     predict_parser.set_defaults(func=run_predict)
 
-    # --- visualize ---
+
     viz_parser = _add_subparser(subparsers, 'visualize', help=_cmd_help['visualize'], description='Render importance and/or performance plots.\nProvide at least one of -i/--importance or -I/--indicator.', epilog='Examples:\n  G2PInsight visualize -I results/train/LightGBM/LightGBM_plotting_data.json -o results/plot/perf\n  G2PInsight visualize -i results/train/LightGBM/LightGBM_shap_values.txt -o results/plot/shap')
     viz_in = viz_parser.add_argument_group('input (at least one)')
     viz_in.add_argument('-i', '--importance', metavar='FILE', help='Feature-importance / SHAP values file')
@@ -324,7 +295,7 @@ def main() -> None:
         init_logging(Path('G2PInsight.log'))
         print_banner()
     else:
-        # Minimal console logging for -h/--version (avoid slow path side effects)
+
         logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
     parser = setup_argparse()
     if len(sys.argv) == 1:
