@@ -35,20 +35,7 @@ try:
     PSUTIL_AVAILABLE = True
 except ImportError:
     PSUTIL_AVAILABLE = False
-
 class PeakMemoryTracker:
-    """Poll RSS and track peak during start()..stop().
-
-    With include_children=True, sums this process + descendants (process tree).
-
-    Important: do NOT treat resource.ru_maxrss as the window peak by itself.
-    ru_maxrss is a process-lifetime high-water mark and never decreases, so in
-    serial train-all (multiple models in one process) every later model would
-    incorrectly report the same lifetime max. We track instantaneous RSS over
-    the window; ru_maxrss is only used when it rises above the start baseline
-    (captures a new lifetime high that a coarse poll might miss).
-    """
-
     def __init__(self, poll_interval_sec: float=0.5, include_children: bool=False):
         self._peak_bytes = 0
         self._stop = threading.Event()
@@ -56,17 +43,14 @@ class PeakMemoryTracker:
         self._poll_interval = poll_interval_sec
         self._include_children = bool(include_children)
         self._ru_baseline = 0
-
     @staticmethod
     def _ru_maxrss_bytes() -> int:
         rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         if sys.platform == 'darwin':
             return int(rss)
         return int(rss) * 1024
-
     @staticmethod
     def _proc_self_rss_bytes() -> Optional[int]:
-        """Linux current RSS via /proc (no psutil required)."""
         try:
             with open('/proc/self/status', 'r', encoding='utf-8') as f:
                 for line in f:
@@ -77,7 +61,6 @@ class PeakMemoryTracker:
         except (OSError, ValueError):
             return None
         return None
-
     def _self_rss_bytes(self) -> int:
         if PSUTIL_AVAILABLE:
             try:
@@ -88,7 +71,6 @@ class PeakMemoryTracker:
         if proc_rss is not None:
             return proc_rss
         return self._ru_maxrss_bytes()
-
     def _sample_rss_bytes(self) -> int:
         rss = self._self_rss_bytes()
         if not self._include_children or not PSUTIL_AVAILABLE:
@@ -103,21 +85,16 @@ class PeakMemoryTracker:
         except (psutil.Error, OSError):
             pass
         return rss
-
     def _can_poll(self) -> bool:
-
         if PSUTIL_AVAILABLE:
             return True
         return self._proc_self_rss_bytes() is not None
-
     def _update_peak(self) -> None:
         rss = self._sample_rss_bytes()
         self._peak_bytes = max(self._peak_bytes, rss)
-
         ru_now = self._ru_maxrss_bytes()
         if ru_now > self._ru_baseline:
             self._peak_bytes = max(self._peak_bytes, ru_now)
-
     def start(self) -> 'PeakMemoryTracker':
         self._ru_baseline = self._ru_maxrss_bytes()
         self._peak_bytes = self._sample_rss_bytes()
@@ -125,14 +102,12 @@ class PeakMemoryTracker:
             self._thread = threading.Thread(target=self._poll_loop, daemon=True)
             self._thread.start()
         return self
-
     def _poll_loop(self) -> None:
         while not self._stop.wait(self._poll_interval):
             try:
                 self._update_peak()
             except Exception:
                 pass
-
     def stop(self) -> float:
         if self._thread is not None:
             self._stop.set()
@@ -145,20 +120,17 @@ CLEANUP_TEMP_FILES = True
 DEFAULT_N_JOBS = 1
 TRAIN_ALL_MAX_AUTO_WORKERS = 4
 _MAIN_PROCESS_PID = os.getpid()
-
 def _is_main_process() -> bool:
     try:
         return mp.current_process().name == 'MainProcess'
     except Exception:
         return os.getpid() == _MAIN_PROCESS_PID
-
 def _reset_worker_signal_handlers() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             signal.signal(sig, signal.SIG_DFL)
         except (ValueError, OSError):
             pass
-
 def _resolve_train_all_parallelism(num_models: int, parallel_models: Optional[int]=None, threads: Optional[int]=None) -> Tuple[int, int]:
     if parallel_models is None:
         parallel_model_count = 1
@@ -166,7 +138,6 @@ def _resolve_train_all_parallelism(num_models: int, parallel_models: Optional[in
         parallel_model_count = max(1, min(int(parallel_models), num_models))
     cpu_cores_per_worker = DEFAULT_N_JOBS if threads is None else max(1, int(threads))
     return (max(1, parallel_model_count), cpu_cores_per_worker)
-
 def _log_worker_crash_hint(*, parallel_mode: bool) -> None:
     if parallel_mode:
         logger.error('[TRAIN_ALL] Parallel training aborted: a worker process was terminated abruptly (likely insufficient memory or CPU).')
@@ -174,22 +145,17 @@ def _log_worker_crash_hint(*, parallel_mode: bool) -> None:
     else:
         logger.error('[TRAIN_ALL] A model worker was terminated abruptly (likely OOM or native-library crash).')
         logger.error('[TRAIN_ALL] Increase SLURM --mem, or train the failed model alone: G2PInsight train -m <Model> ...')
-
 MODEL_HP_SEARCH_N_ITER: Dict[str, int] = {'RandomForest': 15, 'SVM': 20}
 HIGH_DIM_FEATURE_RF_THRESHOLD = 1000
 HIGH_DIM_SHAP_DEPENDENCE_THRESHOLD = 1000
 SHAP_DEPENDENCE_MAX_FEATURES = 50
-
 def _resolve_shap_dependence_max_features(value: Optional[int]) -> int:
     if value is None:
         return SHAP_DEPENDENCE_MAX_FEATURES
     return max(0, int(value))
-
 def _resolve_hp_search_n_iter(model_type: str) -> int:
     return MODEL_HP_SEARCH_N_ITER.get(model_type, 30)
-
 class TempFileManager:
-
     def __init__(self):
         self.temp_files: List[Path] = []
         self.temp_dirs: List[Path] = []
@@ -197,7 +163,6 @@ class TempFileManager:
         self._cleanup_registered = False
         self._cleaned = False
         self._register_exit_handlers()
-
     def _register_exit_handlers(self):
         if self._cleanup_registered:
             return
@@ -210,31 +175,26 @@ class TempFileManager:
         except (ValueError, OSError):
             pass
         self._cleanup_registered = True
-
     def _signal_handler(self, signum, frame):
         self.cleanup_on_exit()
         signal.signal(signum, signal.SIG_DFL)
         os.kill(os.getpid(), signum)
-
     def register_file(self, file_path: Path) -> Path:
         file_path = Path(file_path).absolute()
         if file_path not in self.temp_files:
             self.temp_files.append(file_path)
         return file_path
-
     def register_dir(self, dir_path: Path) -> Path:
         dir_path = Path(dir_path).absolute()
         dir_path.mkdir(parents=True, exist_ok=True)
         if dir_path not in self.temp_dirs:
             self.temp_dirs.append(dir_path)
         return dir_path
-
     def register_preprocess_tmp_dir(self, dir_path: Path) -> Path:
         dir_path = Path(dir_path).absolute()
         if dir_path not in self.preprocess_tmp_dirs:
             self.preprocess_tmp_dirs.append(dir_path)
         return dir_path
-
     def cleanup_on_exit(self, cleanup_preprocess: bool=False):
         if not CLEANUP_TEMP_FILES:
             return
@@ -267,7 +227,6 @@ class TempFileManager:
                 self.preprocess_tmp_dirs.clear()
         except Exception:
             pass
-
     def clear(self):
         self.temp_files.clear()
         self.temp_dirs.clear()
@@ -276,7 +235,6 @@ class TempFileManager:
 _temp_file_manager = TempFileManager()
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s', stream=sys.stdout)
-
 def load_preprocess_metadata(metadata_file: str) -> Dict:
     if not Path(metadata_file).exists():
         raise FileNotFoundError(f'Preprocess metadata file not found: {metadata_file}')
@@ -290,7 +248,6 @@ def load_preprocess_metadata(metadata_file: str) -> Dict:
     if missing_fields:
         raise ValueError(f"Metadata missing required fields: {', '.join(missing_fields)}")
     return metadata
-
 def _training_dimensions_from_metadata(metadata: Optional[Dict]) -> Tuple[Optional[int], Optional[int]]:
     if not metadata:
         return (None, None)
@@ -302,9 +259,7 @@ def _training_dimensions_from_metadata(metadata: Optional[Dict]) -> Tuple[Option
     if n_samples is not None:
         n_samples = int(n_samples)
     return (n_features, n_samples)
-
 def _verify_compressed_train_file(train_file: str, expected_n_samples: Optional[int]=None) -> None:
-    """Fail fast when a gzip training matrix is truncated before pandas load."""
     if not (str(train_file).endswith('.gz')):
         return
     path = Path(train_file)
@@ -328,16 +283,13 @@ def _verify_compressed_train_file(train_file: str, expected_n_samples: Optional[
         data_rows = newline_count - 1
         if data_rows != expected_n_samples:
             raise ValueError(f'Training matrix row count mismatch: file has {data_rows} data row(s), metadata expects {expected_n_samples} ({train_file}).\nRe-run preprocess to regenerate a complete training matrix.')
-
 def check_training_metadata_guardrails(metadata: Optional[Dict], *, model_type: Optional[str]=None, task_type: Optional[str]=None, parallel_models: Optional[int]=None, enable_hyperparameter_search: bool=False, n_folds: int=5, threads: Optional[int]=None) -> None:
-    """Validate training matrix integrity from preprocess metadata (e.g. truncated gzip)."""
     if not metadata:
         return
     _, n_samples = _training_dimensions_from_metadata(metadata)
     train_file = metadata.get('output_train_file')
     if train_file and str(train_file).endswith('.gz'):
         _verify_compressed_train_file(str(train_file), expected_n_samples=n_samples)
-
 def parse_train_input_path(input_path: str) -> Dict:
     input_path = Path(input_path).absolute().as_posix()
     result = {'train_file': None, 'metadata': None, 'gwas_genotype_prefix': None, 'task_type': None, 'preprocess_tmp_dir': None, '_metadata_file_path': None}
@@ -371,7 +323,6 @@ def parse_train_input_path(input_path: str) -> Dict:
     if not Path(result['train_file']).exists():
         raise FileNotFoundError(f"Training file does not exist: {result['train_file']}")
     return result
-
 def clean_feature_names(feature_names: List[str]) -> List[str]:
     import re
     special_chars = '[{}\\[\\]\\,"\\\':]'
@@ -384,7 +335,6 @@ def clean_feature_names(feature_names: List[str]) -> List[str]:
             cleaned = f'feature_{hash(name) % 1000000}'
         cleaned_names.append(cleaned)
     return cleaned_names
-
 def column_to_chr_pos(col_name: str) -> Optional[str]:
     import re
     col_str = str(col_name)
@@ -403,17 +353,14 @@ def column_to_chr_pos(col_name: str) -> Optional[str]:
     if '_' in cleaned and all((p.isdigit() for p in parts[1:2])):
         return cleaned
     return None
-
 def build_feature_chr_pos_keys(feature_names: List[str]) -> List[str]:
     keys: List[str] = []
     for name in feature_names:
         key = column_to_chr_pos(name)
         keys.append(key if key else str(name))
     return keys
-
 def _rename_columns_to_chr_pos(columns: List[str]) -> List[str]:
     return [column_to_chr_pos(col) or str(col) for col in columns]
-
 def _apply_feature_column_names(X: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, str]]:
     renamed_cols = _rename_columns_to_chr_pos(X.columns.tolist())
     X = X.copy()
@@ -443,7 +390,6 @@ def _apply_feature_column_names(X: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str
         dup_count = int(X.columns.duplicated().sum())
         X = X.loc[:, ~X.columns.duplicated(keep='first')]
     return X, snp_name_mapping
-
 def _read_header_columns(train_file: str, delimiter: str, is_compressed: bool) -> List[str]:
     import gzip
     if is_compressed:
@@ -453,7 +399,6 @@ def _read_header_columns(train_file: str, delimiter: str, is_compressed: bool) -
         with open(train_file, 'r', encoding='utf-8') as f:
             header_line = f.readline().strip()
     return header_line.split(delimiter)
-
 def _usecols_for_chr_pos_keys(header_columns: List[str], chr_pos_keys: set) -> List[str]:
     usecols: List[str] = []
     seen_keys: set = set()
@@ -467,7 +412,6 @@ def _usecols_for_chr_pos_keys(header_columns: List[str], chr_pos_keys: set) -> L
             usecols.append(col)
             seen_keys.add(key)
     return usecols
-
 def align_features_by_chr_pos(X: pd.DataFrame, train_features: List[str], train_chr_pos_keys: List[str]) -> Tuple[pd.DataFrame, int, int]:
     if len(train_features) != len(train_chr_pos_keys):
         raise ValueError(f'feature_names ({len(train_features)}) and feature_chr_pos_keys ({len(train_chr_pos_keys)}) length mismatch')
@@ -486,7 +430,6 @@ def align_features_by_chr_pos(X: pd.DataFrame, train_features: List[str], train_
             X_aligned[feat_name] = 0
     missing = len(train_features) - matched
     return X_aligned, matched, missing
-
 def _delimiter_from_metadata(file_format: Optional[Dict]) -> Optional[str]:
     if not file_format:
         return None
@@ -496,7 +439,6 @@ def _delimiter_from_metadata(file_format: Optional[Dict]) -> Optional[str]:
     if delim == '\\t':
         return '\t'
     return str(delim)
-
 def _resolve_snp_storage_dtype(file_format: Optional[Dict]) -> np.dtype:
     default = np.dtype('int8')
     if not file_format:
@@ -514,13 +456,11 @@ def _resolve_snp_storage_dtype(file_format: Optional[Dict]) -> np.dtype:
         return np.dtype(name)
     except (TypeError, ValueError):
         return default
-
 def _is_int8_dtype(dtype: Any) -> bool:
     try:
         return np.dtype(dtype) == np.dtype('int8')
     except (TypeError, ValueError):
         return False
-
 def _convert_feature_matrix_dtype(X: pd.DataFrame, target_dtype: np.dtype) -> pd.DataFrame:
     if X.empty:
         return X
@@ -535,10 +475,8 @@ def _convert_feature_matrix_dtype(X: pd.DataFrame, target_dtype: np.dtype) -> pd
         return X.astype(target_dtype, copy=False)
     except (TypeError, ValueError):
         return X.astype(str(np.dtype(target_dtype)), copy=False)
-
 def _training_file_read_engine(is_compressed: bool) -> str:
     return 'python' if is_compressed else 'c'
-
 def _merge_oof_probabilities(prob_frames: List[pd.DataFrame], y_test_index: pd.Index) -> Optional[np.ndarray]:
     if not prob_frames:
         return None
@@ -547,7 +485,6 @@ def _merge_oof_probabilities(prob_frames: List[pd.DataFrame], y_test_index: pd.I
         y_prob_df = y_prob_df[~y_prob_df.index.duplicated(keep='last')]
     aligned = y_prob_df.reindex(y_test_index)
     return aligned.to_numpy()
-
 def load_training_data(train_file: str, valid_samples: List[str]=None, file_format: Optional[Dict]=None, chr_pos_filter: Optional[set]=None) -> Tuple[pd.DataFrame, pd.Series, Dict[str, str]]:
     train_file_path = Path(train_file)
     if not train_file_path.exists():
@@ -748,7 +685,6 @@ def load_training_data(train_file: str, valid_samples: List[str]=None, file_form
     except Exception as e:
         logger.error(f'Failed to load training data: {str(e)}')
         raise
-
 def _persist_training_matrix_for_workers(X: pd.DataFrame, y: pd.Series, cache_dir: Path) -> Dict[str, Any]:
     cache_dir.mkdir(parents=True, exist_ok=True)
     n_samples, n_features = X.shape
@@ -770,7 +706,6 @@ def _persist_training_matrix_for_workers(X: pd.DataFrame, y: pd.Series, cache_di
     np.save(y_path, np.asarray(y.values))
     bundle = {'_shared_matrix': True, 'shared_matrix_dir': str(cache_dir.absolute()), 'x_mmap_path': str(x_path.absolute()), 'x_shape': [int(n_samples), int(n_features)], 'index_path': str(index_path.absolute()), 'columns_path': str(columns_path.absolute()), 'y_path': str(y_path.absolute())}
     return bundle
-
 def _load_training_data_from_shared(bundle: Dict[str, Any]) -> Tuple[pd.DataFrame, pd.Series]:
     n_samples, n_features = (int(bundle['x_shape'][0]), int(bundle['x_shape'][1]))
     x_arr = np.memmap(bundle['x_mmap_path'], dtype=np.int8, mode='r', shape=(n_samples, n_features))
@@ -786,7 +721,6 @@ def _load_training_data_from_shared(bundle: Dict[str, Any]) -> Tuple[pd.DataFram
     y_values = np.load(bundle['y_path'])
     y = pd.Series(y_values, index=index, name='phenotype')
     return (X, y)
-
 def _cleanup_shared_training_matrix(bundle: Optional[Dict[str, Any]]) -> None:
     if not bundle or not bundle.get('_shared_matrix'):
         return
@@ -807,9 +741,7 @@ def _cleanup_shared_training_matrix(bundle: Optional[Dict[str, Any]]) -> None:
             Path(shared_dir).rmdir()
         except Exception:
             pass
-
 def _cleanup_train_all_temp_dirs(base_output_dir: Optional[Path], *, shared_matrix_bundle: Optional[Dict[str, Any]]=None, preprocess_tmp_dir: Optional[str]=None, output_dir: Optional[Path]=None) -> None:
-    """Best-effort cleanup of train-all temp dirs (shared memmap, preprocess tmp, GWAS output). Safe to call multiple times."""
     if not CLEANUP_TEMP_FILES:
         return
     try:
@@ -837,23 +769,19 @@ def _cleanup_train_all_temp_dirs(base_output_dir: Optional[Path], *, shared_matr
                 shutil.rmtree(gwas_output_dir, ignore_errors=True)
             except Exception:
                 pass
-
 ALL_MODEL_TYPES = ['LightGBM', 'RandomForest', 'XGBoost', 'SVM', 'CatBoost', 'Logistic']
 CLASSIFICATION_ONLY_MODELS = frozenset[str]({'Logistic'})
-
 def get_supported_models(task_type: str) -> List[str]:
     if task_type == 'classification':
         return list(ALL_MODEL_TYPES)
     if task_type == 'regression':
         return [m for m in ALL_MODEL_TYPES if m not in CLASSIFICATION_ONLY_MODELS]
     raise ValueError(f'Unsupported task type: {task_type}; available: classification, regression')
-
 def validate_model_for_task(model_type: str, task_type: str) -> None:
     if model_type in CLASSIFICATION_ONLY_MODELS and task_type != 'classification':
         raise ValueError(f"Model '{model_type}' only supports classification tasks, not '{task_type}'.")
     if model_type not in get_supported_models(task_type):
         raise ValueError(f"Unsupported model type '{model_type}' for task '{task_type}'; available: {get_supported_models(task_type)}")
-
 def init_model(model_type: str, task_type: str, random_state: int=42, cpu_cores: Optional[int]=None) -> Any:
     common_params = {'random_state': random_state}
     if cpu_cores is None:
@@ -875,7 +803,6 @@ def init_model(model_type: str, task_type: str, random_state: int=42, cpu_cores:
     except Exception:
         pass
     return model
-
 def get_param_grid(model_type: str, task_type: str, n_features: Optional[int]=None) -> Dict:
     common_param_grids = {'LightGBM': {'n_estimators': [50, 100, 200], 'learning_rate': [0.01, 0.1, 0.2], 'num_leaves': [15, 31, 63], 'max_depth': [3, 5, 7, -1], 'min_child_samples': [10, 20, 30], 'subsample': [0.8, 0.9, 1.0], 'colsample_bytree': [0.8, 0.9, 1.0]}, 'RandomForest': {'n_estimators': [50, 100, 200], 'max_depth': [5, 10, 20, None], 'min_samples_split': [2, 5, 10], 'min_samples_leaf': [1, 2, 4], 'max_features': ['sqrt', 'log2', None]}, 'XGBoost': {'n_estimators': [50, 100, 200], 'learning_rate': [0.01, 0.1, 0.2], 'max_depth': [3, 5, 7], 'min_child_weight': [1, 3, 5], 'subsample': [0.8, 0.9, 1.0], 'colsample_bytree': [0.8, 0.9, 1.0], 'gamma': [0, 0.1, 0.2]}, 'CatBoost': {'iterations': [50, 100, 200], 'learning_rate': [0.01, 0.1, 0.2], 'depth': [4, 6, 8], 'l2_leaf_reg': [1, 3, 5], 'border_count': [32, 64, 128]}}
     if task_type == 'classification':
@@ -891,12 +818,10 @@ def get_param_grid(model_type: str, task_type: str, n_features: Optional[int]=No
         grid['max_features'] = ['sqrt', 'log2']
         grid['n_estimators'] = [50, 100]
     return grid
-
 def _make_cv_splitter(task_type: str, n_folds: int, random_state: int):
     if task_type == 'classification':
         return StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
     return KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
-
 def resolve_training_hyperparameters(model_type: str, task_type: str, X_train: pd.DataFrame, y_train: pd.Series, enable_hyperparameter_search: bool, n_folds: int, random_state: int, cpu_cores: Optional[int]=None, *, search_n_iter: Optional[int]=None, search_cv: Optional[int]=None) -> Tuple[Any, Dict[str, Any]]:
     default_model = init_model(model_type, task_type, random_state=random_state, cpu_cores=cpu_cores)
     if not enable_hyperparameter_search:
@@ -926,11 +851,8 @@ def resolve_training_hyperparameters(model_type: str, task_type: str, X_train: p
     search.fit(X_search, y_search)
     tuned_model = search.best_estimator_
     return (tuned_model, tuned_model.get_params())
-
 TRAIN_TEST_HOLDOUT_RATIO = 0.20
-
 def split_train_test_holdout(X: pd.DataFrame, y: pd.Series, task_type: str, test_ratio: float=TRAIN_TEST_HOLDOUT_RATIO, random_state: int=42) -> Dict[str, Any]:
-    """Fallback hold-out when metadata lacks sample_split. Sorts IDs for cross-run reproducibility."""
     if len(X) != len(y):
         raise ValueError('X and y must have the same number of samples')
     if len(X) < 5:
@@ -950,9 +872,7 @@ def split_train_test_holdout(X: pd.DataFrame, y: pd.Series, task_type: str, test
     test_idx_list = list(test_idx)
     train_ratio = 1.0 - test_ratio
     return {'train_idx': train_idx_list, 'test_idx': test_idx_list, 'random_state': random_state, 'train_ratio': train_ratio, 'test_ratio': test_ratio, 'n_train': len(train_idx_list), 'n_test': len(test_idx_list), 'split_source': 'fallback_random_holdout'}
-
 def holdout_from_sample_split(X: pd.DataFrame, y: pd.Series, sample_split: Dict[str, Any]) -> Dict[str, Any]:
-    """Build train/test index lists from preprocess metadata sample_split."""
     if len(X) != len(y):
         raise ValueError('X and y must have the same number of samples')
     train_ids = {str(s) for s in sample_split.get('train_ids') or []}
@@ -981,14 +901,12 @@ def holdout_from_sample_split(X: pd.DataFrame, y: pd.Series, sample_split: Dict[
     if unassigned > 0:
         logger.warning(f'{unassigned} sample(s) in matrix are not in preprocess train/test split and will be excluded')
     return {'train_idx': train_idx, 'test_idx': test_idx, 'split_source': 'preprocess_metadata', 'mode': sample_split.get('mode'), 'random_state': sample_split.get('random_state'), 'train_ratio': sample_split.get('train_ratio'), 'test_ratio': sample_split.get('test_ratio'), 'n_train': len(train_idx), 'n_test': len(test_idx), 'n_unassigned': unassigned}
-
 def resolve_holdout_split_from_metadata(X: pd.DataFrame, y: pd.Series, metadata: Optional[Dict[str, Any]], task_type: str, random_state: int=42) -> Dict[str, Any]:
     sample_split = (metadata or {}).get('sample_split') if metadata else None
     if sample_split and sample_split.get('train_ids') and sample_split.get('test_ids'):
         return holdout_from_sample_split(X, y, sample_split)
     logger.warning('Metadata missing sample_split; falling back to local reproducible 80/20 split. Re-run preprocess to fix the split at feature-selection time.')
     return split_train_test_holdout(X, y, task_type=task_type, test_ratio=TRAIN_TEST_HOLDOUT_RATIO, random_state=random_state)
-
 def _predict_with_optional_proba(model: Any, X: pd.DataFrame, task_type: str) -> Tuple[np.ndarray, Optional[np.ndarray]]:
     y_pred = model.predict(X)
     y_prob = None
@@ -1009,7 +927,6 @@ def _predict_with_optional_proba(model: Any, X: pd.DataFrame, task_type: str) ->
     except Exception:
         pass
     return (y_pred, y_prob)
-
 def _fit_model_with_params(model_type: str, task_type: str, X_train: pd.DataFrame, y_train: pd.Series, best_params: Dict[str, Any], random_state: int, cpu_cores: Optional[int]) -> Any:
     model = init_model(model_type, task_type, random_state=random_state, cpu_cores=cpu_cores)
     try:
@@ -1018,7 +935,6 @@ def _fit_model_with_params(model_type: str, task_type: str, X_train: pd.DataFram
         pass
     model.fit(X_train, y_train)
     return model
-
 def evaluate_model(y_true: pd.Series, y_pred: np.ndarray, y_prob: np.ndarray, task_type: str) -> Dict:
     metrics = {}
     if task_type == 'classification':
@@ -1035,7 +951,6 @@ def evaluate_model(y_true: pd.Series, y_pred: np.ndarray, y_prob: np.ndarray, ta
                 metrics['f1'] = 'N/A'
             else:
                 metrics['accuracy'] = round(accuracy_score(y_true_array, y_pred_array), 4)
-
                 unique_labels = np.unique(y_true_array)
                 if len(unique_labels) == 2:
                     pos_label = unique_labels[1]
@@ -1118,7 +1033,6 @@ def evaluate_model(y_true: pd.Series, y_pred: np.ndarray, y_prob: np.ndarray, ta
             metrics['pearson_correlation'] = 'N/A'
             metrics['pearson_p_value'] = 'N/A'
     return metrics
-
 def _aggregate_cv_fold_metrics(cv_fold_metrics: List[Dict], task_type: str) -> Dict[str, float]:
     avg_metrics: Dict[str, float] = {}
     if task_type == 'regression':
@@ -1144,30 +1058,24 @@ def _aggregate_cv_fold_metrics(cv_fold_metrics: List[Dict], task_type: str) -> D
             avg_metrics['auc'] = float(round(np.mean(aucs), 4))
             avg_metrics['auc_std'] = float(round(np.std(aucs), 4))
     return avg_metrics
-
 def _resolve_cv_fold_parallelism(n_folds: int, cpu_cores: Optional[int]) -> Tuple[int, int]:
-    """Split --threads budget across CV folds: (fold_workers, cores_per_fold)."""
     total = DEFAULT_N_JOBS if cpu_cores is None else max(1, int(cpu_cores))
     fold_workers = min(max(1, int(n_folds)), total)
     cores_per_fold = max(1, total // fold_workers)
     return (fold_workers, cores_per_fold)
-
 def _set_native_thread_env(num_threads: int) -> Dict[str, Optional[str]]:
-    """Set BLAS/OpenMP thread caps; return previous values for restore."""
     prev: Dict[str, Optional[str]] = {}
     value = str(max(1, int(num_threads)))
     for var in ['OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'NUMEXPR_NUM_THREADS', 'VECLIB_MAXIMUM_THREADS', 'BLIS_NUM_THREADS']:
         prev[var] = os.environ.get(var)
         os.environ[var] = value
     return prev
-
 def _restore_native_thread_env(prev: Dict[str, Optional[str]]) -> None:
     for var, old in prev.items():
         if old is None:
             os.environ.pop(var, None)
         else:
             os.environ[var] = old
-
 def _run_one_cv_fold(fold_idx: int, n_folds: int, train_idx: np.ndarray, val_idx: np.ndarray, X_train_cv: pd.DataFrame, y_train_cv: pd.Series, model_type: str, task_type: str, best_params: Dict[str, Any], random_state: int, cores_per_fold: int) -> Tuple[int, Dict, Optional[pd.Series], Optional[np.ndarray], Optional[np.ndarray]]:
     train_idx = np.asarray(train_idx)
     val_idx = np.asarray(val_idx)
@@ -1211,7 +1119,6 @@ def _run_one_cv_fold(fold_idx: int, n_folds: int, train_idx: np.ndarray, val_idx
         acc = fold_metrics.get('accuracy', 'N/A')
         auc = fold_metrics.get('auc', 'N/A')
     return (fold_idx, fold_metrics, y_val_fold, y_pred_fold, y_prob_fold)
-
 def _run_kfold_cv_evaluation(model_type: str, task_type: str, X_train_cv: pd.DataFrame, y_train_cv: pd.Series, best_params: Dict[str, Any], n_folds: int, random_state: int, cpu_cores: Optional[int]) -> Tuple[List[Dict], Optional[Dict[str, Any]], Dict[str, float]]:
     if task_type == 'classification':
         kf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
@@ -1223,7 +1130,6 @@ def _run_kfold_cv_evaluation(model_type: str, task_type: str, X_train_cv: pd.Dat
     mode = 'parallel' if fold_workers > 1 else 'serial'
     fold_args = [(fold_idx, train_idx, val_idx) for fold_idx, (train_idx, val_idx) in enumerate(splits, 1)]
     fold_results: List[Tuple[int, Dict, Optional[pd.Series], Optional[np.ndarray], Optional[np.ndarray]]] = []
-
     prev_thread_env = _set_native_thread_env(cores_per_fold)
     try:
         if fold_workers == 1:
@@ -1272,10 +1178,8 @@ def _run_kfold_cv_evaluation(model_type: str, task_type: str, X_train_cv: pd.Dat
         except Exception:
             pass
     return (cv_fold_metrics, cv_oof_data, avg_metrics)
-
 def _cv_results_for_json(cv_results: Dict[str, Any]) -> Dict[str, Any]:
     return dict(cv_results)
-
 def _save_shap_dependence_tsv(output_prefix: Path, shap_dependence_data: Dict[str, Any], *, max_features: int=SHAP_DEPENDENCE_MAX_FEATURES) -> None:
     names = np.asarray(shap_dependence_data['feature_names'])
     shap_arr = np.asarray(shap_dependence_data['shap_values'])
@@ -1300,7 +1204,6 @@ def _save_shap_dependence_tsv(output_prefix: Path, shap_dependence_data: Dict[st
     dep_df = pd.DataFrame({'sample_index': sample_idx, 'feature': np.asarray(names_kept, dtype=object)[feat_idx], 'feature_value': x_kept.ravel(), 'shap_value': shap_kept.ravel()})
     dep_file = Path(f'{output_prefix}_shap_dependence.tsv')
     dep_df.to_csv(dep_file, sep='\t', index=False)
-
 def _save_test_predictions_tsv(path: Path, y_test: pd.Series, y_pred: np.ndarray, y_prob: Optional[np.ndarray], task_type: str) -> None:
     if isinstance(y_test, pd.Series):
         sample_ids = [str(x) for x in y_test.index]
@@ -1317,7 +1220,6 @@ def _save_test_predictions_tsv(path: Path, y_test: pd.Series, y_pred: np.ndarray
             for class_idx in range(prob_arr.shape[1]):
                 pred_df[f'y_prob_class_{class_idx}'] = prob_arr[:, class_idx]
     pred_df.to_csv(path, sep='\t', index=False)
-
 def _save_cv_oof_tsv(path: Path, cv_oof_data: Dict[str, Any]) -> None:
     oof_y_true = cv_oof_data['y_true']
     if isinstance(oof_y_true, pd.Series):
@@ -1336,7 +1238,6 @@ def _save_cv_oof_tsv(path: Path, cv_oof_data: Dict[str, Any]) -> None:
             for class_idx in range(prob_arr.shape[1]):
                 oof_df[f'y_prob_class_{class_idx}'] = prob_arr[:, class_idx]
     oof_df.to_csv(path, sep='\t', index=False)
-
 def _shap_values_sample_by_feature(shap_values: Any, task_type: str) -> np.ndarray:
     if task_type == 'regression':
         arr = np.asarray(shap_values)
@@ -1364,7 +1265,6 @@ def _shap_values_sample_by_feature(shap_values: Any, task_type: str) -> np.ndarr
     if arr.ndim == 1:
         return arr.reshape(1, -1)
     raise ValueError(f'Unexpected classification SHAP shape: {arr.shape}')
-
 def calculate_shap_values(model: Any, model_type: str, feature_names: List[str], X_train: pd.DataFrame, y_train: pd.Series, task_type: str, shap_sample_size: Optional[int]=None) -> Tuple[pd.DataFrame, Optional[Dict[str, Any]]]:
     if not SHAP_AVAILABLE:
         logger.warning('  SHAP library not installed, cannot calculate SHAP values. Please run: pip install shap')
@@ -1424,7 +1324,6 @@ def calculate_shap_values(model: Any, model_type: str, feature_names: List[str],
     except Exception as e:
         logger.error(f'  SHAP values calculation failed: {str(e)}')
         return (pd.DataFrame(), None)
-
 def _ensure_numpy_array(data: Any) -> np.ndarray:
     if isinstance(data, np.ndarray):
         return data
@@ -1432,10 +1331,8 @@ def _ensure_numpy_array(data: Any) -> np.ndarray:
         return data.values
     else:
         return np.array(data)
-
 def filter_phenotype_columns(columns: List[str]) -> List[str]:
     return [col for col in columns if 'phenotype' not in str(col).lower()]
-
 def filter_phenotype_from_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     phenotype_cols = [col for col in df.columns if 'phenotype' in str(col).lower()]
     import re
@@ -1456,14 +1353,42 @@ def filter_phenotype_from_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             cols_suffix = '...' if len(index_artifact_cols) > 5 else ''
         return df.drop(columns=drop_cols_unique, errors='ignore')
     return df
-
+MODEL_BUNDLE_FORMAT = 'g2pinsight_model_bundle'
+MODEL_BUNDLE_VERSION = 1
+def build_model_bundle(model: Any, *, model_type: str, task_type: str, feature_names: Optional[List[str]]=None, feature_chr_pos_keys: Optional[List[str]]=None) -> Dict[str, Any]:
+    feature_name_list = list(feature_names) if feature_names is not None else []
+    chr_pos_keys = list(feature_chr_pos_keys) if feature_chr_pos_keys else build_feature_chr_pos_keys(feature_name_list)
+    if feature_name_list and len(chr_pos_keys) != len(feature_name_list):
+        raise ValueError(f'feature_names ({len(feature_name_list)}) and feature_chr_pos_keys ({len(chr_pos_keys)}) length mismatch')
+    return {'format': MODEL_BUNDLE_FORMAT, 'version': MODEL_BUNDLE_VERSION, 'model': model, 'model_type': model_type, 'task_type': task_type, 'feature_names': feature_name_list, 'feature_chr_pos_keys': chr_pos_keys, 'snp_naming_rule': 'chromosome_physicalPosition (chr_pos, e.g. 1_123456)', 'saved_time': time.strftime('%Y-%m-%d %H:%M:%S')}
+def save_model_bundle(path: Path, model: Any, *, model_type: str, task_type: str, feature_names: Optional[List[str]]=None, feature_chr_pos_keys: Optional[List[str]]=None) -> Dict[str, Any]:
+    import joblib
+    bundle = build_model_bundle(model, model_type=model_type, task_type=task_type, feature_names=feature_names, feature_chr_pos_keys=feature_chr_pos_keys)
+    joblib.dump(bundle, path)
+    return bundle
+def load_model_bundle(path: Path) -> Tuple[Any, Dict[str, Any]]:
+    import joblib
+    obj = joblib.load(path)
+    if not (isinstance(obj, dict) and obj.get('format') == MODEL_BUNDLE_FORMAT and 'model' in obj):
+        raise ValueError(f'Unsupported model file (expected {MODEL_BUNDLE_FORMAT}): {path}')
+    feature_names = list(obj.get('feature_names') or [])
+    feature_chr_pos_keys = list(obj.get('feature_chr_pos_keys') or [])
+    if not feature_names:
+        raise ValueError(f'Model bundle missing feature_names: {path}')
+    if not feature_chr_pos_keys:
+        feature_chr_pos_keys = build_feature_chr_pos_keys(feature_names)
+    if len(feature_chr_pos_keys) != len(feature_names):
+        raise ValueError(f'feature_names ({len(feature_names)}) and feature_chr_pos_keys ({len(feature_chr_pos_keys)}) length mismatch in {path}')
+    meta = {'format': MODEL_BUNDLE_FORMAT, 'version': obj.get('version'), 'model_type': obj.get('model_type'), 'task_type': obj.get('task_type'), 'feature_names': feature_names, 'feature_chr_pos_keys': feature_chr_pos_keys, 'snp_naming_rule': obj.get('snp_naming_rule'), 'saved_time': obj.get('saved_time')}
+    return (obj['model'], meta)
 def save_training_results(model: Any, metrics: Dict, selected_snps: List[str], output_dir: str, model_type: str, task_type: str, shap_df: Optional[pd.DataFrame]=None, shap_dependence_data: Optional[Dict[str, Any]]=None, y_test: Optional[pd.Series]=None, y_pred: Optional[np.ndarray]=None, y_prob: Optional[np.ndarray]=None, cv_results: Optional[Dict]=None, cv_oof_data: Optional[Dict[str, Any]]=None, peak_ram_mb: Optional[float]=None, hyperparameter_search_enabled: Optional[bool]=None, split_mode: str='cv', evaluation_results: Optional[Dict]=None, shap_dependence_max_features: Optional[int]=None) -> None:
     model_dir = Path(output_dir) / model_type
     model_dir.mkdir(parents=True, exist_ok=True)
     output_prefix = model_dir / model_type
     model_file = model_dir / f'{model_type}_model.pkl'
-    import joblib
-    joblib.dump(model, model_file)
+    feature_name_list = list(selected_snps) if selected_snps is not None else []
+    feature_chr_pos_keys = build_feature_chr_pos_keys(feature_name_list)
+    save_model_bundle(model_file, model, model_type=model_type, task_type=task_type, feature_names=feature_name_list, feature_chr_pos_keys=feature_chr_pos_keys)
     metrics_file = Path(f'{output_prefix}_metrics.json')
     metrics_payload = {'model_type': model_type, 'task_type': task_type, 'split_mode': split_mode, 'metrics': metrics, 'metrics_scope': 'held_out_test_set', 'training_time': time.strftime('%Y-%m-%d %H:%M:%S')}
     if evaluation_results is not None:
@@ -1500,9 +1425,8 @@ def save_training_results(model: Any, metrics: Dict, selected_snps: List[str], o
                 pass
     try:
         features_file = Path(f'{output_prefix}_training_features.json')
-        feature_name_list = list(selected_snps) if selected_snps is not None else []
         with open(features_file, 'w') as f:
-            json.dump({'model_type': model_type, 'task_type': task_type, 'feature_names': feature_name_list, 'feature_chr_pos_keys': build_feature_chr_pos_keys(feature_name_list), 'snp_naming_rule': 'chromosome_physicalPosition (chr_pos, e.g. 1_123456)', 'saved_time': time.strftime('%Y-%m-%d %H:%M:%S')}, f, indent=2)
+            json.dump({'model_type': model_type, 'task_type': task_type, 'feature_names': feature_name_list, 'feature_chr_pos_keys': feature_chr_pos_keys, 'snp_naming_rule': 'chromosome_physicalPosition (chr_pos, e.g. 1_123456)', 'saved_time': time.strftime('%Y-%m-%d %H:%M:%S')}, f, indent=2)
     except Exception:
         pass
     if shap_df is not None and (not shap_df.empty):
@@ -1536,10 +1460,8 @@ def save_training_results(model: Any, metrics: Dict, selected_snps: List[str], o
                 json.dump(plotting_payload, f, indent=2, ensure_ascii=False)
         except Exception:
             pass
-
 def run_single_model(input_path: str, model_type: str, output_dir: str, task_type: Optional[str]=None, n_folds: int=5, random_state: int=42, preloaded_data: Optional[Dict[str, Any]]=None, cpu_cores: Optional[int]=None, enable_hyperparameter_search: bool=False, shap_dependence_max_features: Optional[int]=None) -> int:
     return _run_single_model_body(input_path=input_path, model_type=model_type, output_dir=output_dir, task_type=task_type, n_folds=n_folds, random_state=random_state, preloaded_data=preloaded_data, cpu_cores=cpu_cores, enable_hyperparameter_search=enable_hyperparameter_search, shap_dependence_max_features=shap_dependence_max_features)
-
 def _run_single_model_body(input_path: str, model_type: str, output_dir: str, task_type: Optional[str]=None, n_folds: int=5, random_state: int=42, preloaded_data: Optional[Dict[str, Any]]=None, cpu_cores: Optional[int]=None, enable_hyperparameter_search: bool=False, shap_dependence_max_features: Optional[int]=None) -> int:
     if not str(input_path).endswith('_metadata.json'):
         raise ValueError(f'Training input must be the preprocess-generated metadata file (*_metadata.json).Current input: {input_path}')
@@ -1556,10 +1478,8 @@ def _run_single_model_body(input_path: str, model_type: str, output_dir: str, ta
     base_output_dir = output_dir_path.parent
     tmp_root = base_output_dir / 'tmp' / 'train' / model_type
     tmp_root.mkdir(parents=True, exist_ok=True)
-
     def register_dir(p: Path) -> Path:
         return _temp_file_manager.register_dir(p)
-
     def register_file(p: Path) -> Path:
         return _temp_file_manager.register_file(p)
     run_tmp_dir = register_dir(tmp_root / f'pid_{os.getpid()}')
@@ -1582,7 +1502,6 @@ def _run_single_model_body(input_path: str, model_type: str, output_dir: str, ta
             if preloaded_data.get('preprocess_tmp_dir'):
                 preprocess_tmp_dir = Path(preloaded_data['preprocess_tmp_dir']).absolute()
                 _temp_file_manager.register_preprocess_tmp_dir(preprocess_tmp_dir)
-
             def infer_task_type_from_y(series: pd.Series) -> str:
                 values = series.values
                 unique_vals = np.unique(values)
@@ -1602,7 +1521,6 @@ def _run_single_model_body(input_path: str, model_type: str, output_dir: str, ta
                 _temp_file_manager.register_preprocess_tmp_dir(preprocess_tmp_dir)
             train_file_format = input_info['metadata'].get('train_file_format') if input_info.get('metadata') else None
             X, y, snp_name_mapping = load_training_data(train_file, valid_samples, file_format=train_file_format)
-
             def infer_task_type_from_y(series: pd.Series) -> str:
                 values = series.values
                 unique_vals = np.unique(values)
@@ -1748,7 +1666,6 @@ def _run_single_model_body(input_path: str, model_type: str, output_dir: str, ta
             except Exception:
                 pass
         return 1
-
 def _run_single_model_silent(*args, **kwargs) -> int:
     import logging as _logging
     root = _logging.getLogger()
@@ -1758,7 +1675,6 @@ def _run_single_model_silent(*args, **kwargs) -> int:
         return run_single_model(*args, **kwargs)
     finally:
         root.setLevel(old_level)
-
 def _build_train_all_preloaded_data(train_file: str, valid_samples: Optional[List[str]], metadata: Optional[Dict], preprocess_tmp_dir: Optional[str], task_type: str, holdout_split: Optional[Dict[str, Any]]=None, X: Optional[pd.DataFrame]=None, y: Optional[pd.Series]=None, *, shared_matrix: Optional[Dict[str, Any]]=None, shap_dependence_max_features: Optional[int]=None) -> Dict[str, Any]:
     payload: Dict[str, Any] = {'train_file': train_file, 'valid_samples': valid_samples, 'metadata': metadata, 'preprocess_tmp_dir': preprocess_tmp_dir, 'task_type': task_type, 'holdout_split': holdout_split, 'shap_dependence_max_features': shap_dependence_max_features}
     if shared_matrix is not None:
@@ -1767,18 +1683,15 @@ def _build_train_all_preloaded_data(train_file: str, valid_samples: Optional[Lis
         payload['X'] = X
         payload['y'] = y
     return payload
-
 def _train_all_model_task(model_type: str, input_path: str, output_dir: str, task_type: Optional[str], n_folds: int, random_state: int, preloaded_data: Dict[str, Any], cpu_cores: int, enable_hyperparameter_search: bool) -> Tuple[str, int]:
     _reset_worker_signal_handlers()
     ret_code = _run_single_model_silent(input_path, model_type, output_dir, task_type, n_folds, random_state, preloaded_data, cpu_cores=cpu_cores, enable_hyperparameter_search=enable_hyperparameter_search)
     return (model_type, ret_code)
-
 def _train_all_model_process_entry(model_type: str, input_path: str, output_dir: str, task_type: Optional[str], n_folds: int, random_state: int, preloaded_data: Dict[str, Any], cpu_cores: int, enable_hyperparameter_search: bool, result_queue: Any) -> None:
     try:
         result_queue.put(_train_all_model_task(model_type, input_path, output_dir, task_type, n_folds, random_state, preloaded_data, cpu_cores, enable_hyperparameter_search))
     except Exception:
         result_queue.put((model_type, 1))
-
 def _run_train_all_models_serial(supported_models: List[str], input_path: str, output_dir: str, task_type: Optional[str], n_folds: int, random_state: int, preloaded_data: Dict[str, Any], cpu_cores: int, enable_hyperparameter_search: bool) -> Dict[str, str]:
     results: Dict[str, str] = {}
     mp_ctx = mp.get_context('spawn')
@@ -1797,13 +1710,9 @@ def _run_train_all_models_serial(supported_models: List[str], input_path: str, o
         results[model_type] = status
         logger.info(f'[TRAIN_ALL] Model training completed: model={model_type}, status={status}, elapsed={time.perf_counter() - model_start:.1f}s')
     return results
-
 def run_all_models(input_path: str, output_dir: str, task_type: Optional[str]=None, n_folds: int=5, random_state: int=42, parallel_models: Optional[int]=None, threads: Optional[int]=None, enable_hyperparameter_search: bool=False, shap_dependence_max_features: Optional[int]=None) -> int:
     return _run_all_models_body(input_path=input_path, output_dir=output_dir, task_type=task_type, n_folds=n_folds, random_state=random_state, parallel_models=parallel_models, threads=threads, enable_hyperparameter_search=enable_hyperparameter_search, shap_dependence_max_features=shap_dependence_max_features)
-
 def _run_all_models_body(input_path: str, output_dir: str, task_type: Optional[str]=None, n_folds: int=5, random_state: int=42, parallel_models: Optional[int]=None, threads: Optional[int]=None, enable_hyperparameter_search: bool=False, shap_dependence_max_features: Optional[int]=None) -> int:
-
-
     job_memory_tracker: Optional[PeakMemoryTracker] = PeakMemoryTracker(include_children=True)
     job_peak_ram_mb: Optional[float] = None
     base_output_dir: Optional[Path] = None
@@ -1811,7 +1720,6 @@ def _run_all_models_body(input_path: str, output_dir: str, task_type: Optional[s
     shared_matrix_bundle: Optional[Dict[str, Any]] = None
     preprocess_tmp_dir_str: Optional[str] = None
     temps_cleaned = False
-
     def _stop_job_memory_tracker() -> Optional[float]:
         nonlocal job_memory_tracker, job_peak_ram_mb
         if job_memory_tracker is None:
@@ -1824,9 +1732,7 @@ def _run_all_models_body(input_path: str, output_dir: str, task_type: Optional[s
         if job_peak_ram_mb is not None:
             logger.info(f'[TRAIN_ALL] Job peak RAM (process tree, whole train-all)={job_peak_ram_mb} MB')
         return job_peak_ram_mb
-
     def _cleanup_temps() -> None:
-        """Idempotent temp cleanup; always run before final exit (success or failure)."""
         nonlocal temps_cleaned, shared_matrix_bundle
         if temps_cleaned:
             return
@@ -1836,7 +1742,6 @@ def _run_all_models_body(input_path: str, output_dir: str, task_type: Optional[s
         except Exception:
             pass
         shared_matrix_bundle = None
-
     try:
         job_memory_tracker.start()
     except Exception:
@@ -1914,7 +1819,6 @@ def _run_all_models_body(input_path: str, output_dir: str, task_type: Optional[s
             results.update(_run_train_all_models_serial(supported_models, input_path, output_dir, task_type, n_folds, random_state, preloaded_data, cpu_cores_per_worker, enable_hyperparameter_search))
         logger.info(f'[TRAIN_ALL] {mode_label} training phase completed, elapsed_total={time.perf_counter() - start_time:.1f}s')
         _stop_job_memory_tracker()
-
         _cleanup_temps()
         best_model_type = None
         best_score = None
@@ -2026,7 +1930,6 @@ def _run_all_models_body(input_path: str, output_dir: str, task_type: Optional[s
     finally:
         _cleanup_temps()
         _stop_job_memory_tracker()
-
 def _resolve_plink_genotype_prefix(input_path: str) -> Optional[str]:
     path = Path(input_path)
     if path.suffix.lower() == '.bed':
@@ -2036,15 +1939,12 @@ def _resolve_plink_genotype_prefix(input_path: str) -> Optional[str]:
     if Path(f'{prefix}.bed').exists() and Path(f'{prefix}.bim').exists() and Path(f'{prefix}.fam').exists():
         return prefix
     return None
-
 def _is_vcf_input_path(input_path: str) -> bool:
     lowered = str(input_path).lower()
     return lowered.endswith('.vcf') or lowered.endswith('.vcf.gz')
-
 def _is_training_matrix_input_path(input_path: str) -> bool:
     lowered = str(input_path).lower()
     return lowered.endswith('.txt') or lowered.endswith('.txt.gz')
-
 def _genotype_to_prediction_train_file(genotype_input: str, train_chr_pos_keys: List[str], tmp_dir: Path, *, is_vcf: bool) -> str:
     from G2PInsight.bin.preprocess import genotype_to_plink, plink_to_training_data_optimized, normalize_chromosome_names, extract_snps_by_chr_pos_with_plink
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -2070,10 +1970,8 @@ def _genotype_to_prediction_train_file(genotype_input: str, train_chr_pos_keys: 
     temp_train_file = str(tmp_dir / 'predict_train_data.txt')
     actual_train_file = plink_to_training_data_optimized(plink_prefix=plink_for_recode, pheno_df=pheno_df, output_file=temp_train_file, tmp_dir=str(tmp_dir), use_cache=True).train_file
     return actual_train_file
-
 def predict_with_model(input_path: str, model_path: str, output_dir: str, task_type: str) -> int:
     try:
-        input_path_obj = Path(input_path)
         is_vcf_input = _is_vcf_input_path(input_path)
         plink_prefix_input = None if is_vcf_input or _is_training_matrix_input_path(input_path) else _resolve_plink_genotype_prefix(input_path)
         is_genotype_input = is_vcf_input or plink_prefix_input is not None
@@ -2082,33 +1980,24 @@ def predict_with_model(input_path: str, model_path: str, output_dir: str, task_t
         if not model_path_obj.is_file():
             raise FileNotFoundError(f'Model file does not exist or is not a valid file path: {model_path_obj}')
         model_file = model_path_obj
-        model_dir = model_file.parent
         name = model_file.stem
         model_type = name[:-6] if name.endswith('_model') else name
-        features_file = model_dir / f'{model_type}_training_features.json'
-        train_features: List[str] = []
-        train_chr_pos_keys: List[str] = []
-        if features_file.exists():
-            try:
-                with open(features_file, 'r') as f:
-                    feature_info = json.load(f)
-                train_features = feature_info.get('feature_names') or []
-                train_chr_pos_keys = feature_info.get('feature_chr_pos_keys') or []
-            except Exception:
-                pass
-        if train_features and (not train_chr_pos_keys):
-            train_chr_pos_keys = build_feature_chr_pos_keys(train_features)
+        model, model_meta = load_model_bundle(model_file)
+        train_features = list(model_meta['feature_names'])
+        train_chr_pos_keys = list(model_meta['feature_chr_pos_keys'])
+        if model_meta.get('model_type'):
+            model_type = str(model_meta['model_type'])
+        resolved_task_type = task_type or model_meta.get('task_type')
+        if not resolved_task_type:
+            raise ValueError(f'Model bundle missing task_type and none was provided via CLI: {model_file}')
         if is_genotype_input:
             output_dir_path = Path(output_dir)
             tmp_dir = output_dir_path / 'tmp_predict'
             tmp_dir_to_clean = tmp_dir
             genotype_source = input_path if is_vcf_input else plink_prefix_input
             input_path = _genotype_to_prediction_train_file(genotype_source, train_chr_pos_keys, tmp_dir, is_vcf=is_vcf_input)
-        chr_pos_filter = set(train_chr_pos_keys) if train_chr_pos_keys else None
+        chr_pos_filter = set(train_chr_pos_keys)
         X, _, _ = load_training_data(input_path, chr_pos_filter=chr_pos_filter)
-        if not train_features:
-            train_features = list(X.columns)
-            train_chr_pos_keys = build_feature_chr_pos_keys(train_features)
         X_aligned, matched_count, missing_count = align_features_by_chr_pos(X, train_features, train_chr_pos_keys)
         if matched_count == 0:
             logger.warning(f'  WARNING: No features matched between training and prediction data!\n  This will result in all-zero feature matrix and constant predictions.\n  Training chr_pos keys (first 20): {train_chr_pos_keys[:20]}\n  Input chr_pos keys (first 20): {[column_to_chr_pos(c) or c for c in X.columns[:20]]}')
@@ -2119,12 +2008,8 @@ def predict_with_model(input_path: str, model_path: str, output_dir: str, task_t
         non_zero_counts = (X_aligned != 0).sum(axis=1)
         if (non_zero_counts == 0).all():
             logger.error(f'  ERROR: All feature values are zero! This will result in constant predictions.\n  Matched features: {matched_count}\n  Missing features: {missing_count}\n  Please check if chr_pos keys match between training and prediction data.')
-        if not model_file.exists():
-            raise FileNotFoundError(f'Model file not found: {model_file}')
-        import joblib
-        model = joblib.load(model_file)
         y_pred = model.predict(X_aligned)
-        y_prob = model.predict_proba(X_aligned) if task_type == 'classification' and hasattr(model, 'predict_proba') else None
+        y_prob = model.predict_proba(X_aligned) if resolved_task_type == 'classification' and hasattr(model, 'predict_proba') else None
         unique_predictions = len(np.unique(y_pred))
         if unique_predictions == 1:
             logger.error(f"  ERROR: All predictions are the same value: {y_pred[0]}\n  This usually indicates one of the following issues:\n  1. chr_pos keys don't match between training and prediction data\n  2. All feature values are zero (check matched features: {matched_count})\n  3. Model is predicting a constant value for all samples\n  Please check the feature alignment logs above.")
@@ -2132,7 +2017,7 @@ def predict_with_model(input_path: str, model_path: str, output_dir: str, task_t
         pred_output_dir.mkdir(parents=True, exist_ok=True)
         pred_file = pred_output_dir / f'{model_type}_predictions.tsv'
         result_df = pd.DataFrame({'sample': X_aligned.index, 'prediction': y_pred})
-        if task_type == 'classification' and y_prob is not None:
+        if resolved_task_type == 'classification' and y_prob is not None:
             for i in range(y_prob.shape[1]):
                 result_df[f'prob_class_{i}'] = y_prob[:, i]
         result_df.to_csv(pred_file, sep='\t', index=False)

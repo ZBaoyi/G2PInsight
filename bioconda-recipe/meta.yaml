@@ -1,5 +1,5 @@
 {% set name = "g2pinsight" %}
-{% set version = "1.0.9" %}
+{% set version = "1.1.0" %}
 
 package:
   name: {{ name }}
@@ -7,7 +7,7 @@ package:
 
 source:
   url: https://pypi.io/packages/source/{{ name[0] }}/{{ name }}/{{ name }}-{{ version }}.tar.gz
-  sha256: 9a4e3447faa2809e486808bc6af21cbff5f6f4a0e7c9d9def3adb40ef8fe3fc5
+  sha256: 7acddf56b7a4d7d27ebb2dbff17f08a04bf2899ed607883aff143464392b47f5
 
 build:
   number: 0

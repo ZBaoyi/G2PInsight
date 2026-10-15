@@ -11,7 +11,6 @@ bin_dir = Path(__file__).parent
 software_dir = bin_dir / 'software'
 _bundled_plink = software_dir / 'plink'
 _bundled_gemma = software_dir / 'gemma-0.98.5-linux-static-AMD64'
-
 def _get_plink_executable() -> str:
     if _bundled_plink.exists():
         return str(_bundled_plink)
@@ -19,7 +18,6 @@ def _get_plink_executable() -> str:
     if found:
         return found
     raise FileNotFoundError(f'PLINK executable not found. Checked bundled path: {_bundled_plink} and system PATH.')
-
 def _get_gemma_executable() -> str:
     if _bundled_gemma.exists():
         return str(_bundled_gemma)
@@ -30,7 +28,6 @@ def _get_gemma_executable() -> str:
 plink_executable = _get_plink_executable()
 gemma_executable = _get_gemma_executable()
 REQUIRED_INPUT_FILES = {'bed': '.bed', 'bim': '.bim', 'fam': '.fam'}
-
 def validate_input_files(input_prefix: str) -> None:
     if not isinstance(input_prefix, str) or not input_prefix.strip():
         raise ValueError('input_prefix must be a non-empty string')
@@ -41,7 +38,6 @@ def validate_input_files(input_prefix: str) -> None:
             missing_files.append(file_path)
     if missing_files:
         raise FileNotFoundError(f"Missing PLINK binary files: {', '.join(missing_files)}")
-
 def validate_phenotype_file(phenotype_file: str) -> pd.DataFrame:
     if not isinstance(phenotype_file, str) or not phenotype_file.strip():
         raise ValueError('phenotype_file must be a non-empty string')
@@ -53,7 +49,6 @@ def validate_phenotype_file(phenotype_file: str) -> pd.DataFrame:
         return pheno_df
     except Exception as e:
         raise RuntimeError(f'Failed to read phenotype file: {str(e)}')
-
 def run_shell_command(cmd: list, step_name: str) -> None:
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8')
     stderr_content = ''
@@ -71,11 +66,9 @@ def run_shell_command(cmd: list, step_name: str) -> None:
         logger.error(f'stderr: {stderr_content}')
     if result.returncode != 0:
         raise RuntimeError(f'{step_name} failed with return code: {result.returncode}')
-
 def plink_quality_control(input_prefix: str, output_prefix: str) -> None:
     cmd = [plink_executable, '--bfile', input_prefix, '--maf', '0.05', '--geno', '0.2', '--allow-extra-chr', '--allow-no-sex', '--make-bed', '--out', output_prefix]
     run_shell_command(cmd, 'PLINK quality control')
-
 def merge_phenotype_to_fam(pheno_df: pd.DataFrame, fam_file: str) -> None:
     bak_fam = f'{fam_file}.bak'
     if not Path(bak_fam).exists():
@@ -87,22 +80,18 @@ def merge_phenotype_to_fam(pheno_df: pd.DataFrame, fam_file: str) -> None:
     fam_df['PHENO'] = fam_df['IID'].map(pheno_dict).fillna('-9')
     new_fam_df = fam_df[['FID', 'IID', 'PAT', 'MAT', 'SEX', 'PHENO']]
     new_fam_df.to_csv(fam_file, sep=' ', header=False, index=False)
-
 def calculate_pca(input_prefix: str, output_prefix: str) -> None:
     cmd = [plink_executable, '--bfile', input_prefix, '--pca', '5', '--allow-extra-chr', '--allow-no-sex', '--out', output_prefix]
     run_shell_command(cmd, 'PCA computation')
-
 def filter_valid_samples(pheno_df: pd.DataFrame, fam_file: str, output_sample_file: str) -> None:
     fam_df = pd.read_csv(fam_file, sep='\\s+', header=None, names=['FID', 'IID', 'PAT', 'MAT', 'SEX', 'PHENO'])
     valid_iids = set(pheno_df['IID'].astype(str).str.strip())
     fam_df['IID'] = fam_df['IID'].astype(str).str.strip()
     valid_df = fam_df[fam_df['IID'].isin(valid_iids)][['FID', 'IID']]
     valid_df.to_csv(output_sample_file, sep=' ', header=False, index=False)
-
 def filter_plink_samples(input_prefix: str, sample_file: str, output_prefix: str) -> None:
     cmd = [plink_executable, '--bfile', input_prefix, '--keep', sample_file, '--allow-extra-chr', '--allow-no-sex', '--make-bed', '--out', output_prefix]
     run_shell_command(cmd, 'PLINK sample filtering')
-
 def filter_pca_by_samples(pca_file: str, sample_file: str, output_pca_file: str) -> None:
     valid_df = pd.read_csv(sample_file, sep='\\s+', header=None, names=['FID', 'IID'])
     valid_set = set(zip(valid_df['FID'].astype(str).str.strip(), valid_df['IID'].astype(str).str.strip()))
@@ -110,12 +99,10 @@ def filter_pca_by_samples(pca_file: str, sample_file: str, output_pca_file: str)
     pca_df['key'] = list(zip(pca_df[0].astype(str).str.strip(), pca_df[1].astype(str).str.strip()))
     filtered_df = pca_df[pca_df['key'].isin(valid_set)].drop('key', axis=1)
     filtered_df.to_csv(output_pca_file, sep=' ', header=False, index=False)
-
 def extract_pca_covariates(pca_file: str, output_cov_file: str) -> None:
     pca_df = pd.read_csv(pca_file, sep='\\s+', header=None)
     cov_df = pca_df.iloc[:, 2:]
     cov_df.to_csv(output_cov_file, sep=' ', header=False, index=False)
-
 def calculate_kinship_matrix(genotype_prefix: str, output_prefix: str) -> str:
     base_prefix = Path(output_prefix).name
     kinship_prefix = f'{base_prefix}_kinship'
@@ -125,7 +112,6 @@ def calculate_kinship_matrix(genotype_prefix: str, output_prefix: str) -> str:
     if not kinship_file.exists():
         raise FileNotFoundError(f'Kinship matrix file was not generated: {kinship_file}')
     return kinship_file.absolute().as_posix()
-
 def run_gemma_gwas(genotype_prefix: str, kinship_file: str, cov_file: str, output_prefix: str) -> None:
     base_prefix = Path(output_prefix).name
     gwas_prefix = f'{base_prefix}_gwas'
@@ -135,7 +121,6 @@ def run_gemma_gwas(genotype_prefix: str, kinship_file: str, cov_file: str, outpu
     expected_result_file = Path(current_dir) / 'output' / f'{gwas_prefix}.assoc.txt'
     if not expected_result_file.exists():
         raise FileNotFoundError(f'GWAS result file was not generated: {expected_result_file}')
-
 def run_complete_gwas_pipeline(input_plink_prefix: str, phenotype_file: str, output_prefix: str, perform_plink_qc: bool=True) -> None:
     validate_input_files(input_plink_prefix)
     pheno_df = validate_phenotype_file(phenotype_file)

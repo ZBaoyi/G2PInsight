@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "G2PInsight"
-version = "1.0.9"
+version = "1.1.0"
 description = "Genome-wide association analysis toolkit"
 readme = "README.md"
 # Cap below 3.14: pandas/numpy for 3.14+ only ship manylinux_2_24+ wheels.

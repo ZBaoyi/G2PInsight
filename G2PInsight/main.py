@@ -12,14 +12,12 @@ _pkg_dir = Path(__file__).resolve().parent
 _pkg_parent = _pkg_dir.parent
 if (_pkg_dir / '__init__.py').exists() and str(_pkg_parent) not in sys.path:
     sys.path.insert(0, str(_pkg_parent))
-
 def _prepare_stage_output_dir(output_dir: str, stage: str) -> str:
     base_output_dir = Path(output_dir).absolute()
     base_output_dir.mkdir(parents=True, exist_ok=True)
     stage_output_dir = base_output_dir / stage
     stage_output_dir.mkdir(parents=True, exist_ok=True)
     return str(stage_output_dir)
-
 def init_logging(log_file: Optional[Path]=None) -> None:
     root = logging.getLogger()
     root.handlers.clear()
@@ -33,7 +31,6 @@ def init_logging(log_file: Optional[Path]=None) -> None:
         file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
         root.addHandler(file_handler)
     logging.captureWarnings(True)
-
 def run_preprocess(args) -> int:
     from G2PInsight.bin.preprocess import run_preprocess as preprocess_func, resolve_genotype_input
     try:
@@ -47,7 +44,6 @@ def run_preprocess(args) -> int:
     except Exception as e:
         logger.error(f'Preprocessing failed: {str(e)}')
         return 1
-
 def run_training(args) -> int:
     try:
         from G2PInsight.bin.modeltraining import run_single_model
@@ -56,7 +52,6 @@ def run_training(args) -> int:
     except Exception as e:
         logger.error(f'Training failed: {str(e)}')
         return 1
-
 def run_train_all(args) -> int:
     try:
         from G2PInsight.bin.modeltraining import run_all_models
@@ -65,7 +60,6 @@ def run_train_all(args) -> int:
     except Exception as e:
         logger.error(f'Training all models failed: {str(e)}')
         return 1
-
 def run_predict(args) -> int:
     try:
         from G2PInsight.bin.modeltraining import predict_with_model
@@ -74,7 +68,6 @@ def run_predict(args) -> int:
     except Exception as e:
         logger.error(f'Prediction failed: {str(e)}')
         return 1
-
 def run_unified_visualization(args) -> int:
     result_code = 0
     has_importance = getattr(args, 'importance', None) is not None
@@ -146,16 +139,12 @@ def run_unified_visualization(args) -> int:
             logger.error(f'Feature-importance visualization failed: {str(e)}')
             result_code = 1
     return result_code
-
 def print_banner() -> None:
     from G2PInsight import __version__
     print('=' * 50)
     print(f'G2PInsight Genomic analysis platform v{__version__}')
     print('=' * 50)
-
 class _HelpFormatter(argparse.RawDescriptionHelpFormatter):
-    """Compact, aligned help: short usage metasyntax + readable option columns."""
-
     def __init__(self, prog: str, indent_increment: int=2, max_help_position: int=32, width: Optional[int]=None):
         if width is None:
             try:
@@ -164,7 +153,6 @@ class _HelpFormatter(argparse.RawDescriptionHelpFormatter):
             except Exception:
                 width = 90
         super().__init__(prog, indent_increment=indent_increment, max_help_position=max_help_position, width=width)
-
     def _format_action(self, action: argparse.Action) -> str:
         if isinstance(action, argparse._SubParsersAction):
             rows = []
@@ -174,15 +162,12 @@ class _HelpFormatter(argparse.RawDescriptionHelpFormatter):
                 rows.append(f'  {choice.dest:<{name_width}}  {help_text}')
             return '\n'.join(rows) + ('\n' if rows else '')
         return super()._format_action(action)
-
     def _format_action_invocation(self, action: argparse.Action) -> str:
         if not action.option_strings and isinstance(action, argparse._SubParsersAction):
             return ''
         return super()._format_action_invocation(action)
-
 def _add_subparser(subparsers: argparse._SubParsersAction, name: str, *, help: str, description: str, epilog: Optional[str]=None) -> argparse.ArgumentParser:
     return subparsers.add_parser(name, help=help, description=description, epilog=epilog, formatter_class=_HelpFormatter)
-
 def setup_argparse() -> argparse.ArgumentParser:
     from G2PInsight import __version__
     top_epilog = """\
@@ -192,13 +177,11 @@ examples:
   G2PInsight train-all -j results/preprocess/results_metadata.json -o results/ --threads 4
   G2PInsight predict -i new_geno -m results/train/LightGBM/LightGBM_model.pkl -o results/
   G2PInsight visualize -I results/train/LightGBM/LightGBM_plotting_data.json -o results/plot/perf
-
 Run "G2PInsight <command> -h" for command-specific options.
 """
     parser = argparse.ArgumentParser(prog='G2PInsight', description='G2PInsight — genotype–phenotype ML toolkit', formatter_class=_HelpFormatter, epilog=top_epilog)
     parser.add_argument('--version', action='version', version=f'G2PInsight {__version__}')
     subparsers = parser.add_subparsers(title='commands', dest='command', metavar='COMMAND')
-
     _cmd_help = {
         'preprocess': 'QC + optional GWAS/LD → matrix & metadata',
         'train': 'Train one model (fixed 5-fold CV)',
@@ -206,8 +189,6 @@ Run "G2PInsight <command> -h" for command-specific options.
         'predict': 'Predict with a saved .pkl model',
         'visualize': 'Plots from SHAP / plotting JSON',
     }
-
-
     preprocess_parser = _add_subparser(subparsers, 'preprocess', help=_cmd_help['preprocess'], description='Build the sample×SNP training matrix and metadata JSON.\nAfter QC, fixes a reproducible train/test split; GWAS/LD use train only.', epilog='Example:\n  G2PInsight preprocess --bfile geno -p pheno.txt -o results/ -f 4')
     geno_g = preprocess_parser.add_argument_group('genotype (choose one)')
     geno_mx = geno_g.add_mutually_exclusive_group(required=True)
@@ -227,8 +208,6 @@ Run "G2PInsight <command> -h" for command-specific options.
     split_g.add_argument('--test-ids-file', dest='test_ids_file', default=None, metavar='FILE', help='Test sample IDs (one per line; use with --train-ids-file)')
     split_g.add_argument('--random_state', type=int, default=42, metavar='N', help='Seed for default sorted-ID 80/20 split (default: 42)')
     preprocess_parser.set_defaults(func=run_preprocess)
-
-
     train_parser = _add_subparser(subparsers, 'train', help=_cmd_help['train'], description='Train one model using preprocess metadata.\nUses fixed 5-fold CV on the train split; test set is evaluation-only.', epilog='Example:\n  G2PInsight train -j results/preprocess/results_metadata.json -m LightGBM -o results/')
     train_req = train_parser.add_argument_group('required')
     train_req.add_argument('-j', '--json', required=True, metavar='FILE', help='Preprocess *_metadata.json')
@@ -241,8 +220,6 @@ Run "G2PInsight <command> -h" for command-specific options.
     train_opt.add_argument('--shap_dependence_top', type=int, default=50, metavar='N', help='Cap SNPs in *_shap_dependence.tsv when features > 1000 (default: 50; 0=all)')
     train_opt.add_argument('--hyperparameter_search', dest='hyperparameter_search', action='store_true', help='Enable RandomizedSearchCV (off by default)')
     train_parser.set_defaults(hyperparameter_search=False, func=run_training)
-
-
     train_all_parser = _add_subparser(subparsers, 'train-all', help=_cmd_help['train-all'], description='Train every supported model on the same preprocess split.\nKeeps the best model by held-out test metrics.', epilog='Example:\n  G2PInsight train-all -j results/preprocess/results_metadata.json -o results/ --threads 4')
     ta_req = train_all_parser.add_argument_group('required')
     ta_req.add_argument('-j', '--json', required=True, metavar='FILE', help='Preprocess *_metadata.json')
@@ -255,8 +232,6 @@ Run "G2PInsight <command> -h" for command-specific options.
     ta_opt.add_argument('--shap_dependence_top', type=int, default=50, metavar='N', help='Cap SNPs in *_shap_dependence.tsv when features > 1000 (default: 50; 0=all)')
     ta_opt.add_argument('--hyperparameter_search', dest='hyperparameter_search', action='store_true', help='Enable RandomizedSearchCV (off by default)')
     train_all_parser.set_defaults(hyperparameter_search=False, func=run_train_all)
-
-
     predict_parser = _add_subparser(subparsers, 'predict', help=_cmd_help['predict'], description='Apply a saved .pkl model to new samples.\nWrites <output_dir>/predict/{Model}_predictions.tsv.', epilog='Example:\n  G2PInsight predict -i new_geno -m results/train/LightGBM/LightGBM_model.pkl -o results/')
     pred_req = predict_parser.add_argument_group('required')
     pred_req.add_argument('-i', '--input', required=True, metavar='PATH', help='Input matrix (.txt/.gz) or genotype prefix/VCF')
@@ -265,8 +240,6 @@ Run "G2PInsight <command> -h" for command-specific options.
     pred_opt = predict_parser.add_argument_group('optional')
     pred_opt.add_argument('--task_type', metavar='TYPE', choices=['classification', 'regression'], help='classification | regression (optional)')
     predict_parser.set_defaults(func=run_predict)
-
-
     viz_parser = _add_subparser(subparsers, 'visualize', help=_cmd_help['visualize'], description='Render importance and/or performance plots.\nProvide at least one of -i/--importance or -I/--indicator.', epilog='Examples:\n  G2PInsight visualize -I results/train/LightGBM/LightGBM_plotting_data.json -o results/plot/perf\n  G2PInsight visualize -i results/train/LightGBM/LightGBM_shap_values.txt -o results/plot/shap')
     viz_in = viz_parser.add_argument_group('input (at least one)')
     viz_in.add_argument('-i', '--importance', metavar='FILE', help='Feature-importance / SHAP values file')
@@ -276,18 +249,15 @@ Run "G2PInsight <command> -h" for command-specific options.
     viz_out.add_argument('--top_snps', type=int, default=20, metavar='N', help='Top SNPs in bar/dependence plots (default: 20)')
     viz_parser.set_defaults(func=run_unified_visualization)
     return parser
-
 def format_runtime(start_time: float) -> str:
     seconds = time.perf_counter() - start_time
     hours = int(seconds // 3600)
     minutes = int(seconds % 3600 // 60)
     seconds = int(seconds % 60)
     return f'{hours}h{minutes}m{seconds}s'
-
 def _is_help_or_version_request(argv: Optional[list]=None) -> bool:
     args = list(sys.argv[1:] if argv is None else argv)
     return any((a in ('-h', '--help', '--version') for a in args))
-
 def main() -> None:
     start_time = time.perf_counter()
     help_or_version = _is_help_or_version_request()
@@ -295,7 +265,6 @@ def main() -> None:
         init_logging(Path('G2PInsight.log'))
         print_banner()
     else:
-
         logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
     parser = setup_argparse()
     if len(sys.argv) == 1:

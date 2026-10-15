@@ -5,10 +5,8 @@ from functools import lru_cache
 from typing import Any, Optional, Tuple, cast
 logger = logging.getLogger(__name__)
 _FONT_MANAGER_LOGGER = 'matplotlib.font_manager'
-
 def _load_module(name: str) -> Any:
     return importlib.import_module(name)
-
 def _collect_matplotlib_font_names() -> set:
     fm = _load_module('matplotlib.font_manager')
     font_manager = getattr(fm, 'fontManager', None)
@@ -21,7 +19,6 @@ def _collect_matplotlib_font_names() -> set:
         return {f.name for f in font_manager.ttflist}
     finally:
         mpl_logger.setLevel(prev_level)
-
 @lru_cache(maxsize=1)
 def detect_available_fonts() -> Tuple[Optional[str], Optional[str]]:
     try:
@@ -40,13 +37,11 @@ def detect_available_fonts() -> Tuple[Optional[str], Optional[str]]:
                 break
         if not english_font:
             english_font = 'DejaVu Sans'
-
         if not chinese_font:
             chinese_font = None
         return (chinese_font, english_font)
     except Exception:
         return (None, 'DejaVu Sans')
-
 def setup_matplotlib_font(chinese_font: Optional[str]=None, english_font: Optional[str]=None) -> None:
     try:
         mpl = _load_module('matplotlib')
@@ -60,7 +55,6 @@ def setup_matplotlib_font(chinese_font: Optional[str]=None, english_font: Option
                 chinese_font = detected_cn
             if english_font is None:
                 english_font = detected_en
-
         default_font = chinese_font or english_font or 'DejaVu Sans'
         fallback_en = english_font or 'DejaVu Sans'
         serif_prefer = {'Times New Roman', 'Times', 'Liberation Serif', 'DejaVu Serif', 'Georgia'}
@@ -69,7 +63,6 @@ def setup_matplotlib_font(chinese_font: Optional[str]=None, english_font: Option
             plt.rcParams['font.family'] = 'serif'
             plt.rcParams['font.serif'] = [face, 'Times New Roman', 'DejaVu Serif', 'Liberation Serif']
             plt.rcParams['font.sans-serif'] = [fallback_en, 'DejaVu Sans']
-
             plt.rcParams['mathtext.fontset'] = 'stix'
         else:
             plt.rcParams['font.family'] = 'sans-serif'
@@ -80,7 +73,6 @@ def setup_matplotlib_font(chinese_font: Optional[str]=None, english_font: Option
         plt.rcParams['axes.unicode_minus'] = False
     except Exception:
         pass
-
 def setup_plotly_font(chinese_font: Optional[str]=None, english_font: Optional[str]=None) -> dict:
     try:
         if chinese_font is None and english_font is None:

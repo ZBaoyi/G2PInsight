@@ -40,14 +40,12 @@ SNP_DTYPE = np.int8
 TRAIN_MATRIX_COL_WRITE_CHUNK = 50_000
 TRAIN_TEST_HOLDOUT_RATIO = 0.20
 DEFAULT_SPLIT_RANDOM_STATE = 42
-
 @dataclass
 class TrainingMatrixOutput:
     train_file: str
     sample_ids: List[str]
     n_snp_features: int
     includes_phenotype_column: bool = True
-
 def _count_bim_snps(plink_prefix: str) -> int:
     bim_file = Path(plink_prefix).with_suffix('.bim')
     if not bim_file.exists():
@@ -59,12 +57,9 @@ def _count_bim_snps(plink_prefix: str) -> int:
         for _ in f:
             count += 1
     return count
-
 GenotypeFormat = Literal['vcf', 'plink_binary', 'plink_text']
 GenotypeBackend = Literal['auto', 'bed', 'raw']
-
 class VectorizedProcessor:
-
     @staticmethod
     def batch_rename_columns(df: pd.DataFrame, mapping: Dict[str, str]) -> pd.DataFrame:
         if not mapping:
@@ -74,7 +69,6 @@ class VectorizedProcessor:
             return df
         rename_dict = {col: mapping[col] for col in existing_cols}
         return df.rename(columns=rename_dict)
-
     @staticmethod
     def _convert_chunk(chunk_data: np.ndarray, is_numeric: bool, target_dtype: type) -> np.ndarray:
         if is_numeric:
@@ -85,7 +79,6 @@ class VectorizedProcessor:
             except (ValueError, TypeError):
                 chunk_converted = pd.to_numeric(chunk_data, errors='coerce').values
                 return np.nan_to_num(chunk_converted, nan=-1).astype(target_dtype)
-
     @staticmethod
     def vectorized_type_conversion(df: pd.DataFrame, exclude_cols: List[str]=None, target_dtype: type=np.int8) -> pd.DataFrame:
         if df.empty:
@@ -136,7 +129,6 @@ class VectorizedProcessor:
                 for col in cols_to_convert:
                     df[col] = pd.to_numeric(df[col], errors='coerce').fillna(-1).astype(target_dtype)
         return df
-
     @staticmethod
     def batch_parse_plink_columns(col_names: List[str]) -> Dict[str, str]:
         mapping = {}
@@ -148,7 +140,6 @@ class VectorizedProcessor:
                 pos_part = match.group(2)
                 mapping[col] = f'{chr_part}_{pos_part}'
         return mapping
-
     @staticmethod
     def optimize_dataframe_memory(df: pd.DataFrame, categorical_threshold: float=0.5) -> pd.DataFrame:
         if df.empty:
@@ -181,9 +172,7 @@ class VectorizedProcessor:
                 elif col_min >= -2147483648 and col_max <= 2147483647:
                     optimized_df[col] = col_data.astype(np.int32)
         return optimized_df
-
 class SmartCache:
-
     def __init__(self, max_size_mb: int=512, max_items: int=1000):
         self.max_size_bytes = max_size_mb * 1024 * 1024
         self.max_items = max_items
@@ -193,7 +182,6 @@ class SmartCache:
         self.misses = 0
         self.lock = threading.RLock()
         self.stats = {'total_requests': 0, 'hits': 0, 'misses': 0, 'evictions': 0, 'size_mb': 0}
-
     def _get_item_size(self, item: Any) -> int:
         try:
             if isinstance(item, (pd.DataFrame, pd.Series)):
@@ -206,14 +194,12 @@ class SmartCache:
                 return sys.getsizeof(item)
         except:
             return 1024 * 1024
-
     def _evict_if_needed(self, new_item_size: int):
         with self.lock:
             while (self.current_size_bytes + new_item_size > self.max_size_bytes or len(self.cache) >= self.max_items) and self.cache:
                 key, item = self.cache.popitem(last=False)
                 self.current_size_bytes -= item['size']
                 self.stats['evictions'] += 1
-
     def get(self, key: str, check_file_mtime: bool=False, file_path: Optional[str]=None) -> Optional[Any]:
         with self.lock:
             self.stats['total_requests'] += 1
@@ -238,7 +224,6 @@ class SmartCache:
             cache_item['access_count'] = cache_item.get('access_count', 0) + 1
             self.stats['hits'] += 1
             return cache_item['data']
-
     def set(self, key: str, data: Any, file_path: Optional[str]=None, ttl_seconds: Optional[int]=None):
         with self.lock:
             data_size = self._get_item_size(data)
@@ -253,12 +238,10 @@ class SmartCache:
             self.cache[key] = cache_item
             self.current_size_bytes += data_size
             self.stats['size_mb'] = self.current_size_bytes / (1024 * 1024)
-
     def _delete(self, key: str):
         if key in self.cache:
             item = self.cache.pop(key)
             self.current_size_bytes -= item['size']
-
     def cleanup_expired(self):
         with self.lock:
             current_time = time.time()
@@ -278,11 +261,8 @@ class SmartCache:
                         expired_keys.append(key)
             for key in expired_keys:
                 self._delete(key)
-
 GLOBAL_CACHE = SmartCache(max_size_mb=1024 * 4)
-
 def cached(key_func: Optional[Callable]=None, ttl_seconds: Optional[int]=None):
-
     def _make_hashable(obj: Any) -> Any:
         if isinstance(obj, (str, int, float, bool, type(None))):
             return obj
@@ -316,9 +296,7 @@ def cached(key_func: Optional[Callable]=None, ttl_seconds: Optional[int]=None):
                 return str(obj)
             except:
                 return f'obj_{id(obj)}'
-
     def decorator(func):
-
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             if key_func:
@@ -336,9 +314,7 @@ def cached(key_func: Optional[Callable]=None, ttl_seconds: Optional[int]=None):
             return result
         return wrapper
     return decorator
-
 class PLINKOptimizer:
-
     @staticmethod
     def optimize_plink_parameters(available_memory_mb: Optional[float]=None) -> Dict[str, Any]:
         if available_memory_mb is None and PSUTIL_AVAILABLE:
@@ -355,7 +331,6 @@ class PLINKOptimizer:
             params['memory_mb'] = max(1024, params['memory_mb'])
         params['performance_flags'] = ['--allow-extra-chr', '--allow-no-sex', '--keep-allele-order', '--nonfounders']
         return params
-
     @staticmethod
     def build_plink_command(base_cmd: List[str], optimized_params: Dict[str, Any], additional_args: Optional[List[str]]=None) -> List[str]:
         cmd = base_cmd.copy()
@@ -368,30 +343,24 @@ class PLINKOptimizer:
         if additional_args:
             cmd.extend(additional_args)
         return cmd
-
 class BimIndex:
-
     _CACHE: Dict[str, 'BimIndex'] = {}
     _BIM_COLUMNS = ['chr', 'snp_id', 'genetic_dist', 'physical_pos', 'a1', 'a2']
-
     def __init__(self, bim_path: str):
         self.bim_path = str(Path(bim_path).absolute())
         self._df: Optional[pd.DataFrame] = None
         self._raw_mapping_cache: Dict[Optional[str], Dict[str, str]] = {}
-
     @classmethod
     def from_bim(cls, bim_path: str) -> 'BimIndex':
         key = str(Path(bim_path).absolute())
         if key not in cls._CACHE:
             cls._CACHE[key] = cls(bim_path)
         return cls._CACHE[key]
-
     @property
     def df(self) -> pd.DataFrame:
         if self._df is None:
             self._load_df()
         return self._df
-
     def _load_df(self) -> None:
         if not Path(self.bim_path).exists():
             raise FileNotFoundError(f'.bim file not found: {self.bim_path}')
@@ -406,15 +375,12 @@ class BimIndex:
             df = pd.concat(chunks, ignore_index=True)
         df['column_name'] = df['chr'] + '_' + df['physical_pos'].astype(str)
         self._df = df
-
     @property
     def n_snps(self) -> int:
         return len(self.df)
-
     @property
     def column_names(self) -> List[str]:
         return self.df['column_name'].tolist()
-
     def ordered_chr_blocks(self, chr_list: List[str]) -> List[Tuple[str, np.ndarray]]:
         blocks: List[Tuple[str, np.ndarray]] = []
         chr_values = self.df['chr'].values
@@ -423,13 +389,11 @@ class BimIndex:
             if len(indices) > 0:
                 blocks.append((chr_num, indices))
         return blocks
-
     def column_names_for_chr_list(self, chr_list: List[str]) -> List[str]:
         names: List[str] = []
         for _, indices in self.ordered_chr_blocks(chr_list):
             names.extend(self.df['column_name'].values[indices].tolist())
         return names
-
     def raw_column_mapping(self, chr_num: Optional[str]=None) -> Dict[str, str]:
         if chr_num in self._raw_mapping_cache:
             return self._raw_mapping_cache[chr_num]
@@ -449,7 +413,6 @@ class BimIndex:
                 snp_mapping[fmt] = new_name
         self._raw_mapping_cache[chr_num] = snp_mapping
         return snp_mapping
-
 def _resolve_genotype_backend(genotype_backend: GenotypeBackend, plink_prefix_abs: str) -> Literal['bed', 'raw']:
     bed_file = f'{plink_prefix_abs}.bed'
     if genotype_backend == 'raw':
@@ -463,7 +426,6 @@ def _resolve_genotype_backend(genotype_backend: GenotypeBackend, plink_prefix_ab
     if BED_READER_AVAILABLE and Path(bed_file).exists():
         return 'bed'
     return 'raw'
-
 def _prepare_pheno_df_loaded(pheno_df: pd.DataFrame, tmp_base: Path) -> Tuple[pd.DataFrame, str]:
     temp_pheno_file = str(tmp_base / 'temp_pheno.feather')
     try:
@@ -487,7 +449,6 @@ def _prepare_pheno_df_loaded(pheno_df: pd.DataFrame, tmp_base: Path) -> Tuple[pd
         if 'sample' in pheno_df_loaded.columns:
             pheno_df_loaded = pheno_df_loaded.set_index('sample')
         return pheno_df_loaded, temp_pheno_file
-
 def _align_pheno_to_bed_samples(pheno_df_loaded: pd.DataFrame, plink_prefix_abs: str) -> Tuple[List[str], np.ndarray, pd.DataFrame]:
     fam_file = f'{plink_prefix_abs}.fam'
     if not Path(fam_file).exists():
@@ -500,7 +461,6 @@ def _align_pheno_to_bed_samples(pheno_df_loaded: pd.DataFrame, plink_prefix_abs:
     bed_row_idx = np.array([iid_to_row[s] for s in sample_ids], dtype=np.int64)
     pheno_aligned = pheno_df_loaded.loc[sample_ids]
     return sample_ids, bed_row_idx, pheno_aligned
-
 def _normalize_output_train_path(output_file_abs: str, n_cells: int) -> Tuple[str, Optional[str]]:
     if not output_file_abs.endswith('.txt') and (not output_file_abs.endswith('.txt.gz')):
         if output_file_abs.endswith('.gz'):
@@ -512,9 +472,7 @@ def _normalize_output_train_path(output_file_abs: str, n_cells: int) -> Tuple[st
         output_file_abs = output_file_abs + '.gz'
     compression = 'gzip' if use_gzip else None
     return output_file_abs, compression
-
 def _validate_train_matrix_file(path: str, expected_n_samples: Optional[int]=None) -> None:
-    """Verify training matrix exists and gzip stream is complete (not truncated)."""
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f'Training matrix file not found: {path}')
@@ -545,10 +503,8 @@ def _validate_train_matrix_file(path: str, expected_n_samples: Optional[int]=Non
         data_rows = newline_count - 1
         if data_rows != expected_n_samples:
             raise RuntimeError(f'Training matrix row count mismatch: file has {data_rows} data row(s), expected {expected_n_samples} (path={path}).\nThe export is incomplete; re-run preprocess.')
-
 def _genotypes_bed_to_int8(geno: np.ndarray) -> np.ndarray:
     return np.where(geno == -127, -1, geno).astype(np.int8)
-
 def _write_train_matrix_to_csv(output_file_abs: str, sample_ids: List[str], column_names: List[str], genotype_matrix: np.ndarray, phenotype_values: np.ndarray, compression: Optional[str]) -> None:
     if compression == 'gzip':
         import gzip
@@ -577,7 +533,6 @@ def _write_train_matrix_to_csv(output_file_abs: str, sample_ids: List[str], colu
             f.write(pheno_str[i])
             f.write('\n')
     _validate_train_matrix_file(output_file_abs, expected_n_samples=n_samples)
-
 def _plink_to_training_data_from_bed(plink_prefix: str, pheno_df: pd.DataFrame, output_file: str, tmp_dir: Optional[Union[str, Path]]=None, cleanup_registry: Optional[List[str]]=None) -> TrainingMatrixOutput:
     plink_prefix_abs = Path(plink_prefix).absolute().as_posix()
     output_file_path = Path(output_file).absolute()
@@ -635,7 +590,6 @@ def _plink_to_training_data_from_bed(plink_prefix: str, pheno_df: pd.DataFrame, 
             os.remove(temp_pheno_file)
         except Exception:
             pass
-
 def _make_cache_key_for_bim(bim_file: str, chr_num: Optional[str]=None) -> str:
     bim_path = Path(bim_file).absolute()
     try:
@@ -644,11 +598,9 @@ def _make_cache_key_for_bim(bim_file: str, chr_num: Optional[str]=None) -> str:
     except:
         key_parts = (str(bim_path), str(chr_num))
     return hashlib.md5(pickle.dumps(key_parts, protocol=pickle.HIGHEST_PROTOCOL)).hexdigest()
-
 @cached(key_func=_make_cache_key_for_bim, ttl_seconds=3600)
 def get_snp_chr_pos_mapping_optimized(bim_file: str, chr_num: Optional[str]=None) -> dict:
     return BimIndex.from_bim(str(Path(bim_file).absolute())).raw_column_mapping(chr_num)
-
 def standardize_snp_column_names(df: pd.DataFrame, bim_file: str, pheno_columns: Optional[List[str]]=None) -> pd.DataFrame:
     if df.empty:
         return df
@@ -680,14 +632,12 @@ def standardize_snp_column_names(df: pd.DataFrame, bim_file: str, pheno_columns:
     if rename_dict:
         df = df.rename(columns=rename_dict)
     return df
-
 def get_plink_path() -> str:
     current_file = Path(__file__).absolute()
     software_dir = current_file.parent / 'software'
     plink_candidates = [software_dir / 'plink']
     return str(plink_candidates[0])
 PLINK_EXECUTABLE = get_plink_path()
-
 def _process_chunk_parallel(chunk_data: Tuple[int, pd.DataFrame, Dict[str, str], Optional[int], List[str], type]) -> Tuple[int, pd.DataFrame]:
     chunk_idx, chunk_df, batch_mapping, sample_col_idx, original_columns, dtype_obj = chunk_data
     try:
@@ -704,7 +654,6 @@ def _process_chunk_parallel(chunk_data: Tuple[int, pd.DataFrame, Dict[str, str],
         import logging
         logging.getLogger(__name__).error(f'Chunk {chunk_idx} processing failed: {e}')
         raise
-
 def parse_raw_file_optimized_v2(raw_file: str, chr_snp_mapping: Dict[str, str], dtype_obj: type=np.int8, chunk_rows: int=10000, use_cache: bool=True, max_workers: Optional[int]=None, use_parallel: bool=False) -> pd.DataFrame:
     raw_file_abs = str(Path(raw_file).absolute())
     try:
@@ -800,7 +749,6 @@ def parse_raw_file_optimized_v2(raw_file: str, chr_snp_mapping: Dict[str, str], 
             return result_df
         finally:
             mmapped_file.close()
-
 def process_single_chromosome_optimized(chr_num: str, plink_prefix_abs: str, pheno_df: pd.DataFrame, plink_executable: str, use_cache: bool=True, skip_recode: bool=False, chr_recode_prefix: Optional[str]=None, cleanup_recode_files: bool=True) -> Tuple[str, Optional[pd.DataFrame]]:
     try:
         try:
@@ -863,7 +811,6 @@ def process_single_chromosome_optimized(chr_num: str, plink_prefix_abs: str, phe
     except Exception as e:
         logger.error(f'Chromosome {chr_num} processing failed: {str(e)}', exc_info=True)
         return (chr_num, None)
-
 def _plink_recodeA_single_chr_worker(chr_num: str, plink_prefix_abs: str, plink_executable: str, optimized_params: Dict[str, Any]) -> Tuple[str, int, str, str]:
     chr_recode_prefix = f'{plink_prefix_abs}_chr{chr_num}'
     base_cmd = [plink_executable, '--bfile', plink_prefix_abs, '--chr', chr_num, '--recodeA', '--out', chr_recode_prefix]
@@ -874,14 +821,12 @@ def _plink_recodeA_single_chr_worker(chr_num: str, plink_prefix_abs: str, plink_
         return (chr_num, int(result.returncode), chr_recode_prefix, msg)
     except Exception as e:
         return (chr_num, 1, chr_recode_prefix, str(e)[:800])
-
 def plink_to_training_data_optimized(plink_prefix: str, pheno_df: pd.DataFrame, output_file: str, tmp_dir: Optional[Union[str, Path]]=None, cleanup_registry: Optional[List[str]]=None, use_cache: bool=True, parallel_chr_recode: bool=False, chr_recode_workers: Optional[int]=None, genotype_backend: GenotypeBackend='auto') -> TrainingMatrixOutput:
     plink_prefix_abs = Path(plink_prefix).absolute().as_posix()
     backend = _resolve_genotype_backend(genotype_backend, plink_prefix_abs)
     if backend == 'bed':
         return _plink_to_training_data_from_bed(plink_prefix, pheno_df, output_file, tmp_dir=tmp_dir, cleanup_registry=cleanup_registry)
     return _plink_to_training_data_via_recodeA(plink_prefix, pheno_df, output_file, tmp_dir=tmp_dir, cleanup_registry=cleanup_registry, use_cache=use_cache, parallel_chr_recode=parallel_chr_recode, chr_recode_workers=chr_recode_workers)
-
 def _plink_to_training_data_via_recodeA(plink_prefix: str, pheno_df: pd.DataFrame, output_file: str, tmp_dir: Optional[Union[str, Path]]=None, cleanup_registry: Optional[List[str]]=None, use_cache: bool=True, parallel_chr_recode: bool=False, chr_recode_workers: Optional[int]=None) -> TrainingMatrixOutput:
     plink_prefix_abs = Path(plink_prefix).absolute().as_posix()
     output_file_path = Path(output_file).absolute()
@@ -1032,7 +977,6 @@ def _plink_to_training_data_via_recodeA(plink_prefix: str, pheno_df: pd.DataFram
                 os.remove(chr_file)
             except:
                 pass
-
 def load_sample_id_file(sample_id_file: str) -> List[str]:
     sample_path = Path(sample_id_file)
     if not sample_path.exists():
@@ -1049,7 +993,6 @@ def load_sample_id_file(sample_id_file: str) -> List[str]:
     if len(sample_ids) != len(set(sample_ids)):
         raise ValueError(f'Sample ID file contains duplicate sample IDs: {sample_id_file}')
     return sample_ids
-
 def write_sample_id_list(sample_ids: List[str], output_file: Union[str, Path]) -> str:
     out_path = Path(output_file).absolute()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1057,7 +1000,6 @@ def write_sample_id_list(sample_ids: List[str], output_file: Union[str, Path]) -
         for sid in sample_ids:
             f.write(f'{sid}\n')
     return str(out_path)
-
 def write_plink_keep_file(sample_ids: List[str], output_file: Union[str, Path]) -> str:
     out_path = Path(output_file).absolute()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1065,15 +1007,12 @@ def write_plink_keep_file(sample_ids: List[str], output_file: Union[str, Path]) 
         for sid in sample_ids:
             f.write(f'{sid}\t{sid}\n')
     return str(out_path)
-
 def _validate_ids_file_pair(train_ids_file: Optional[str], test_ids_file: Optional[str]) -> None:
     has_train = train_ids_file is not None
     has_test = test_ids_file is not None
     if has_train ^ has_test:
         raise ValueError('Both --train-ids-file and --test-ids-file must be provided together')
-
 def resolve_sample_split(sample_ids: List[str], pheno_df: pd.DataFrame, task_type: str, train_ids_file: Optional[str]=None, test_ids_file: Optional[str]=None, test_ratio: float=TRAIN_TEST_HOLDOUT_RATIO, random_state: int=DEFAULT_SPLIT_RANDOM_STATE) -> Dict[str, Any]:
-    """Resolve train/test IDs. Custom files if given; else reproducible 80/20 after sorting sample IDs."""
     _validate_ids_file_pair(train_ids_file, test_ids_file)
     sample_ids_str = [str(s) for s in sample_ids]
     sample_set = set(sample_ids_str)
@@ -1131,11 +1070,9 @@ def resolve_sample_split(sample_ids: List[str], pheno_df: pd.DataFrame, task_typ
     test_ids_final = sorted((str(x) for x in test_ids_arr), key=str)
     train_ratio = 1.0 - float(test_ratio)
     return {'mode': 'random_holdout', 'train_ids': train_ids_final, 'test_ids': test_ids_final, 'n_train': len(train_ids_final), 'n_test': len(test_ids_final), 'n_unassigned': 0, 'train_ratio': train_ratio, 'test_ratio': float(test_ratio), 'random_state': int(random_state), 'train_ids_file': None, 'test_ids_file': None}
-
 def run_preprocess(genotype_path: str, genotype_format: GenotypeFormat, phenotype_file: str, output_file: str, filter_snps: bool=True, feature_selection_mode: int=1, gwas_pvalue: float=0.01, ld_config: str='50,5,0.2', train_ids_file: Optional[str]=None, test_ids_file: Optional[str]=None, random_state: int=DEFAULT_SPLIT_RANDOM_STATE) -> int:
     cleanup_registry: List[str] = []
     temp_prefixes: List[str] = []
-
     def cleanup_current_run():
         for prefix in temp_prefixes:
             delete_temp_files(prefix, ['.bed', '.bim', '.fam', '.log', '.nosex', '.raw', '.map', '.ped'])
@@ -1299,7 +1236,6 @@ def run_preprocess(genotype_path: str, genotype_format: GenotypeFormat, phenotyp
                 except Exception as e:
                     logger.error(f'GWAS SNP extraction failed, fallback to no feature selection: {e}')
                     feature_selection_mode = 1
-
         matrix_output = plink_to_training_data_optimized(final_plink_prefix, pheno_df, str(output_file_path), tmp_dir=tmp_dir, cleanup_registry=cleanup_registry, use_cache=True, parallel_chr_recode=False, chr_recode_workers=None, genotype_backend='auto')
         actual_train_file = matrix_output.train_file
         includes_phenotype_column = matrix_output.includes_phenotype_column
@@ -1313,7 +1249,6 @@ def run_preprocess(genotype_path: str, genotype_format: GenotypeFormat, phenotyp
         logger.error(f'Preprocessing failed: {str(e)}', exc_info=True)
         cleanup_current_run()
         return 1
-
 def delete_temp_files(prefix: str, exts: list) -> None:
     for ext in exts:
         temp_file = f'{prefix}{ext}'
@@ -1322,14 +1257,12 @@ def delete_temp_files(prefix: str, exts: list) -> None:
                 os.remove(temp_file)
             except:
                 pass
-
 def add_genotype_input_arguments(parser: argparse.ArgumentParser, *, required: bool=True) -> argparse._MutuallyExclusiveGroup:
     group = parser.add_mutually_exclusive_group(required=required)
     group.add_argument('--bfile', metavar='PREFIX', dest='bfile', help='PLINK binary genotype prefix (.bed/.bim/.fam)')
     group.add_argument('--file', metavar='PREFIX', dest='file', help='PLINK text genotype prefix (.map/.ped)')
     group.add_argument('--vcf', metavar='PATH', dest='vcf', help='VCF genotype file (.vcf or .vcf.gz)')
     return group
-
 def resolve_genotype_input(args: argparse.Namespace) -> Tuple[str, GenotypeFormat]:
     options: List[Tuple[str, str, GenotypeFormat]] = []
     if getattr(args, 'bfile', None):
@@ -1346,7 +1279,6 @@ def resolve_genotype_input(args: argparse.Namespace) -> Tuple[str, GenotypeForma
     _, genotype_path, genotype_format = options[0]
     validated_path = validate_genotype_input(genotype_path, genotype_format)
     return validated_path, genotype_format
-
 def build_preprocess_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description='G2PInsight data preprocessing (optional GWAS/LD feature selection)')
     add_genotype_input_arguments(parser, required=True)
@@ -1360,7 +1292,6 @@ def build_preprocess_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument('--test-ids-file', dest='test_ids_file', default=None, help='Optional one-column sample ID file for the test set (must be used with --train-ids-file)')
     parser.add_argument('--random_state', type=int, default=DEFAULT_SPLIT_RANDOM_STATE, help=f'Random seed for default 80/20 train/test split after sorting sample IDs (default: {DEFAULT_SPLIT_RANDOM_STATE}; ignored when ID files are provided)')
     return parser
-
 def validate_genotype_input(genotype_path: str, fmt: GenotypeFormat) -> str:
     genotype_path = Path(genotype_path).absolute().as_posix()
     if fmt == 'vcf':
@@ -1380,7 +1311,6 @@ def validate_genotype_input(genotype_path: str, fmt: GenotypeFormat) -> str:
                 raise FileNotFoundError(f'{exc}\nHint: files look like PLINK binary format; use --bfile instead of --file.') from exc
         raise
     return genotype_path
-
 def detect_genotype_format(genotype_path: str) -> Literal['vcf', 'plink_binary', 'plink_text']:
     genotype_path = Path(genotype_path).absolute().as_posix()
     if genotype_path.endswith(('.vcf', '.vcf.gz')):
@@ -1394,9 +1324,7 @@ def detect_genotype_format(genotype_path: str) -> Literal['vcf', 'plink_binary',
     if all((Path(f).exists() for f in plink_text_files)):
         return 'plink_text'
     raise ValueError(f'\nUnable to detect genotype format: {genotype_path}\nSupported formats: VCF(.vcf/.vcf.gz), PLINK binary(.bed/.bim/.fam), PLINK text(.map/.ped)')
-
 def _copy_plink_binary_to_prefix(genotype_path: str, output_prefix: str) -> str:
-    """Copy .bed/.bim/.fam to output_prefix so subsequent edits never touch the originals."""
     src_prefix = Path(genotype_path).absolute().as_posix()
     dst_prefix = Path(output_prefix).absolute().as_posix()
     if src_prefix == dst_prefix:
@@ -1409,7 +1337,6 @@ def _copy_plink_binary_to_prefix(genotype_path: str, output_prefix: str) -> str:
             raise FileNotFoundError(f'Missing PLINK binary file: {src_file}')
         shutil.copy2(src_file, dst_file)
     return dst_prefix
-
 def genotype_to_plink(genotype_path: str, output_prefix: str, fmt: Optional[Literal['vcf', 'plink_binary', 'plink_text']]=None) -> str:
     if fmt is None:
         fmt = detect_genotype_format(genotype_path)
@@ -1428,7 +1355,6 @@ def genotype_to_plink(genotype_path: str, output_prefix: str, fmt: Optional[Lite
         return _copy_plink_binary_to_prefix(genotype_path, output_prefix)
     elif fmt == 'plink_text':
         return plink_text_to_binary(genotype_path, output_prefix)
-
 def plink_text_to_binary(genotype_path: str, output_prefix: str) -> str:
     plink_cmd = [PLINK_EXECUTABLE, '--file', genotype_path, '--make-bed', '--out', output_prefix, '--allow-extra-chr', '--allow-no-sex', '--keep-allele-order']
     try:
@@ -1441,14 +1367,12 @@ def plink_text_to_binary(genotype_path: str, output_prefix: str) -> str:
     except Exception as e:
         logger.error(f'PLINK text-to-binary conversion exception: {str(e)}')
         raise
-
 def normalize_chromosome_names(plink_prefix: str) -> None:
     bim_file = f'{Path(plink_prefix).absolute().as_posix()}.bim'
     if not Path(bim_file).exists():
         raise FileNotFoundError(f'PLINK .bim file not found: {bim_file}')
     bim_df = pd.read_csv(bim_file, sep='\\s+', header=None, dtype={0: str}, engine='python')
     original_chr_col = bim_df[0].copy()
-
     def normalize_chr(chr_name: str) -> str:
         chr_str = str(chr_name).strip()
         if chr_str.lower().startswith('chr'):
@@ -1470,7 +1394,6 @@ def normalize_chromosome_names(plink_prefix: str) -> None:
     if not normalized_chr_col.equals(original_chr_col):
         bim_df[0] = normalized_chr_col
         bim_df.to_csv(bim_file, sep='\t', header=False, index=False)
-
 def auto_detect_chromosomes(plink_prefix: str) -> List[str]:
     bim_file = f'{Path(plink_prefix).absolute().as_posix()}.bim'
     if not Path(bim_file).exists():
@@ -1485,13 +1408,10 @@ def auto_detect_chromosomes(plink_prefix: str) -> List[str]:
     num_chrs_sorted = sorted(num_chrs, key=int)
     chr_list_sorted = num_chrs_sorted + non_num_chrs
     return chr_list_sorted
-
 def load_phenotype(pheno_path: str) -> pd.DataFrame:
-
     def detect_separator(file_path: str) -> str:
         import csv
         candidates = ['\t', ',', '\\s+']
-
         def _is_header_like(line: str) -> bool:
             s = line.strip()
             if not s:
@@ -1579,8 +1499,6 @@ def load_phenotype(pheno_path: str) -> pd.DataFrame:
             raise ValueError('After removing non-convertible samples, phenotype file has no valid data, cannot continue processing')
     gc.collect()
     return pheno_df
-
-
 _PHENOTYPE_PLOT = {
     'text': '#2C333A',
     'muted': '#8A9199',
@@ -1607,7 +1525,6 @@ _PHENOTYPE_CLASS_COLORS = [
     '#2A9D8F',
     '#E9C46A',
 ]
-
 def _setup_phenotype_matplotlib():
     try:
         import matplotlib
@@ -1621,7 +1538,6 @@ def _setup_phenotype_matplotlib():
         return plt
     except ImportError:
         return None
-
 def _style_phenotype_axes(ax, *, spines: bool=True) -> None:
     ax.tick_params(labelsize=_PHENOTYPE_PLOT['tick_size'], colors=_PHENOTYPE_PLOT['text'])
     if spines:
@@ -1630,14 +1546,11 @@ def _style_phenotype_axes(ax, *, spines: bool=True) -> None:
         ax.spines['left'].set_color(_PHENOTYPE_PLOT['muted'])
         ax.spines['bottom'].set_color(_PHENOTYPE_PLOT['muted'])
         ax.tick_params(top=False, right=False, labeltop=False, labelright=False)
-
 def _save_phenotype_figure(fig, plot_file: Path) -> None:
     fig.savefig(plot_file, dpi=_PHENOTYPE_PLOT['dpi'], bbox_inches='tight', facecolor='white')
     import matplotlib.pyplot as plt
     plt.close(fig)
-
 def plot_classification_phenotype_distribution(phenotype_values: np.ndarray, output_dir: Path, unique_count: int) -> None:
-    """Donut chart of class proportions; shared preprocess phenotype style."""
     plt = _setup_phenotype_matplotlib()
     if plt is None:
         return
@@ -1647,19 +1560,15 @@ def plot_classification_phenotype_distribution(phenotype_values: np.ndarray, out
     if total <= 0:
         return
     colors = [_PHENOTYPE_CLASS_COLORS[i % len(_PHENOTYPE_CLASS_COLORS)] for i in range(len(sizes))]
-
     def _class_label(raw) -> str:
         try:
             f = float(raw)
             return f'Class {int(f)}' if f == int(f) else f'Class {raw}'
         except (TypeError, ValueError):
             return f'Class {raw}'
-
     class_labels = [_class_label(k) for k in value_counts.index]
-
     def _autopct(pct: float) -> str:
         return f'{pct:.1f}%' if pct >= 4.0 else ''
-
     output_dir.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=_PHENOTYPE_PLOT['figsize'], facecolor='white')
     wedges, _, autotexts = ax.pie(
@@ -1701,7 +1610,6 @@ def plot_classification_phenotype_distribution(phenotype_values: np.ndarray, out
     ax.set_aspect('equal')
     plot_file = output_dir / 'phenotype_distribution_pie.png'
     _save_phenotype_figure(fig, plot_file)
-
 def determine_phenotype_type(pheno_df: pd.DataFrame, output_dir: Path) -> Literal['regression', 'classification']:
     phenotype_values = pheno_df['phenotype'].values
     unique_values = np.unique(phenotype_values)
@@ -1716,7 +1624,6 @@ def determine_phenotype_type(pheno_df: pd.DataFrame, output_dir: Path) -> Litera
     if task_type == 'classification':
         plot_classification_phenotype_distribution(phenotype_values, output_dir, unique_count)
     return task_type
-
 def convert_phenotype_dtype(pheno_df: pd.DataFrame, task_type: Literal['regression', 'classification']) -> pd.DataFrame:
     if task_type == 'classification':
         pheno_df['phenotype'] = pheno_df['phenotype'].astype(np.int32)
@@ -1724,9 +1631,7 @@ def convert_phenotype_dtype(pheno_df: pd.DataFrame, task_type: Literal['regressi
         pheno_df['phenotype'] = pheno_df['phenotype'].astype(np.float32)
     gc.collect()
     return pheno_df
-
 def plot_regression_phenotype_distribution(pheno_df: pd.DataFrame, output_dir: Path) -> None:
-    """Histogram of continuous phenotype; shared preprocess phenotype style."""
     plt = _setup_phenotype_matplotlib()
     if plt is None:
         return
@@ -1764,7 +1669,6 @@ def plot_regression_phenotype_distribution(pheno_df: pd.DataFrame, output_dir: P
     _style_phenotype_axes(ax)
     plot_file = output_dir / 'phenotype_distribution_histogram.png'
     _save_phenotype_figure(fig, plot_file)
-
 def filter_samples_by_phenotype(plink_prefix: str, pheno_df: pd.DataFrame, output_prefix: str) -> str:
     output_prefix_abs = Path(output_prefix).absolute().as_posix()
     keep_file = f'{output_prefix_abs}_keep.txt'
@@ -1779,7 +1683,6 @@ def filter_samples_by_phenotype(plink_prefix: str, pheno_df: pd.DataFrame, outpu
     except subprocess.CalledProcessError as e:
         logger.error(f'PLINK sample filtering failed: {e.stderr}')
         raise RuntimeError(f'Sample filtering failed: {e.stderr}')
-
 def filter_snps_by_quality(plink_prefix: str, output_prefix: str, maf: float=0.05, geno: float=0.2) -> str:
     output_prefix_abs = Path(output_prefix).absolute().as_posix()
     plink_prefix_abs = Path(plink_prefix).absolute().as_posix()
@@ -1796,7 +1699,6 @@ def filter_snps_by_quality(plink_prefix: str, output_prefix: str, maf: float=0.0
     except Exception as e:
         logger.error(f'SNP quality filtering exception: {str(e)}')
         raise
-
 def generate_gwas_phenotype_file_preprocess(pheno_df: pd.DataFrame, output_file: Union[str, Path]) -> str:
     output_path = Path(output_file).absolute()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1804,7 +1706,6 @@ def generate_gwas_phenotype_file_preprocess(pheno_df: pd.DataFrame, output_file:
         for sample_id, pheno in zip(pheno_df['sample'], pheno_df['phenotype']):
             f.write(f'{sample_id}\t{pheno}\n')
     return output_path.as_posix()
-
 def run_gwas_preprocess(plink_prefix: str, pheno_df: pd.DataFrame, output_dir: Union[str, Path], tmp_dir: Union[str, Path], pvalue_threshold: float=0.01, perform_plink_qc: bool=True) -> List[str]:
     output_dir_path = Path(output_dir).absolute()
     tmp_dir_path = Path(tmp_dir).absolute()
@@ -1882,7 +1783,6 @@ def run_gwas_preprocess(plink_prefix: str, pheno_df: pd.DataFrame, output_dir: U
     except Exception:
         pass
     return significant_snps
-
 def chr_pos_match_variants(key: str) -> set:
     key = str(key).strip()
     parts = key.split('_', 1)
@@ -1892,7 +1792,6 @@ def chr_pos_match_variants(key: str) -> set:
     bare = chr_part[3:] if chr_part.lower().startswith('chr') else chr_part
     variants = {f'{chr_part}_{pos_part}', f'{bare}_{pos_part}', f'chr{bare}_{pos_part}'}
     return {v for v in variants if v}
-
 def resolve_bim_snp_ids_for_chr_pos_keys(plink_prefix: str, chr_pos_keys: List[str]) -> List[str]:
     if not chr_pos_keys:
         return []
@@ -1913,7 +1812,6 @@ def resolve_bim_snp_ids_for_chr_pos_keys(plink_prefix: str, chr_pos_keys: List[s
                     snp_ids.append(sid)
                     seen.add(sid)
     return snp_ids
-
 def extract_snps_by_chr_pos_with_plink(plink_prefix: str, chr_pos_keys: List[str], output_prefix: str) -> str:
     if not chr_pos_keys:
         raise ValueError('chr_pos_keys list is empty')
@@ -1921,7 +1819,6 @@ def extract_snps_by_chr_pos_with_plink(plink_prefix: str, chr_pos_keys: List[str
     if not snp_ids:
         return Path(plink_prefix).absolute().as_posix()
     return extract_snps_with_plink(plink_prefix, snp_ids, output_prefix)
-
 def extract_snps_with_plink(plink_prefix: str, snp_list: List[str], output_prefix: str) -> str:
     if not snp_list:
         raise ValueError('SNP list for extraction is empty')
@@ -1950,7 +1847,6 @@ def extract_snps_with_plink(plink_prefix: str, snp_list: List[str], output_prefi
             Path(snp_file).unlink()
         except Exception:
             pass
-
 def generate_metadata(output_prefix: str, plink_prefix: str, train_file: str, valid_samples: List[str], genotype_format: str, task_type: Optional[Literal['regression', 'classification']]=None, preprocess_tmp_dir: Optional[Union[str, Path]]=None, filter_snps: bool=True, feature_selection_mode: int=1, gwas_pvalue: Optional[float]=None, ld_window_kb: Optional[int]=None, ld_window: Optional[int]=None, ld_window_r2: Optional[float]=None, n_feature_columns: Optional[int]=None, includes_phenotype_column: bool=True, sample_split: Optional[Dict[str, Any]]=None) -> None:
     chr_list = auto_detect_chromosomes(plink_prefix)
     metadata = {'preprocess_time': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'), 'genotype_format': genotype_format, 'phenotype_format': 'Two-column, no-header format (sample ID + phenotype value)', 'output_train_file': train_file, 'valid_samples': valid_samples, 'sample_count': len(valid_samples), 'chromosome_list': chr_list, 'chromosome_count': len(chr_list), 'parallel_processes': 1, 'processing_mode': 'single_thread_sequential', 'plink_memory_limit_MB': 'unlimited (no --memory passed to PLINK)', 'snp_dtype': 'int8', 'snp_naming_rule': "chromosome_physicalPosition (e.g., '1_123456')", 'plink_executable': PLINK_EXECUTABLE, 'plink_recode_param': '--recodeA', 'gwas_genotype_prefix': None, 'preprocess_tmp_dir': str(Path(preprocess_tmp_dir).absolute()) if preprocess_tmp_dir else None, 'snp_filtering': {'filtered': filter_snps, 'maf_threshold': 0.05 if filter_snps else None, 'geno_threshold': 0.2 if filter_snps else None}, 'feature_selection': {'mode': feature_selection_mode, 'description': {1: 'no GWAS/LD feature selection', 2: 'GWAS-based SNP selection', 3: 'LD-based SNP pruning', 4: 'GWAS + LD combined filtering (GWAS first, then LD)'}.get(feature_selection_mode, 'unknown'), 'gwas_pvalue_threshold': gwas_pvalue if feature_selection_mode in [2, 4] else None, 'ld_window_kb': ld_window_kb if feature_selection_mode in [3, 4] else None, 'ld_window': ld_window if feature_selection_mode in [3, 4] else None, 'ld_window_r2': ld_window_r2 if feature_selection_mode in [3, 4] else None, 'samples_used': 'training_split_only' if feature_selection_mode in [2, 3, 4] else None}}
@@ -1962,13 +1858,11 @@ def generate_metadata(output_prefix: str, plink_prefix: str, train_file: str, va
     metadata_file = f'{output_prefix}_metadata.json'
     with open(metadata_file, 'w', encoding='utf-8') as f:
         json.dump(metadata, f, indent=2, ensure_ascii=False)
-
 def validate_plink_files(genotype_path: str, fmt: str) -> None:
     required = {'plink_binary': ['.bed', '.bim', '.fam'], 'plink_text': ['.map', '.ped']}.get(fmt, [])
     missing = [f'{genotype_path}{ext}' for ext in required if not Path(f'{genotype_path}{ext}').exists()]
     if missing:
         raise FileNotFoundError(f"\nMissing PLINK files: {', '.join(missing)}")
-
 def create_keep_file(pheno_df: pd.DataFrame, output_file: str) -> str:
     output_file = Path(output_file).absolute().as_posix()
     if 'sample' in pheno_df.columns:
@@ -1981,7 +1875,6 @@ def create_keep_file(pheno_df: pd.DataFrame, output_file: str) -> str:
         for sample_id in sample_ids:
             f.write(f'{sample_id}\t{sample_id}\n')
     return output_file
-
 def main(argv: Optional[List[str]]=None) -> int:
     parser = build_preprocess_argument_parser()
     args = parser.parse_args(argv)

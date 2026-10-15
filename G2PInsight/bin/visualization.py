@@ -1,20 +1,4 @@
-"""Visualization for G2PInsight ``visualize`` command.
-
-Public entry points used by ``G2PInsight.main``:
-
-- ``EnhancedGenomeVisualizer`` — genome-wide importance / SHAP bar / dependence / summary (``-i``)
-- ``resolve_shap_dependence_file`` — locate ``*_shap_dependence.tsv|.npz``
-- ``plot_model_performance_from_file`` — performance / CV / confusion plots (``-I``)
-
-Layout of this module:
-
-1. Shared palettes & axis helpers
-2. Genome-wide importance (``EnhancedGenomeVisualizer``)
-3. SHAP dependence / summary helpers
-4. Performance & CV plots + ``load_plotting_data``
-"""
 from __future__ import annotations
-
 import json
 import logging
 import math
@@ -23,7 +7,6 @@ import pickle
 import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
-
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -33,7 +16,6 @@ from matplotlib.axes import Axes
 from matplotlib.colors import BoundaryNorm, ListedColormap
 from matplotlib.patches import Patch
 from matplotlib.ticker import FixedLocator
-
 warnings.filterwarnings('ignore')
 try:
     from G2PInsight.bin.font_utils import setup_matplotlib_font, setup_plotly_font
@@ -42,26 +24,16 @@ try:
 except ImportError:
     PLOTLY_FONT = {'family': 'Arial', 'size': 12}
 logger = logging.getLogger(__name__)
-
-
-
-
-
-
-
 _SHAP_PALETTE = {
     'positive': '#B5533E',
     'negative': '#3E5C76',
     'neutral': '#5C677D',
     'zero_line': '#BBBBBB',
 }
-
 _GENOTYPE_VALUE_COLORS = ['#3E5C76', '#8DA9C4', '#C1666B']
 _GENOTYPE_CMAP = ListedColormap(_GENOTYPE_VALUE_COLORS)
 _GENOTYPE_NORM = BoundaryNorm(boundaries=[-0.5, 0.5, 1.5, 2.5], ncolors=len(_GENOTYPE_VALUE_COLORS))
 _GENOTYPE_SCATTER_KW = {'cmap': _GENOTYPE_CMAP, 'norm': _GENOTYPE_NORM, 'alpha': 0.78, 'edgecolors': 'none'}
-
-
 _CV_PALETTE = {
     'corr': '#3E5C76',
     'accuracy': '#3E5C76',
@@ -75,9 +47,6 @@ _CV_MEAN_LINE_KW = {'color': _CV_PALETTE['mean_line'], 'linestyle': '--', 'linew
 _CV_BAR_KW = {'alpha': 0.92, 'edgecolor': 'white', 'linewidth': 0.7}
 _CV_GROUP_BAR_KW = {'alpha': 0.92, 'edgecolor': 'white', 'linewidth': 0.7}
 _CV_BAR_WIDTH_COMPACT = 0.58
-
-
-
 _TEST_METRIC_PALETTE = {
     'test': '#4EB5FF',
     'accuracy': _CV_PALETTE['accuracy'],
@@ -91,18 +60,13 @@ _TEST_METRIC_CLASS_YMAX = 1.06
 _TEST_METRIC_REG_YMIN = -1.05
 _TEST_METRIC_REG_YMAX = 1.08
 _TEST_METRIC_LABEL_PAD = 0.015
-
-
 _CONFUSION_CMAP = 'Blues'
-
 def _test_metric_score_limits(task_type: str) -> Tuple[float, float]:
     if task_type == 'classification':
         return (0.0, _TEST_METRIC_CLASS_YMAX)
     return (_TEST_METRIC_REG_YMIN, _TEST_METRIC_REG_YMAX)
-
 def _test_metric_value_fmt(task_type: str) -> str:
     return '.3f' if task_type == 'classification' else '.4f'
-
 def _test_metric_annotate_bar_values(ax: Axes, bar_containers, *, fmt: str='.3f') -> None:
     y_lo, y_hi = ax.get_ylim()
     pad = max(_TEST_METRIC_LABEL_PAD, (y_hi - y_lo) * 0.022)
@@ -112,12 +76,9 @@ def _test_metric_annotate_bar_values(ax: Axes, bar_containers, *, fmt: str='.3f'
             if not isinstance(height, (int, float)) or np.isnan(height):
                 continue
             ax.text(bar.get_x() + bar.get_width() / 2.0, height + pad, f'{height:{fmt}}', ha='center', va='bottom', fontsize=6)
-
 def _classification_metric_colors(metric_keys: List[str], *, fallback: Optional[str]=None) -> List[str]:
-    """Map metric keys to distinct colors (classification Accuracy / Recall / F1 / AUC)."""
     default = fallback if fallback is not None else _TEST_METRIC_PALETTE['test']
     return [_CV_PALETTE.get(key, _TEST_METRIC_PALETTE.get(key, default)) for key in metric_keys]
-
 def _test_metric_finish_figure(ax: Axes, fig, bar_containers, task_type: str, *, legend_handles: Optional[List[Any]]=None) -> None:
     y_min, y_max = _test_metric_score_limits(task_type)
     ax.set_ylim(y_min, y_max)
@@ -128,27 +89,20 @@ def _test_metric_finish_figure(ax: Axes, fig, bar_containers, task_type: str, *,
         ax.legend(handles=legend_handles, loc='center left', bbox_to_anchor=(1.02, 0.5), ncol=1, frameon=False, fontsize=10, handleheight=1.0, handlelength=1.2)
     else:
         ax.legend(loc='center left', bbox_to_anchor=(1.02, 0.5), ncol=1, frameon=False, fontsize=10, handleheight=1.0, handlelength=1.2)
-
 def _cv_summary_stats(values: List[float], *, float_fmt: str='.4f') -> str:
     arr = np.asarray(values, dtype=float)
     return f'Mean: {np.mean(arr):{float_fmt}}\nMedian: {np.median(arr):{float_fmt}}\nStd: {np.std(arr):{float_fmt}}\nQ25: {np.percentile(arr, 25):{float_fmt}}\nQ75: {np.percentile(arr, 75):{float_fmt}}'
-
 def _cv_brief_stats(values: List[float], *, float_fmt: str='.4f') -> str:
     arr = np.asarray(values, dtype=float)
     return f'Mean ± Std: {np.mean(arr):{float_fmt}} ± {np.std(arr):{float_fmt}}'
-
 def _cv_place_stats(ax: Axes, text: str, *, loc: str='upper right') -> None:
     ax.text(0.98, 0.98, text, transform=ax.transAxes, fontsize=8, va='top', ha='right', bbox=_CV_STATS_BBOX)
-
 def _cv_place_mean_legend(ax: Axes) -> None:
     ax.legend(loc='upper left', bbox_to_anchor=(0.02, 0.97), fontsize=8, frameon=False)
-
 def _cv_annotate_mean_line(ax: Axes, mean_val: float, n_folds: int, *, fmt: str='.4f') -> None:
     ax.text(n_folds - 0.55, mean_val, f'Mean {mean_val:{fmt}}', va='center', ha='left', fontsize=8, color=_CV_PALETTE['mean_line'])
-
 def _cv_fold_x(n_folds: int) -> np.ndarray:
     return np.arange(n_folds)
-
 def _cv_finish_fold_axis(ax: Axes, n_folds: int, values: List[float], *, x_labels: Optional[List[str]]=None, y_min: Optional[float]=None, y_max: Optional[float]=None, set_ylim: bool=True, y_grid: bool=False) -> None:
     x = _cv_fold_x(n_folds)
     ax.set_xticks(x)
@@ -171,7 +125,6 @@ def _cv_finish_fold_axis(ax: Axes, n_folds: int, values: List[float], *, x_label
     else:
         ax.grid(False)
     _hide_top_right_spines(ax)
-
 def _cv_draw_single_barplot(ax: Axes, values: List[float], color: str, *, float_fmt: str='.4f', y_min: Optional[float]=None, y_max: Optional[float]=None, x_labels: Optional[List[str]]=None, label_fn=None, stats_text: Optional[str]=None, mean_fmt: Optional[str]=None, set_ylim: bool=True, show_stats: bool=True, show_mean_legend: bool=True, highlight_outliers: bool=False, y_grid: bool=False) -> None:
     if not values:
         ax.text(0.5, 0.5, 'No data available', ha='center', va='center', transform=ax.transAxes, fontsize=12)
@@ -202,7 +155,6 @@ def _cv_draw_single_barplot(ax: Axes, values: List[float], color: str, *, float_
         _cv_place_mean_legend(ax)
     elif stats_text is False or not show_stats:
         _cv_annotate_mean_line(ax, mean_val, n_folds, fmt=mean_label_fmt)
-
 def _cv_draw_group_barplot(ax: Axes, datasets: List[List[float]], labels: List[str], colors: List[str], *, y_min: float=0.0, y_max: float=1.05, stats_text: Optional[str]=None, annotate: bool=True, legend_horizontal: bool=False) -> None:
     if not datasets:
         ax.text(0.5, 0.5, 'No data available', ha='center', va='center', transform=ax.transAxes, fontsize=12)
@@ -231,15 +183,12 @@ def _cv_draw_group_barplot(ax: Axes, datasets: List[List[float]], labels: List[s
         ax.legend(loc='upper left', fontsize=9, frameon=False)
     if stats_text:
         _cv_place_stats(ax, stats_text)
-
 def _task_metric_specs(task_type: str) -> List[Tuple[str, str, bool]]:
     if task_type == 'classification':
         return [('accuracy', 'Accuracy', True), ('recall', 'Recall', True), ('f1', 'F1 Score', True), ('auc', 'AUC', True)]
     return [('pearson_correlation', 'Pearson r', True)]
-
 def _regression_test_bar_specs() -> List[Tuple[str, str, bool]]:
     return [('pearson_correlation', 'Pearson r', True), ('r2', 'R²', True), ('rmse', 'RMSE', False), ('mae', 'MAE', False)]
-
 def _collect_metric_bar_values(metrics: Dict, specs: List[Tuple[str, str, bool]]) -> Tuple[List[str], List[str], List[float]]:
     metric_keys: List[str] = []
     metric_names: List[str] = []
@@ -252,12 +201,10 @@ def _collect_metric_bar_values(metrics: Dict, specs: List[Tuple[str, str, bool]]
         metric_names.append(label)
         vals.append(val)
     return metric_keys, metric_names, vals
-
 def _warn_missing_regression_test_metrics(test_metrics: Dict) -> None:
     missing = [label for key, label, _ in _regression_test_bar_specs() if key != 'pearson_correlation' and _metric_float(test_metrics.get(key)) is None]
     if not missing:
         return
-
 def _plot_test_metric_bar_panel(ax: Axes, metric_names: List[str], vals: List[float], *, ylabel: str, ylim: Tuple[float, float], fmt: str='.4f') -> None:
     x = np.arange(len(metric_names))
     bars = ax.bar(x, vals, width=0.55, color=_TEST_METRIC_PALETTE['test'], **_TEST_METRIC_BAR_KW)
@@ -268,7 +215,6 @@ def _plot_test_metric_bar_panel(ax: Axes, metric_names: List[str], vals: List[fl
     _test_metric_annotate_bar_values(ax, [bars], fmt=fmt)
     ax.grid(False)
     _hide_top_right_spines(ax)
-
 def _metric_float(value: Any) -> Optional[float]:
     if isinstance(value, str):
         if value.upper() == 'N/A':
@@ -280,7 +226,6 @@ def _metric_float(value: Any) -> Optional[float]:
     if isinstance(value, (int, float)) and (not np.isnan(value)):
         return float(value)
     return None
-
 def _resolve_output_prefix(output_dir: Path, output_prefix: Optional[Union[str, Path]]) -> Path:
     if output_prefix is None:
         return output_dir / 'cv'
@@ -288,13 +233,7 @@ def _resolve_output_prefix(output_dir: Path, output_prefix: Optional[Union[str, 
     if not output_prefix_path.parent or str(output_prefix_path.parent) == '.':
         output_prefix_path = output_dir / output_prefix_path.name
     return output_dir / output_prefix_path.name
-
-
-
-
-
 class EnhancedGenomeVisualizer:
-
     def __init__(self, input_file: str, feature_col: Optional[str]=None, value_col: Optional[str]=None, max_points: Optional[int]=None, auto_sample: bool=False):
         self.input_file = Path(input_file)
         self.feature_col = feature_col
@@ -310,11 +249,9 @@ class EnhancedGenomeVisualizer:
         except Exception as e:
             logger.error(f'Data initialization failed: {str(e)}')
             raise
-
     def _initialize_data(self):
         self.df = self._load_and_process()
         self.threshold = self._calculate_threshold()
-
     def _detect_separator(self, file_path: Path) -> str:
         with open(file_path, 'r', encoding='utf-8') as f:
             for line in f:
@@ -327,7 +264,6 @@ class EnhancedGenomeVisualizer:
                     return ','
                 return '\t'
         return '\t'
-
     def _detect_columns(self, columns: List[str], sep: str='\t') -> Tuple[str, str, Optional[str]]:
         sample_df = pd.read_csv(self.input_file, nrows=100, sep=sep, comment='#')
         if len(columns) >= 3:
@@ -380,7 +316,6 @@ class EnhancedGenomeVisualizer:
         if effect_col is None and len(columns) >= 3:
             effect_col = columns[2]
         return (feature_col, abs_col, effect_col)
-
     def _load_and_process(self) -> pd.DataFrame:
         if not self.input_file.exists():
             raise FileNotFoundError(f'Input file not found: {self.input_file}')
@@ -410,7 +345,6 @@ class EnhancedGenomeVisualizer:
         snp_series = df[self.feature_col].astype(str)
         snp_clean = snp_series.str.replace('^chr', '', case=False, regex=True)
         chrom_pos = snp_clean.str.extract('^(?P<chrom>[0-9A-Za-z]+)[_:](?P<pos>\\d+)$')
-
         def _to_chrom_num(c: Any) -> Optional[int]:
             import re
             c_str = str(c).upper()
@@ -437,7 +371,6 @@ class EnhancedGenomeVisualizer:
             raise ValueError('Input file is missing the effect column. Only 3-column format is supported: feature, importance_abs, effect (effect must be 1/-1).')
         df['x_pos'] = self._calculate_genomic_positions(df)
         return df
-
     def _calculate_genomic_positions(self, df: pd.DataFrame) -> np.ndarray:
         chrom_info = df[['chrom_num', 'chrom_label']].drop_duplicates()
         numeric_mask = chrom_info['chrom_num'] < 10 ** 6
@@ -452,9 +385,7 @@ class EnhancedGenomeVisualizer:
         within_norm = within_index / denom
         within_norm = np.where(group_sizes == 1, 0.5, within_norm)
         return base_pos.values + within_norm
-
     def _get_chromosome_boundary_xs(self) -> np.ndarray:
-        """X positions at plot edges and between consecutive chromosomes."""
         chrom_stats = self.df.groupby('chrom_label')['x_pos'].agg(['min', 'max']).sort_values('min')
         if chrom_stats.empty:
             return np.array([], dtype=float)
@@ -465,15 +396,12 @@ class EnhancedGenomeVisualizer:
             return np.array([left_edge, right_edge], dtype=float)
         inner = chrom_stats['min'].iloc[1:].to_numpy(dtype=float)
         return np.concatenate([[left_edge], inner, [right_edge]])
-
     def _calculate_threshold(self, percentile: float=99) -> float:
         return np.percentile(self.df['value_abs'], percentile)
-
     def _dynamic_style(self) -> Tuple[float, float]:
         n = len(self.df)
         log_n = math.log10(n + 1)
         size = max(4, min(52, 260 / (1 + log_n * 0.82)))
-
         if n <= 5000:
             alpha = 0.88
         elif n <= 50000:
@@ -485,14 +413,12 @@ class EnhancedGenomeVisualizer:
         else:
             alpha = 0.58
         return (size, alpha)
-
     def plot_static_scatter(self, output_file: str, dpi: int=1200, **kwargs) -> None:
         try:
             self._plot_static_scatter(output_file, dpi, **kwargs)
         except Exception as e:
             logger.error(f'Static scatter plot generation failed: {str(e)}')
             raise
-
     def _plot_static_scatter(self, output_file: str, dpi: int, **kwargs) -> None:
         sns.set(style='white')
         save_dpi = max(int(dpi), 600)
@@ -501,14 +427,12 @@ class EnhancedGenomeVisualizer:
         self._plot_scatter_static(ax, self.colors)
         self._format_axes(ax)
         self._save_figure(fig, output_file, save_dpi)
-
     def plot_interactive_scatter(self, output_file: str, **kwargs) -> None:
         try:
             self._plot_interactive_scatter(output_file, **kwargs)
         except Exception as e:
             logger.error(f'Interactive scatter plot generation failed: {str(e)}')
             raise
-
     def _plot_interactive_scatter(self, output_file: str, **kwargs) -> None:
         fig = self._create_interactive_scatter()
         output_path = Path(output_file)
@@ -528,7 +452,6 @@ class EnhancedGenomeVisualizer:
                 except Exception as e2:
                     logger.error(f'Image saving failed: {str(e2)}')
                     raise
-
     def _plot_scatter_static(self, ax: Axes, colors: Dict[str, str]):
         size, alpha = self._dynamic_style()
         n_points = len(self.df)
@@ -541,14 +464,12 @@ class EnhancedGenomeVisualizer:
                 ax.vlines(x=x_values, ymin=0, ymax=y_values, colors=color, alpha=min(0.9, alpha * 0.85), linewidths=0.5, linestyles='-', zorder=1)
             ax.scatter(x=x_values, y=y_values, c=color, s=size, alpha=alpha, edgecolors='none', label=sign, zorder=2, rasterized=n_points > 50000)
         ax.legend(title='Effect Direction', loc='upper left', bbox_to_anchor=(1.01, 1.0), frameon=False, borderaxespad=0.0, handlelength=1.2)
-
     def _create_interactive_scatter(self):
         size, alpha = self._dynamic_style()
         fig = px.scatter(self.df, x=self.df['x_pos'].values.flatten(), y=self.df['value_abs'].values.flatten(), color='value_sign', color_discrete_map=self.colors, hover_data={'chrom_label': True, 'position': True, 'value_signed': ':.3f', 'value_abs': ':.3f', 'x_pos': False}, size_max=size, opacity=alpha, width=1200, height=600, title='Genome-Wide Association Plot')
         fig.update_layout(showlegend=True)
         self._format_interactive_layout(fig)
         return fig
-
     def _format_interactive_layout(self, fig):
         chrom_ticks = self.df.groupby('chrom_label')['x_pos'].median()
         chrom_ticks = chrom_ticks.sort_values()
@@ -563,7 +484,6 @@ class EnhancedGenomeVisualizer:
         fig.update_layout(font=PLOTLY_FONT, xaxis=dict(showgrid=False, title='Genomic Position', tickmode='array', tickvals=chrom_ticks.values.tolist(), ticktext=chrom_ticks.index.tolist(), tickangle=-45, range=x_range), yaxis=dict(showgrid=False, title='Feature Importance', range=[y_min_adjusted, y_max_adjusted]), title={'text': 'Genome-Wide Association Plot', 'x': 0.5, 'xanchor': 'center', 'font': {'size': 16, 'family': PLOTLY_FONT.get('family', 'Arial')}}, legend=dict(title='Effect Direction', orientation='v', yanchor='top', y=1, xanchor='right', x=1))
         for x_boundary in x_boundaries:
             fig.add_shape(type='line', x0=x_boundary, y0=y_min_adjusted, x1=x_boundary, y1=y_max_adjusted, line=dict(color='#BBBBBB', width=1), layer='below')
-
     def _format_axes(self, ax: Axes):
         chrom_ticks = self.df.groupby('chrom_label')['x_pos'].median()
         chrom_ticks = chrom_ticks.sort_values()
@@ -584,17 +504,14 @@ class EnhancedGenomeVisualizer:
         ax.set_ylim(0, y_max + padding)
         ax.grid(False)
         _hide_top_right_spines(ax)
-
     def _is_shap_input(self) -> bool:
         return 'shap' in self.input_file.name.lower()
-
     def plot_top_snps_bar(self, output_file: str, top_n: int=20, dpi: int=300, **kwargs) -> None:
         try:
             self._plot_top_snps_bar(output_file, top_n=top_n, dpi=dpi, **kwargs)
         except Exception as e:
             logger.error(f'Top-SNPs bar chart generation failed: {str(e)}')
             raise
-
     def _plot_top_snps_bar(self, output_file: str, top_n: int, dpi: int, **kwargs) -> None:
         if top_n < 1:
             raise ValueError(f'top_n must be >= 1, got {top_n}')
@@ -622,16 +539,13 @@ class EnhancedGenomeVisualizer:
         _hide_top_right_spines(ax)
         self._save_figure(fig, output_file, dpi)
         plt.close(fig)
-
     def plot_top_snps_dependence(self, dependence_npz: Union[str, Path], output_dir: Union[str, Path], output_prefix: Union[str, Path], top_n: int=20, dpi: int=300) -> List[Path]:
         top_features = self.df.nlargest(min(int(top_n), len(self.df)), 'value_abs')['feature'].astype(str).tolist()
         return plot_top_snps_dependence(dependence_npz=dependence_npz, top_features=top_features, output_dir=output_dir, output_prefix=output_prefix, dpi=dpi)
-
     def plot_shap_summary(self, dependence_npz: Union[str, Path], output_dir: Union[str, Path], output_prefix: Union[str, Path], top_n: int=20, dpi: int=300) -> Optional[Path]:
         top_features = self.df.nlargest(min(int(top_n), len(self.df)), 'value_abs')['feature'].astype(str).tolist()
         out_file = Path(output_dir) / f'{Path(output_prefix).name}_shap_summary.png'
         return plot_shap_summary(dependence_npz=dependence_npz, top_features=top_features, output_file=out_file, dpi=dpi)
-
     def _save_figure(self, fig, output_path: str, dpi: int):
         path = Path(output_path)
         if not path.parent.exists():
@@ -652,27 +566,17 @@ class EnhancedGenomeVisualizer:
         except Exception as e:
             logger.error(f'Save failed: {str(e)}')
             raise
-
-
-
-
-
 def _normalize_snp_name(name: str) -> str:
     import re
     return re.sub(r'^chr', '', str(name).strip(), flags=re.IGNORECASE)
-
 def _valid_feature_values(values: np.ndarray) -> np.ndarray:
     return np.isfinite(values) & (values >= 0)
-
 def _genotype_codes(values: np.ndarray) -> np.ndarray:
     return np.clip(np.rint(values), 0, 2).astype(int)
-
 def _genotype_legend_handles() -> List[Patch]:
     return [Patch(facecolor=color, label=str(value)) for value, color in enumerate(_GENOTYPE_VALUE_COLORS)]
-
 def _add_genotype_legend(ax: Axes, title: str='Feature value') -> None:
     ax.legend(handles=_genotype_legend_handles(), title=title, loc='center left', bbox_to_anchor=(1.02, 0.5), fontsize=10, title_fontsize=10, handleheight=1.0, handlelength=1.2, frameon=False)
-
 def _draw_summary_distribution_violin(ax: Axes, shap_vals: np.ndarray, y_center: float, *, width: float=0.42) -> None:
     if len(shap_vals) < 2:
         return
@@ -687,15 +591,12 @@ def _draw_summary_distribution_violin(ax: Axes, shap_vals: np.ndarray, y_center:
         median_line.set_color('#4C566A')
         median_line.set_linewidth(1.2)
         median_line.set_zorder(2)
-
 def _summary_cluster_h_step(k: int, x_range: float) -> float:
     if k <= 1:
         return 0.0
     max_width = min(max(x_range * 0.22, 0.08), 0.55)
     return max_width / (k - 1)
-
 def _summary_swarm_positions(shap_x: np.ndarray, y_center: float, *, row_width: float, seed: int=0) -> Tuple[np.ndarray, np.ndarray]:
-    """X = SHAP (spread horizontally when samples share the same value); Y stays near row center."""
     n = len(shap_x)
     x_out = shap_x.astype(float).copy()
     y_out = np.full(n, float(y_center), dtype=float)
@@ -723,10 +624,8 @@ def _summary_swarm_positions(shap_x: np.ndarray, y_center: float, *, row_width: 
                 y_out[idx] = y_center + (rng.random() - 0.5) * 2 * half_v
         i = j
     return x_out, y_out
-
 def _summary_row_width(n_samples: int) -> float:
     return float(min(0.55, 0.28 + 0.0012 * max(n_samples, 1)))
-
 def _plot_shap_summary_row(ax: Axes, shap_col: np.ndarray, feat_vals: np.ndarray, y_center: float, *, row_width: Optional[float]=None, seed: int=0) -> None:
     finite = np.isfinite(shap_col)
     if not finite.any():
@@ -746,7 +645,6 @@ def _plot_shap_summary_row(ax: Axes, shap_col: np.ndarray, feat_vals: np.ndarray
         ax.scatter(x_pos[valid_geno], y_pos[valid_geno], c=_genotype_codes(feat_plot[valid_geno]), s=point_size, **scatter_kw, linewidths=0, zorder=4)
     if (~valid_geno).any():
         ax.scatter(x_pos[~valid_geno], y_pos[~valid_geno], c=_SHAP_PALETTE['neutral'], s=max(3, point_size - 1), alpha=min(scatter_alpha, 0.45), edgecolors='none', zorder=3)
-
 def _jitter_discrete_x(values: np.ndarray, *, jitter: float=0.08, seed: int=0) -> np.ndarray:
     x = values.astype(float).copy()
     if jitter <= 0:
@@ -756,7 +654,6 @@ def _jitter_discrete_x(values: np.ndarray, *, jitter: float=0.08, seed: int=0) -
         return x
     rng = np.random.default_rng(seed)
     return x + (rng.random(len(x)) - 0.5) * jitter
-
 def _apply_genotype_dependence_x_axis(ax: Axes) -> None:
     x_lo, x_hi = -0.35, 2.35
     ax.set_xlim(x_lo, x_hi)
@@ -767,9 +664,7 @@ def _apply_genotype_dependence_x_axis(ax: Axes) -> None:
     edge_kw = {'color': _SHAP_PALETTE['zero_line'], 'linewidth': 0.8, 'linestyle': '-', 'alpha': 0.65, 'zorder': 0}
     ax.axvline(x_lo, **edge_kw)
     ax.axvline(x_hi, **edge_kw)
-
 def _find_dependence_interaction_index(feat_idx: int, shap_values: np.ndarray, X_values: np.ndarray) -> Optional[int]:
-    """SNP whose genotype correlates most with the primary SNP's SHAP values (SHAP interaction auto-select)."""
     y_shap = shap_values[:, feat_idx].astype(float)
     best_idx: Optional[int] = None
     best_corr = -1.0
@@ -789,9 +684,7 @@ def _find_dependence_interaction_index(feat_idx: int, shap_values: np.ndarray, X
         best_corr = abs(corr)
         best_idx = j
     return best_idx
-
 def _disperse_identical_y_within_genotype(x_raw: np.ndarray, y: np.ndarray, valid: np.ndarray, *, tol: float=1e-9) -> np.ndarray:
-    """When all samples in a genotype bin share the same SHAP value, spread points vertically for visibility."""
     y_out = y.astype(float).copy()
     for x_val in (0, 1, 2):
         mask = valid & (np.rint(x_raw) == x_val)
@@ -807,7 +700,6 @@ def _disperse_identical_y_within_genotype(x_raw: np.ndarray, y: np.ndarray, vali
         for k, ii in enumerate(idx):
             y_out[ii] = center + (k - (n - 1) / 2.0) * step
     return y_out
-
 def _plot_shap_dependence_on_ax(ax: Axes, feat_idx: int, shap_values: np.ndarray, X_values: np.ndarray, feature_names: np.ndarray, *, compact: bool=False) -> None:
     names = [str(n) for n in feature_names]
     feature = names[feat_idx]
@@ -844,13 +736,11 @@ def _plot_shap_dependence_on_ax(ax: Axes, feat_idx: int, shap_values: np.ndarray
     ax.tick_params(labelsize=8 if compact else 10)
     _apply_genotype_dependence_x_axis(ax)
     _hide_top_right_spines(ax)
-
 def _ensure_shap_matplotlib() -> bool:
     matplotlib_available, _ = _setup_matplotlib()
     if not matplotlib_available:
         logger.error('matplotlib not available, cannot draw SHAP plots')
     return matplotlib_available
-
 def resolve_shap_dependence_file(importance_file: Union[str, Path]) -> Path:
     path = Path(importance_file)
     if path.name.endswith('_shap_values.txt'):
@@ -862,17 +752,14 @@ def resolve_shap_dependence_file(importance_file: Union[str, Path]) -> Path:
     if tsv_path.exists():
         return tsv_path
     return npz_path
-
 def _hide_top_right_spines(ax: Axes) -> None:
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.tick_params(top=False, right=False, labeltop=False, labelright=False)
-
 def _apply_clean_spines(fig: Any) -> None:
     for ax in fig.get_axes():
         if hasattr(ax, 'spines'):
             _hide_top_right_spines(ax)
-
 def _load_shap_dependence_data(dependence_path: Union[str, Path]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     path = Path(dependence_path)
     if not path.exists():
@@ -901,7 +788,6 @@ def _load_shap_dependence_data(dependence_path: Union[str, Path]) -> Tuple[np.nd
         return (shap_values, x_values, np.array(feature_names, dtype=object))
     data = np.load(path, allow_pickle=True)
     return (np.asarray(data['shap_values']), np.asarray(data['X_values']), np.asarray(data['feature_names']))
-
 def _resolve_top_feature_indices(top_features: List[str], feature_names: np.ndarray) -> Tuple[List[int], List[str]]:
     names_list = [str(n) for n in feature_names]
     name_to_idx: Dict[str, int] = {}
@@ -926,7 +812,6 @@ def _resolve_top_feature_indices(top_features: List[str], feature_names: np.ndar
         indices.append(idx)
         labels.append(names_list[idx])
     return (indices, labels)
-
 def plot_shap_summary(dependence_npz: Union[str, Path], top_features: List[str], output_file: Union[str, Path], dpi: int=300) -> Optional[Path]:
     if not _ensure_shap_matplotlib():
         return None
@@ -979,7 +864,6 @@ def plot_shap_summary(dependence_npz: Union[str, Path], top_features: List[str],
     fig.savefig(out_path, dpi=dpi, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     return out_path
-
 def plot_top_snps_dependence(dependence_npz: Union[str, Path], top_features: List[str], output_dir: Union[str, Path], output_prefix: Union[str, Path], dpi: int=300) -> List[Path]:
     if not _ensure_shap_matplotlib():
         return []
@@ -1019,11 +903,6 @@ def plot_top_snps_dependence(dependence_npz: Union[str, Path], top_features: Lis
     fig.savefig(out_file, dpi=dpi, bbox_inches='tight', pad_inches=0.25, facecolor='white')
     plt.close(fig)
     return [out_file]
-
-
-
-
-
 def _setup_matplotlib() -> Tuple[bool, Any]:
     try:
         import matplotlib
@@ -1037,7 +916,6 @@ def _setup_matplotlib() -> Tuple[bool, Any]:
         return (True, plt)
     except ImportError:
         return (False, None)
-
 def _ensure_numpy_array(data: Any) -> np.ndarray:
     if isinstance(data, np.ndarray):
         return data
@@ -1045,7 +923,6 @@ def _ensure_numpy_array(data: Any) -> np.ndarray:
         return data.values
     else:
         return np.array(data)
-
 def load_cv_results_from_model_dir(model_dir: Union[str, Path], model_type: str) -> Optional[Dict]:
     model_dir = Path(model_dir)
     json_path = model_dir / f'{model_type}_cv_results.json'
@@ -1056,7 +933,6 @@ def load_cv_results_from_model_dir(model_dir: Union[str, Path], model_type: str)
             return json.load(f)
     except Exception as e:
         return None
-
 def load_plotting_data(plotting_data_file: Union[str, Path]) -> Dict:
     plotting_data_file = Path(plotting_data_file)
     if not plotting_data_file.exists():
@@ -1101,7 +977,6 @@ def load_plotting_data(plotting_data_file: Union[str, Path]) -> Dict:
     else:
         result['evaluation_results'] = None
     return result
-
 def plot_test_set_metrics(test_metrics: Dict, output_dir: Union[str, Path], model_type: str, task_type: str, output_prefix: Optional[Union[str, Path]]=None) -> Optional[Path]:
     output_dir = Path(output_dir)
     output_prefix_path = _resolve_output_prefix(output_dir, output_prefix)
@@ -1158,9 +1033,7 @@ def plot_test_set_metrics(test_metrics: Dict, output_dir: Union[str, Path], mode
     fig.savefig(plot_file, dpi=300, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     return plot_file
-
 def plot_confusion_matrix(y_true: Union[pd.Series, np.ndarray], y_pred: np.ndarray, output_dir: Union[str, Path], model_type: str, output_prefix: Optional[Union[str, Path]]=None, *, dpi: int=300) -> Optional[Path]:
-    """Plot confusion matrix for classification tasks (held-out test set)."""
     output_dir = Path(output_dir)
     output_prefix_path = _resolve_output_prefix(output_dir, output_prefix)
     matplotlib_available, plt = _setup_matplotlib()
@@ -1207,7 +1080,6 @@ def plot_confusion_matrix(y_true: Union[pd.Series, np.ndarray], y_pred: np.ndarr
         except Exception:
             pass
         return None
-
 def plot_cv_average_metrics(cv_results: Dict, output_dir: Union[str, Path], model_type: str, task_type: str, output_prefix: Optional[Union[str, Path]]=None) -> Optional[Path]:
     if task_type == 'regression':
         return None
@@ -1254,7 +1126,6 @@ def plot_cv_average_metrics(cv_results: Dict, output_dir: Union[str, Path], mode
     fig.savefig(plot_file, dpi=300, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     return plot_file
-
 def plot_performance_curves(y_true: Union[pd.Series, np.ndarray], y_pred: np.ndarray, y_prob: Optional[np.ndarray], output_dir: Union[str, Path], model_type: str, task_type: str, publication_quality: bool=True, output_prefix: Optional[Union[str, Path]]=None) -> None:
     output_dir = Path(output_dir)
     output_prefix_path: Optional[Path] = None
@@ -1288,7 +1159,6 @@ def plot_performance_curves(y_true: Union[pd.Series, np.ndarray], y_pred: np.nda
         except Exception as e:
             pearson_corr = None
             pearson_p = None
-
         r2_det = None
         try:
             from sklearn.metrics import r2_score
@@ -1549,7 +1419,6 @@ def plot_performance_curves(y_true: Union[pd.Series, np.ndarray], y_pred: np.nda
             plt.close()
         except Exception as e:
             logger.error(f'Performance curves generation failed: {str(e)}', exc_info=True)
-
 def plot_cv_training_curves(cv_results: Dict, output_dir: Union[str, Path], model_type: str, task_type: str, output_prefix: Optional[Union[str, Path]]=None) -> None:
     output_dir = Path(output_dir)
     output_prefix_path: Optional[Path] = None
@@ -1708,7 +1577,6 @@ def plot_cv_training_curves(cv_results: Dict, output_dir: Union[str, Path], mode
             plt.close()
         except Exception:
             pass
-
 def plot_model_performance_from_file(plotting_data_file: Union[str, Path], output_dir: Optional[Union[str, Path]]=None, publication_quality: Optional[bool]=None, output_prefix: Optional[Union[str, Path]]=None) -> int:
     try:
         plotting_data = load_plotting_data(plotting_data_file)

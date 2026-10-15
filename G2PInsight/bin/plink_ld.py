@@ -6,13 +6,11 @@ import shutil
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict
 logger = logging.getLogger(__name__)
-
 def get_bundled_plink_path() -> str:
     bin_dir = Path(__file__).parent
     software_dir = bin_dir / 'software'
     plink_path = software_dir / 'plink'
     return str(plink_path)
-
 def detect_input_type(input_path: str) -> Tuple[str, Dict]:
     input_path_abs = str(Path(input_path).absolute())
     path = Path(input_path_abs)
@@ -35,7 +33,6 @@ def detect_input_type(input_path: str) -> Tuple[str, Dict]:
         if Path(input_path_abs).exists():
             return ('vcf', {'vcf_file': input_path_abs})
     return ('unknown', {})
-
 def build_plink_input_args(input_type: str, input_info: Dict) -> List[str]:
     if input_type == 'vcf':
         vcf_file = input_info['vcf_file']
@@ -46,7 +43,6 @@ def build_plink_input_args(input_type: str, input_info: Dict) -> List[str]:
         return ['--file', input_info['ped_prefix']]
     else:
         raise ValueError(f'Unsupported input format: {input_type}')
-
 def validate_input_files(input_type: str, input_info: Dict) -> bool:
     try:
         if input_type == 'vcf':
@@ -89,7 +85,6 @@ def validate_input_files(input_type: str, input_info: Dict) -> bool:
     except Exception as e:
         logger.error(f'File validation failed: {e}')
         return False
-
 def run_plink_command(plink_path: str, args: list, step_name: str) -> bool:
     cmd = [plink_path] + args
     try:
@@ -101,7 +96,6 @@ def run_plink_command(plink_path: str, args: list, step_name: str) -> bool:
     except Exception as e:
         logger.error(f'{step_name} failed: {e}')
         return False
-
 def cleanup_intermediate_files(output_prefix: str, input_type: str) -> None:
     patterns_to_delete = [f'{output_prefix}.prune.in', f'{output_prefix}.prune.out', f'{output_prefix}.log', f'{output_prefix}_filtered.log', f'{output_prefix}_filtered.nosex']
     if input_type == 'vcf':
@@ -115,7 +109,6 @@ def cleanup_intermediate_files(output_prefix: str, input_type: str) -> None:
                 file_path.unlink()
             except Exception:
                 pass
-
 def check_prune_file_exists(output_prefix: str) -> bool:
     output_prefix_abs = str(Path(output_prefix).absolute())
     prune_file = Path(f'{output_prefix_abs}.prune.in')
@@ -132,7 +125,6 @@ def check_prune_file_exists(output_prefix: str) -> bool:
     except Exception as e:
         logger.error(f'Cannot read prune.in file: {e}')
         return False
-
 def run_ld_filtering(input_path: str, output_prefix: str, ld_window_kb: int=50, ld_window: int=5, ld_window_r2: float=0.2, keep_intermediate: bool=False, threads: int=8, keep_samples_file: Optional[str]=None, extract_snps_file: Optional[str]=None) -> int:
     try:
         input_type, input_info = detect_input_type(input_path)
@@ -169,8 +161,6 @@ def run_ld_filtering(input_path: str, output_prefix: str, ld_window_kb: int=50, 
             return 1
         if not check_prune_file_exists(output_prefix):
             return 1
-
-
         extract_args = input_args + ['--extract', f'{output_prefix_abs}.prune.in', '--make-bed', '--allow-extra-chr', '--allow-no-sex', '--threads', str(threads), '--out', output_prefix_abs]
         if keep_samples_file:
             extract_args.extend(['--keep', keep_samples_file])
