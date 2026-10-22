@@ -31,13 +31,36 @@ Then go to [Quick Start](#quick-start). Source repository: [github.com/ZBaoyi/G2
 
 ---
 
+## Other install options
+
+Use these only if the one-liner in [Install](#install) is not enough.
+
+### From a local clone (editable install)
+
+**Who this is for:** people who already `git clone` the repo, want to read or change the source, and have edits take effect without reinstalling each time.
+
+**What `-e` means:** editable mode — Python imports the code from this folder. After you edit files under `G2PInsight/`, the `G2PInsight` command uses your changes immediately.
+
+```bash
+git clone https://github.com/ZBaoyi/G2PInsight.git
+cd G2PInsight
+pip install -e .
+G2PInsight --version
+```
+
+Only want to use the tool (no source edits)? Prefer `pip install G2PInsight` in [Install](#install) instead.
+
+`bed-reader` and `psutil` are included by default. If `bed-reader` is missing at runtime, preprocess falls back to slower PLINK `--recodeA`.
+
+---
+
 ## Table of Contents
 
 - [Install](#install)
+- [Other install options](#other-install-options)
 - [What you get](#what-you-get)
 - [Quick Start](#quick-start)
 - [Pipeline](#pipeline)
-- [Other install options](#other-install-options)
 - [Commands](#commands)
   - [preprocess](#1-preprocess)
   - [train](#2-train)
@@ -67,16 +90,24 @@ Then go to [Quick Start](#quick-start). Source repository: [github.com/ZBaoyi/G2
 
 - **train** / **train-all** need preprocess `*_metadata.json` (`-j`) — not a raw matrix path alone.
 - GWAS/LD runs in **preprocess only**; training does not re-filter SNPs.
-- Wait for preprocess to finish (look for `Preprocess completed: …` / `Operation completed successfully`) before training. In batch jobs, use `set -e`.
 - **Large SNP counts:** use preprocess `-f 2`–`4`; for **train-all**, prefer `--parallel_models 1` unless job memory is very large (each parallel worker copies the full matrix).
 
 ---
 
 ## Quick Start
 
+Example files live in the GitHub repo under `data/` (not included in the PyPI package):
+
+| File | Content |
+|------|---------|
+| `data/genotype.vcf` | VCF genotypes (~33k SNPs) |
+| `data/pheno.txt` | Two columns: sample ID + binary trait `Leaf_pubescence` (0/1); optional header OK |
+
+Clone (or download those two files), then from the repo root:
+
 ```bash
 # 1. Preprocess
-G2PInsight preprocess --vcf data/genotype.vcf -p data/phenotype.txt -o results/
+G2PInsight preprocess --vcf data/genotype.vcf -p data/pheno.txt -o results/
 
 # 2. Train (check metadata exists first)
 test -f results/preprocess/results_metadata.json && echo "OK"
@@ -89,10 +120,10 @@ G2PInsight visualize \
   -o results/plot/lightgbm
 ```
 
-**Whole-genome or millions of SNPs** — preprocess with filtering, then train conservatively:
+**Larger SNP sets** — use preprocess feature selection (`-f 4`), then train conservatively:
 
 ```bash
-G2PInsight preprocess --bfile genotype -p pheno.txt -o results/ -f 4
+G2PInsight preprocess --vcf data/genotype.vcf -p data/pheno.txt -o results/ -f 4
 G2PInsight train-all -j results/preprocess/results_metadata.json -o results/ \
   --parallel_models 1 --threads 4
 ```
@@ -115,38 +146,6 @@ G2PInsight train-all -j results/preprocess/results_metadata.json -o results/ \
 ```
 
 Use `-o my_project/` as the project folder. Preprocess writes `my_project/preprocess/my_project_metadata.json` — that is the path for **train `-j`**.
-
----
-
-## Other install options
-
-Use these only if the one-liner in [Install](#install) is not enough.
-
-### From GitHub (latest commit, no local clone)
-
-Install the newest code without keeping a local copy of the repo:
-
-```bash
-pip install "G2PInsight @ git+https://github.com/ZBaoyi/G2PInsight.git"
-G2PInsight --version
-```
-
-### From a local clone (editable install)
-
-**Who this is for:** people who already `git clone` the repo, want to read or change the source, and have edits take effect without reinstalling each time.
-
-**What `-e` means:** editable mode — Python imports the code from this folder. After you edit files under `G2PInsight/`, the `G2PInsight` command uses your changes immediately.
-
-```bash
-git clone https://github.com/ZBaoyi/G2PInsight.git
-cd G2PInsight
-pip install -e .
-G2PInsight --version
-```
-
-Only want to use the tool (no source edits)? Prefer `pip install G2PInsight` in [Install](#install) instead.
-
-`bed-reader` and `psutil` are included by default. If `bed-reader` is missing at runtime, preprocess falls back to slower PLINK `--recodeA`.
 
 ---
 
@@ -176,16 +175,16 @@ SNP columns are named `chr_position` (e.g. `1_123456`).
 G2PInsight preprocess (--bfile|--file|--vcf) <genotype> -p <phenotype> -o <output> [options]
 ```
 
-**Typical run** (GWAS + LD feature selection):
+**Typical run** (bundled example + GWAS→LD):
 
 ```bash
-G2PInsight preprocess --vcf data.vcf -p pheno.txt -o results/ -f 4
+G2PInsight preprocess --vcf data/genotype.vcf -p data/pheno.txt -o results/ -f 4
 ```
 
-**Large genome** (SNP filtering recommended):
+**Large genome / PLINK binary** (SNP filtering recommended):
 
 ```bash
-G2PInsight preprocess --bfile genotype -p pheno.txt -o results/ -f 4
+G2PInsight preprocess --bfile genotype -p data/pheno.txt -o results/ -f 4
 ```
 
 #### Key options
@@ -201,7 +200,7 @@ G2PInsight preprocess --bfile genotype -p pheno.txt -o results/ -f 4
 
 **Matrix backend (fixed):** `auto` — use `bed-reader` when available, else PLINK `--recodeA`; in-process cache on; chromosome recode serial.
 
-**Inputs:** exactly one of `--bfile`, `--file`, `--vcf`. Phenotype: two columns, no header (sample ID + value).
+**Inputs:** exactly one of `--bfile`, `--file`, `--vcf`. Phenotype: two columns (sample ID + value); an optional header row is fine (non-numeric values are dropped). See `data/pheno.txt` in the repo.
 
 ---
 
