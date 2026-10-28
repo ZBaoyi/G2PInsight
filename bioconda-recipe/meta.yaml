@@ -1,5 +1,5 @@
 {% set name = "g2pinsight" %}
-{% set version = "1.1.0" %}
+{% set version = "1.1.1" %}
 
 package:
   name: {{ name }}
@@ -7,7 +7,7 @@ package:
 
 source:
   url: https://pypi.io/packages/source/{{ name[0] }}/{{ name }}/{{ name }}-{{ version }}.tar.gz
-  sha256: 7acddf56b7a4d7d27ebb2dbff17f08a04bf2899ed607883aff143464392b47f5
+  sha256: 14f0c6e4c93dc44bd72056d9176dd563e3551f41026bb4ca0a76773a1c0cbf0a
 
 build:
   number: 0
@@ -39,14 +39,10 @@ requirements:
     - catboost
     - shap
     - plotly
-    # PyPI pin is kaleido>=0.2,<1 (plotly write_image); conda name differs
     - python-kaleido >=0.2,<1
     - seaborn
     - bed-reader
     - psutil
-    # bioconda tools (preferred over bundled Linux-only binaries when on PATH)
-    - plink
-    - gemma
 
 test:
   imports:

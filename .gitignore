@@ -49,6 +49,8 @@ htmlcov/
 *.bim
 *.fam
 *.nosex
+conda-bld-out/
+.release-venv/
 # 操作系统
 .DS_Store
 Thumbs.db

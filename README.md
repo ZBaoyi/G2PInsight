@@ -35,9 +35,22 @@ Then go to [Quick Start](#quick-start). Source repository: [github.com/ZBaoyi/G2
 
 Use these only if the one-liner in [Install](#install) is not enough.
 
+### From a personal conda channel
+
+**Who this is for:** users who prefer conda over pip.
+
+```bash
+conda install -c zbaoyi -c conda-forge g2pinsight
+G2PInsight --version
+```
+
+**Compatibility note:** this package is **noarch**, but its conda-forge dependencies (e.g. `catboost`, `lightgbm`, recent Python builds) often need **glibc ≥ 2.28**. On older HPC systems such as **CentOS 7 (glibc 2.17)**, `conda install` may fail with `UnsatisfiableError` / `__glibc` conflicts.
+
+If that happens, use **pip** ([Install](#install)) or install from a **git clone** (below) instead of forcing the conda route.
+
 ### From a local clone (editable install)
 
-**Who this is for:** people who already `git clone` the repo, want to read or change the source, and have edits take effect without reinstalling each time.
+**Who this is for:** people who already `git clone` the repo, want to read or change the source, need edits without reinstalling, **or** whose system is too old for the conda package above.
 
 **What `-e` means:** editable mode — Python imports the code from this folder. After you edit files under `G2PInsight/`, the `G2PInsight` command uses your changes immediately.
 
@@ -48,7 +61,7 @@ pip install -e .
 G2PInsight --version
 ```
 
-Only want to use the tool (no source edits)? Prefer `pip install G2PInsight` in [Install](#install) instead.
+Only want to use the tool (no source edits) and pip works? Prefer `pip install G2PInsight` in [Install](#install) instead.
 
 `bed-reader` and `psutil` are included by default. If `bed-reader` is missing at runtime, preprocess falls back to slower PLINK `--recodeA`.
 
@@ -107,24 +120,25 @@ Clone (or download those two files), then from the repo root:
 
 ```bash
 # 1. Preprocess
-G2PInsight preprocess --vcf data/genotype.vcf -p data/pheno.txt -o results/
-
+G2PInsight preprocess --vcf data/genotype.vcf -p data/pheno.txt -o test/preprocess
+```
+```bash
 # 2. Train (check metadata exists first)
-test -f results/preprocess/results_metadata.json && echo "OK"
-G2PInsight train -j results/preprocess/results_metadata.json -m LightGBM -o results/
-
+G2PInsight train -j test/preprocess/preprocess/preprocess_metadata.json -m LightGBM -o test/train
+```
+```bash
 # 3. Visualize
 G2PInsight visualize \
-  -i results/train/LightGBM/LightGBM_shap_values.txt \
-  -I results/train/LightGBM/LightGBM_plotting_data.json \
+  -i test/train/LightGBM/LightGBM_shap_values.txt \
+  -I test/train/LightGBM/LightGBM_plotting_data.json \
   -o results/plot/lightgbm
 ```
 
 **Larger SNP sets** — use preprocess feature selection (`-f 4`), then train conservatively:
 
 ```bash
-G2PInsight preprocess --vcf data/genotype.vcf -p data/pheno.txt -o results/ -f 4
-G2PInsight train-all -j results/preprocess/results_metadata.json -o results/ \
+G2PInsight preprocess --vcf data/genotype.vcf -p data/pheno.txt -o test/preprocess -f 4
+G2PInsight train-all -j test/preprocess/preprocess/results_metadata.json -o test/train/ \
   --parallel_models 1 --threads 4
 ```
 

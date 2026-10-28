@@ -1,27 +1,29 @@
-# Bioconda 发布步骤（G2PInsight）
+# Bioconda 发布（G2PInsight）
 
-本目录的 `meta.yaml` 可直接复制到 [bioconda-recipes](https://github.com/bioconda/bioconda-recipes) 的 `recipes/g2pinsight/`。
+本目录只服务于 **官方 bioconda**：把 `meta.yaml` 复制到 [bioconda-recipes](https://github.com/bioconda/bioconda-recipes) 的 `recipes/g2pinsight/` 后提 PR。
 
-当前对应 PyPI 版本：**1.1.0**（发版后需更新 `meta.yaml` 的 sha256）。
+个人频道请用仓库里的 `conda-recipe/`，不要混用。
+
+当前版本：**1.1.1**（源为 PyPI sdist，sha256 已写入 `meta.yaml`）。
 
 ---
 
-## 第 0 步：前置检查（本仓库已就绪）
+## 第 0 步：前置检查
 
-- [ ] 已发布到 PyPI：`pip install G2PInsight==1.1.0`
+- [x] 已发布到 PyPI：`pip install G2PInsight==1.1.1`
 - [x] sdist 含 `LICENSE`
 - [x] 入口脚本：`G2PInsight`
-- [x] 本目录已有 `meta.yaml`
+- [x] 本目录 `meta.yaml` 使用 `url` + `sha256`（非本地 `path`）
 
-可选（更好体验，非首次提交必需）：让代码 **优先用 PATH 里的 plink/gemma**，再回退包内二进制；发新版到 PyPI 后再 bump bioconda。
+可选（非首次必需）：之后可再 bump，让运行时优先用 PATH / bioconda 的 `plink`、`gemma`，再回退包内二进制。
 
 ---
 
 ## 第 1 步：Fork bioconda-recipes
 
-1. 浏览器打开：https://github.com/bioconda/bioconda-recipes  
-2. 点右上角 **Fork**（账号建议用 `ZBaoyi`，与 `recipe-maintainers` 一致）  
-3. Fork 完成后，得到：`https://github.com/ZBaoyi/bioconda-recipes`
+1. 打开 https://github.com/bioconda/bioconda-recipes  
+2. **Fork**（建议账号 `ZBaoyi`，与 `recipe-maintainers` 一致）  
+3. 得到：`https://github.com/ZBaoyi/bioconda-recipes`
 
 ---
 
@@ -35,53 +37,39 @@ git fetch upstream
 git checkout -b add-g2pinsight upstream/master
 ```
 
-若你 clone 的是自己的 fork 且默认分支已是最新：
-
-```bash
-git checkout -b add-g2pinsight
-```
-
 ---
 
 ## 第 3 步：放入 recipe
 
 ```bash
 mkdir -p recipes/g2pinsight
-# 把本仓库的 meta.yaml 拷过去（按你的实际路径改）
-cp /path/to/assocG2P/bioconda-recipe/meta.yaml recipes/g2pinsight/meta.yaml
+cp /share/home/students/chenrf/assocG2P/bioconda-recipe/meta.yaml recipes/g2pinsight/meta.yaml
 ```
 
-确认文件为：
+确认只有：
 
 ```text
 recipes/g2pinsight/meta.yaml
 ```
 
-若要改 maintainer，编辑 `extra.recipe-maintainers` 里的 GitHub 用户名。
-
 ---
 
 ## 第 4 步（可选）：本地 lint / 构建
 
-需要 Docker，且环境稍重；也可跳过，直接靠 GitHub CI。
+需要 Docker；也可跳过，直接靠 CI。
 
 ```bash
 conda create -n bioconda -c conda-forge -c bioconda bioconda-utils -y
 conda activate bioconda
 
-# 在 bioconda-recipes 根目录
 bioconda-utils lint --packages g2pinsight
-
-# 有 Docker 时再构建测试
 bioconda-utils build --docker --mulled-build-and-test --packages g2pinsight
 ```
-
-常见失败：
 
 | 现象 | 处理 |
 |------|------|
 | 依赖名不存在 | 改成 conda-forge/bioconda 上的名字（如 `python-kaleido`） |
-| sha256 不对 | 重新算 sdist 哈希并更新 |
+| sha256 不对 | 用下面命令重算并更新 |
 | lint 要求 `run_exports` | 本 `meta.yaml` 已包含 |
 
 ---
@@ -98,24 +86,24 @@ git push -u origin add-g2pinsight
 
 ## 第 6 步：开 Pull Request
 
-1. 打开 fork 页，GitHub 通常会提示 **Compare & pull request**  
+1. fork 页点 **Compare & pull request**  
 2. base：`bioconda/bioconda-recipes` → `master`  
-3. compare：你的 `add-g2pinsight`  
+3. compare：`add-g2pinsight`  
 4. 标题：`Add g2pinsight`  
-5. 正文可简短写：包用途、PyPI 链接、你是 upstream maintainer  
+5. 正文：用途、PyPI 链接、你是 upstream maintainer  
 
 ---
 
-## 第 7 步：等 CI，然后请求审核
+## 第 7 步：CI 与审核
 
-1. 等 Azure / GitHub CI 变绿（红了就按日志改 `meta.yaml` 再 push）  
-2. 在 PR 评论里发：
+1. 等 CI 变绿  
+2. PR 评论：
 
 ```text
 @BiocondaBot please add label
 ```
 
-3. 审核通过并 merge 后，包会自动上传到 bioconda  
+3. merge 后自动上 bioconda  
 
 用户安装：
 
@@ -128,12 +116,9 @@ G2PInsight --version
 
 ## 以后发新版本
 
-1. 先发新版到 PyPI（改 `pyproject.toml` / `__version__`）  
-2. 在 bioconda-recipes 里改 `recipes/g2pinsight/meta.yaml`：  
-   - `version`  
-   - `sha256`（新 sdist）  
-   - `build.number` 重置为 `0`  
-3. 再开 PR：`Update g2pinsight to x.y.z`
+1. 先发新版到 PyPI  
+2. 更新本目录（或 bioconda-recipes 里）`meta.yaml`：`version`、`sha256`、`build.number=0`  
+3. 开 PR：`Update g2pinsight to x.y.z`
 
 算 sha256：
 
