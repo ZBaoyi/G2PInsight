@@ -4,7 +4,7 @@
 
 个人频道请用仓库里的 `conda-recipe/`，不要混用。
 
-当前版本：**1.1.2**（源为 PyPI sdist，sha256 已写入 `meta.yaml`）。
+当前版本：**1.1.3**（源为 PyPI sdist，sha256 已写入 `meta.yaml`）。
 
 run 依赖版本与 `pyproject.toml` 中 **Python &lt; 3.13** 对齐（含 `xgboost >=1.6,<2.1` 等）。Python 3.13 请用 pip。
 
@@ -12,7 +12,7 @@ run 依赖版本与 `pyproject.toml` 中 **Python &lt; 3.13** 对齐（含 `xgbo
 
 ## 第 0 步：前置检查
 
-- [ ] 已发布到 PyPI：`pip install G2PInsight==1.1.2`
+- [ ] 已发布到 PyPI：`pip install G2PInsight==1.1.3`
 - [x] sdist 含 `LICENSE`
 - [x] 入口脚本：`G2PInsight`
 - [x] 本目录 `meta.yaml` 使用 `url` + `sha256`（非本地 `path`）

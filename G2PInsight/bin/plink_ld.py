@@ -161,9 +161,9 @@ def run_ld_filtering(input_path: str, output_prefix: str, ld_window_kb: int=50, 
             return 1
         if not check_prune_file_exists(output_prefix):
             return 1
+        # Prune may use --keep (e.g. train-only LD), but the final bed must keep
+        # all input samples so held-out test IDs remain in the training matrix.
         extract_args = input_args + ['--extract', f'{output_prefix_abs}.prune.in', '--make-bed', '--allow-extra-chr', '--allow-no-sex', '--threads', str(threads), '--out', output_prefix_abs]
-        if keep_samples_file:
-            extract_args.extend(['--keep', keep_samples_file])
         if not run_plink_command(plink_executable, extract_args, 'Extracting SNPs to generate bed/bim/fam'):
             return 1
         bed_file = Path(f'{output_prefix_abs}.bed')

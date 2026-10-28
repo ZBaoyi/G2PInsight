@@ -1019,6 +1019,23 @@ def _validate_ids_file_pair(train_ids_file: Optional[str], test_ids_file: Option
     has_test = test_ids_file is not None
     if has_train ^ has_test:
         raise ValueError('Both --train-ids-file and --test-ids-file must be provided together')
+def _reconcile_sample_split_with_matrix(sample_split: Dict[str, Any], matrix_sample_ids: List[str]) -> Dict[str, Any]:
+    """Keep sample_split IDs that actually appear in the exported training matrix."""
+    matrix_set = {str(s) for s in matrix_sample_ids}
+    train_ids = [str(s) for s in sample_split.get('train_ids') or [] if str(s) in matrix_set]
+    test_ids = [str(s) for s in sample_split.get('test_ids') or [] if str(s) in matrix_set]
+    dropped_train = len(sample_split.get('train_ids') or []) - len(train_ids)
+    dropped_test = len(sample_split.get('test_ids') or []) - len(test_ids)
+    if dropped_train or dropped_test:
+        logger.warning(f'sample_split vs matrix: dropped {dropped_train} train / {dropped_test} test ID(s) absent from the genotype matrix')
+    if not train_ids or not test_ids:
+        raise RuntimeError(f'After building the training matrix, sample_split is invalid (n_train={len(train_ids)}, n_test={len(test_ids)}). Re-run preprocess; if using -f 3/4, ensure LD export keeps all samples.')
+    out = dict(sample_split)
+    out['train_ids'] = train_ids
+    out['test_ids'] = test_ids
+    out['n_train'] = len(train_ids)
+    out['n_test'] = len(test_ids)
+    return out
 def resolve_sample_split(sample_ids: List[str], pheno_df: pd.DataFrame, task_type: str, train_ids_file: Optional[str]=None, test_ids_file: Optional[str]=None, test_ratio: float=TRAIN_TEST_HOLDOUT_RATIO, random_state: int=DEFAULT_SPLIT_RANDOM_STATE) -> Dict[str, Any]:
     _validate_ids_file_pair(train_ids_file, test_ids_file)
     sample_ids_str = [str(s) for s in sample_ids]
@@ -1247,6 +1264,7 @@ def run_preprocess(genotype_path: str, genotype_format: GenotypeFormat, phenotyp
         actual_train_file = matrix_output.train_file
         includes_phenotype_column = matrix_output.includes_phenotype_column
         n_snp_features = matrix_output.n_snp_features
+        sample_split = _reconcile_sample_split_with_matrix(sample_split, matrix_output.sample_ids)
         generate_metadata(output_prefix=str(stage_output_dir / output_prefix), plink_prefix=gwas_genotype_prefix, train_file=actual_train_file, valid_samples=matrix_output.sample_ids, genotype_format=genotype_format, task_type=task_type, preprocess_tmp_dir=tmp_dir, filter_snps=filter_snps, feature_selection_mode=feature_selection_mode, gwas_pvalue=gwas_pvalue, ld_window_kb=ld_window_kb, ld_window=ld_window, ld_window_r2=ld_window_r2, n_feature_columns=n_snp_features, includes_phenotype_column=includes_phenotype_column, sample_split=sample_split)
         logger.info(f'Preprocess completed: {len(matrix_output.sample_ids):,} samples × {n_snp_features:,} SNPs (mode={feature_selection_mode}, split={sample_split["mode"]})')
         gc.collect()

@@ -134,26 +134,26 @@ wget -r -np -nH --cut-dirs=1 -R "index.html*" https://pr-nxy.ynu.edu.cn/G2PInsig
 **Alternative — `git clone`:** the same files are in the GitHub repo under `data/` (~53 MB VCF; clone may be slow on some networks).
 
 ```bash
-# 1. Preprocess
+# 1. Preprocess  →  test/preprocess/preprocess/preprocess_metadata.json
 G2PInsight preprocess --vcf data/genotype.vcf -p data/pheno.txt -o test/preprocess
 ```
 ```bash
-# 2. Train (check metadata exists first)
+# 2. Train  →  test/train/train/LightGBM/
 G2PInsight train -j test/preprocess/preprocess/preprocess_metadata.json -m LightGBM -o test/train
 ```
 ```bash
-# 3. Visualize
+# 3. Visualize  →  test/plot/visualize/lightgbm_*
 G2PInsight visualize \
-  -i test/train/LightGBM/LightGBM_shap_values.txt \
-  -I test/train/LightGBM/LightGBM_plotting_data.json \
-  -o results/plot/lightgbm
+  -i test/train/train/LightGBM/LightGBM_shap_values.txt \
+  -I test/train/train/LightGBM/LightGBM_plotting_data.json \
+  -o test/plot/lightgbm
 ```
 
 **Larger SNP sets** — use preprocess feature selection (`-f 4`), then train conservatively:
 
 ```bash
 G2PInsight preprocess --vcf data/genotype.vcf -p data/pheno.txt -o test/preprocess -f 4
-G2PInsight train-all -j test/preprocess/preprocess/preprocess_metadata.json -o test/train/ \
+G2PInsight train-all -j test/preprocess/preprocess/preprocess_metadata.json -o test/train \
   --parallel_models 1 --threads 4
 ```
 
@@ -485,6 +485,10 @@ Default is `--shap_dependence_top 50`. Use `0` only if you need all SNPs (can be
 ### Preprocess: `unexpected keyword argument 'fam_location'`
 
 Your env has an old `bed-reader` (0.2.x). Upgrade: `pip install -U 'bed-reader>=1.0'`. Current G2PInsight also accepts the older `fam_filepath` API as a fallback.
+
+### train / train-all: test IDs from metadata missing in matrix
+
+Usually from an older preprocess with **`-f 3` / `-f 4`**: LD used train-only `--keep` and the final `.bed` dropped test samples while metadata still listed them. Fixed in current source — **re-run preprocess**, then train again.
 
 ### train: XGBoost “Mismatched version … Python package … Shared object”
 
