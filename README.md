@@ -490,6 +490,10 @@ Your env has an old `bed-reader` (0.2.x). Upgrade: `pip install -U 'bed-reader>=
 
 Usually from an older preprocess with **`-f 3` / `-f 4`**: LD used train-only `--keep` and the final `.bed` dropped test samples while metadata still listed them. Fixed in current source — **re-run preprocess**, then train again.
 
+### train-all / CatBoost: `DataFrame` has no attribute `iteritems`
+
+Old CatBoost + **pandas 2.x** (removed `iteritems`). Current G2PInsight passes numpy arrays into CatBoost. Temporary workaround: `pip install -U 'catboost>=1.2,<2'` or `pip install 'pandas>=1.3,<2'`.
+
 ### train: XGBoost “Mismatched version … Python package … Shared object”
 
 Usually **conda + pip mixed installs**: e.g. conda left `libxgboost.so` 2.0.x while pip upgraded the Python package to 3.x. Fix in the same env:

@@ -848,7 +848,7 @@ def resolve_training_hyperparameters(model_type: str, task_type: str, X_train: p
         scoring = 'neg_mean_squared_error'
     base_model = init_model(model_type, task_type, random_state=random_state, cpu_cores=cpu_cores)
     search = RandomizedSearchCV(estimator=base_model, param_distributions=param_grid, n_iter=n_iter, cv=cv_splitter, scoring=scoring, n_jobs=DEFAULT_N_JOBS, random_state=random_state, verbose=0)
-    search.fit(X_search, y_search)
+    search.fit(_features_for_estimator(model_type, X_search), y_search)
     tuned_model = search.best_estimator_
     return (tuned_model, tuned_model.get_params())
 TRAIN_TEST_HOLDOUT_RATIO = 0.20
@@ -907,16 +907,25 @@ def resolve_holdout_split_from_metadata(X: pd.DataFrame, y: pd.Series, metadata:
         return holdout_from_sample_split(X, y, sample_split)
     logger.warning('Metadata missing sample_split; falling back to local reproducible 80/20 split. Re-run preprocess to fix the split at feature-selection time.')
     return split_train_test_holdout(X, y, task_type=task_type, test_ratio=TRAIN_TEST_HOLDOUT_RATIO, random_state=random_state)
+def _is_catboost_model(model: Any) -> bool:
+    return isinstance(model, (CatBoostClassifier, CatBoostRegressor))
+def _features_for_estimator(model_or_type: Any, X: Any) -> Any:
+    """CatBoost+pandas2: old CatBoost calls DataFrame.iteritems (removed); use ndarray."""
+    use_numpy = model_or_type == 'CatBoost' if isinstance(model_or_type, str) else _is_catboost_model(model_or_type)
+    if use_numpy and isinstance(X, (pd.DataFrame, pd.Series)):
+        return np.asarray(X)
+    return X
 def _predict_with_optional_proba(model: Any, X: pd.DataFrame, task_type: str) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-    y_pred = model.predict(X)
+    X_in = _features_for_estimator(model, X)
+    y_pred = model.predict(X_in)
     y_prob = None
     if task_type != 'classification':
         return (y_pred, None)
     try:
         if hasattr(model, 'predict_proba'):
-            y_prob = model.predict_proba(X)
+            y_prob = model.predict_proba(X_in)
         elif hasattr(model, 'decision_function'):
-            decision_scores = model.decision_function(X)
+            decision_scores = model.decision_function(X_in)
             from sklearn.utils.extmath import softmax
             if len(decision_scores.shape) == 1:
                 prob_neg = 1 / (1 + np.exp(decision_scores))
@@ -933,7 +942,7 @@ def _fit_model_with_params(model_type: str, task_type: str, X_train: pd.DataFram
         model.set_params(**best_params)
     except ValueError as e:
         pass
-    model.fit(X_train, y_train)
+    model.fit(_features_for_estimator(model_type, X_train), y_train)
     return model
 def evaluate_model(y_true: pd.Series, y_pred: np.ndarray, y_prob: np.ndarray, task_type: str) -> Dict:
     metrics = {}
@@ -1091,14 +1100,16 @@ def _run_one_cv_fold(fold_idx: int, n_folds: int, train_idx: np.ndarray, val_idx
     y_pred_fold = None
     y_prob_fold = None
     try:
-        model_fold.fit(X_train_fold, y_train_fold)
-        y_pred_fold = model_fold.predict(X_val_fold)
+        X_tr = _features_for_estimator(model_type, X_train_fold)
+        X_va = _features_for_estimator(model_type, X_val_fold)
+        model_fold.fit(X_tr, y_train_fold)
+        y_pred_fold = model_fold.predict(X_va)
         if task_type == 'classification':
             try:
                 if hasattr(model_fold, 'predict_proba'):
-                    y_prob_fold = model_fold.predict_proba(X_val_fold)
+                    y_prob_fold = model_fold.predict_proba(X_va)
                 elif hasattr(model_fold, 'decision_function'):
-                    decision_scores = model_fold.decision_function(X_val_fold)
+                    decision_scores = model_fold.decision_function(X_va)
                     from sklearn.utils.extmath import softmax
                     if len(decision_scores.shape) == 1:
                         prob_neg = 1 / (1 + np.exp(decision_scores))
@@ -1279,7 +1290,7 @@ def calculate_shap_values(model: Any, model_type: str, feature_names: List[str],
             y_shap = y_shap.loc[X_input.index]
         if model_type in ['LightGBM', 'XGBoost', 'CatBoost', 'RandomForest']:
             explainer = shap.TreeExplainer(model)
-            shap_values = explainer.shap_values(X_input)
+            shap_values = explainer.shap_values(_features_for_estimator(model_type, X_input))
         elif model_type == 'Logistic':
             explainer = shap.LinearExplainer(model, X_input)
             shap_values = explainer.shap_values(X_input)
@@ -2008,8 +2019,9 @@ def predict_with_model(input_path: str, model_path: str, output_dir: str, task_t
         non_zero_counts = (X_aligned != 0).sum(axis=1)
         if (non_zero_counts == 0).all():
             logger.error(f'  ERROR: All feature values are zero! This will result in constant predictions.\n  Matched features: {matched_count}\n  Missing features: {missing_count}\n  Please check if chr_pos keys match between training and prediction data.')
-        y_pred = model.predict(X_aligned)
-        y_prob = model.predict_proba(X_aligned) if resolved_task_type == 'classification' and hasattr(model, 'predict_proba') else None
+        X_pred = _features_for_estimator(model, X_aligned)
+        y_pred = model.predict(X_pred)
+        y_prob = model.predict_proba(X_pred) if resolved_task_type == 'classification' and hasattr(model, 'predict_proba') else None
         unique_predictions = len(np.unique(y_pred))
         if unique_predictions == 1:
             logger.error(f"  ERROR: All predictions are the same value: {y_pred[0]}\n  This usually indicates one of the following issues:\n  1. chr_pos keys don't match between training and prediction data\n  2. All feature values are zero (check matched features: {matched_count})\n  3. Model is predicting a constant value for all samples\n  Please check the feature alignment logs above.")

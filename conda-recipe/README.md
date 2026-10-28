@@ -4,7 +4,7 @@
 
 官方 bioconda 请用 `bioconda-recipe/`，不要混用。
 
-当前版本：**1.1.3**
+当前版本：**1.1.4**
 
 依赖均来自 **conda-forge**（不需要 `-c bioconda`）。PLINK/GEMMA 使用包内自带二进制。
 
@@ -53,7 +53,7 @@ conda build conda-recipe -c conda-forge --override-channels \
   --no-anaconda-upload --no-test
 ```
 
-产物：`/data_p/students/chenrf/conda-bld-out/noarch/g2pinsight-1.1.3-py_0.conda`
+产物：`/data_p/students/chenrf/conda-bld-out/noarch/g2pinsight-1.1.4-py_0.conda`
 
 （较新系统也可直接 `conda build conda-recipe -c conda-forge --override-channels`，一般不必设 `CONDA_OVERRIDE_*`。）
 
@@ -63,7 +63,7 @@ conda build conda-recipe -c conda-forge --override-channels \
 
 ```bash
 anaconda upload -u zbaoyi \
-  /data_p/students/chenrf/conda-bld-out/noarch/g2pinsight-1.1.3-py_0.conda
+  /data_p/students/chenrf/conda-bld-out/noarch/g2pinsight-1.1.4-py_0.conda
 ```
 
 ---
