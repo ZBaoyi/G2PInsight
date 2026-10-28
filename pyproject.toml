@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "G2PInsight"
-version = "1.1.1"
+version = "1.1.2"
 description = "Genome-wide association analysis toolkit"
 readme = "README.md"
 # Cap below 3.14: pandas/numpy for 3.14+ only ship manylinux_2_24+ wheels.
@@ -68,7 +68,8 @@ dependencies = [
     # kaleido 1.x is a rewrite; plotly write_image still uses the 0.x engine API.
     "kaleido>=0.2,<1",
     "seaborn>=0.11",
-    "bed-reader>=0.2",  # default fast PLINK .bed backend for preprocess
+    # >=1.0: open_bed accepts fam_location/bim_location (0.2.x only had fam_filepath).
+    "bed-reader>=1.0",  # default fast PLINK .bed backend for preprocess
     "psutil>=5.0",
 ]
 

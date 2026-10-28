@@ -426,6 +426,13 @@ def _resolve_genotype_backend(genotype_backend: GenotypeBackend, plink_prefix_ab
     if BED_READER_AVAILABLE and Path(bed_file).exists():
         return 'bed'
     return 'raw'
+def _open_bed_sidecar_kwargs(fam_file: str, bim_file: str) -> Dict[str, str]:
+    """Build fam/bim kwargs for both bed-reader 0.2.x (fam_filepath) and 1.x (fam_location)."""
+    import inspect
+    params = inspect.signature(open_bed.__init__).parameters
+    if 'fam_location' in params:
+        return {'fam_location': fam_file, 'bim_location': bim_file}
+    return {'fam_filepath': fam_file, 'bim_filepath': bim_file}
 def _prepare_pheno_df_loaded(pheno_df: pd.DataFrame, tmp_base: Path) -> Tuple[pd.DataFrame, str]:
     temp_pheno_file = str(tmp_base / 'temp_pheno.feather')
     try:
@@ -568,7 +575,7 @@ def _plink_to_training_data_from_bed(plink_prefix: str, pheno_df: pd.DataFrame, 
         col_offset = 0
         cpu = os.cpu_count() or 1
         bed_threads = min(8, cpu)
-        with open_bed(bed_file, fam_location=fam_file, bim_location=bim_file, count_A1=True, num_threads=bed_threads) as bed:
+        with open_bed(bed_file, count_A1=True, num_threads=bed_threads, **_open_bed_sidecar_kwargs(fam_file, bim_file)) as bed:
             for chr_idx, (chr_num, snp_indices) in enumerate(bim_index.ordered_chr_blocks(chr_list), 1):
                 n_chr_snps = len(snp_indices)
                 geno = bed.read(np.s_[bed_row_idx, snp_indices], dtype='int8', order='C')

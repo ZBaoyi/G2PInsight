@@ -44,9 +44,10 @@ conda install -c zbaoyi -c conda-forge g2pinsight
 G2PInsight --version
 ```
 
-**Compatibility note:** this package is **noarch**, but its conda-forge dependencies (e.g. `catboost`, `lightgbm`, recent Python builds) often need **glibc ≥ 2.28**. On older HPC systems such as **CentOS 7 (glibc 2.17)**, `conda install` may fail with `UnsatisfiableError` / `__glibc` conflicts.
+**Compatibility notes:**
 
-If that happens, use **pip** ([Install](#install)) or install from a **git clone** (below) instead of forcing the conda route.
+- This package is **noarch**, but conda-forge deps (e.g. `catboost`, `lightgbm`, recent Python builds) often need **glibc ≥ 2.28**. On **CentOS 7 (glibc 2.17)**, `conda install` may fail with `UnsatisfiableError` / `__glibc` — use **pip** ([Install](#install)) or a **git clone** instead.
+- Conda run pins match the **Python &lt; 3.13** ranges in `pyproject.toml` (e.g. `xgboost >=1.6,<2.1`). For **Python 3.13**, prefer **pip**.
 
 ### From a local clone (editable install)
 
@@ -109,14 +110,28 @@ Only want to use the tool (no source edits) and pip works? Prefer `pip install G
 
 ## Quick Start
 
-Example files live in the GitHub repo under `data/` (not included in the PyPI package):
+Example data is **not** shipped in the PyPI or conda package. Get the two files under `data/` first, then run the commands below from the directory that contains that folder.
 
 | File | Content |
 |------|---------|
-| `data/genotype.vcf` | VCF genotypes (~33k SNPs) |
+| `data/genotype.vcf` | VCF genotypes (~33k SNPs, ~53 MB, 413 samples) |
 | `data/pheno.txt` | Two columns: sample ID + binary trait `Leaf_pubescence` (0/1); optional header OK |
 
-Clone (or download those two files), then from the repo root:
+**Recommended — download from the mirror** (works for pip / conda / clone users):
+
+```bash
+mkdir -p data
+wget -O data/genotype.vcf https://pr-nxy.ynu.edu.cn/G2PInsight/data/genotype.vcf
+wget -O data/pheno.txt https://pr-nxy.ynu.edu.cn/G2PInsight/data/pheno.txt
+```
+
+Or pull the whole folder:
+
+```bash
+wget -r -np -nH --cut-dirs=1 -R "index.html*" https://pr-nxy.ynu.edu.cn/G2PInsight/data/
+```
+
+**Alternative — `git clone`:** the same files are in the GitHub repo under `data/` (~53 MB VCF; clone may be slow on some networks).
 
 ```bash
 # 1. Preprocess
@@ -138,7 +153,7 @@ G2PInsight visualize \
 
 ```bash
 G2PInsight preprocess --vcf data/genotype.vcf -p data/pheno.txt -o test/preprocess -f 4
-G2PInsight train-all -j test/preprocess/preprocess/results_metadata.json -o test/train/ \
+G2PInsight train-all -j test/preprocess/preprocess/preprocess_metadata.json -o test/train/ \
   --parallel_models 1 --threads 4
 ```
 
@@ -466,6 +481,22 @@ Default is `--shap_dependence_top 50`. Use `0` only if you need all SNPs (can be
 
 1. Do not use `--no-filter-snps` on whole-genome data; use `-f 2`–`4`.
 2. Confirm `bed-reader` is installed (it is a default dependency of `G2PInsight`); without it, preprocess falls back to slower PLINK `--recodeA`.
+
+### Preprocess: `unexpected keyword argument 'fam_location'`
+
+Your env has an old `bed-reader` (0.2.x). Upgrade: `pip install -U 'bed-reader>=1.0'`. Current G2PInsight also accepts the older `fam_filepath` API as a fallback.
+
+### train: XGBoost “Mismatched version … Python package … Shared object”
+
+Usually **conda + pip mixed installs**: e.g. conda left `libxgboost.so` 2.0.x while pip upgraded the Python package to 3.x. Fix in the same env:
+
+```bash
+pip uninstall -y xgboost
+conda remove -y xgboost 2>/dev/null || true
+pip install 'xgboost>=1.6,<2.1'   # Python <3.13; or conda-forge with the same range
+```
+
+Prefer one package manager for ML libs; do not `pip install -U xgboost` on top of a conda install.
 
 ### predict: constant values or no feature match
 

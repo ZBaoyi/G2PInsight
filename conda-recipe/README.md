@@ -4,9 +4,11 @@
 
 官方 bioconda 请用 `bioconda-recipe/`，不要混用。
 
-当前版本：**1.1.1**
+当前版本：**1.1.2**
 
 依赖均来自 **conda-forge**（不需要 `-c bioconda`）。PLINK/GEMMA 使用包内自带二进制。
+
+`meta.yaml` 的 run 版本与 `pyproject.toml` 中 **Python &lt; 3.13** 约束对齐（含 `xgboost >=1.6,<2.1`、`lightgbm >=3.3,<4.0`、`bed-reader >=1.0` 等）。Python 3.13 请用 pip。
 
 ---
 
@@ -51,7 +53,7 @@ conda build conda-recipe -c conda-forge --override-channels \
   --no-anaconda-upload --no-test
 ```
 
-产物：`/data_p/students/chenrf/conda-bld-out/noarch/g2pinsight-1.1.1-py_0.conda`
+产物：`/data_p/students/chenrf/conda-bld-out/noarch/g2pinsight-1.1.2-py_0.conda`
 
 （较新系统也可直接 `conda build conda-recipe -c conda-forge --override-channels`，一般不必设 `CONDA_OVERRIDE_*`。）
 
@@ -61,7 +63,7 @@ conda build conda-recipe -c conda-forge --override-channels \
 
 ```bash
 anaconda upload -u zbaoyi \
-  /data_p/students/chenrf/conda-bld-out/noarch/g2pinsight-1.1.1-py_0.conda
+  /data_p/students/chenrf/conda-bld-out/noarch/g2pinsight-1.1.2-py_0.conda
 ```
 
 ---
