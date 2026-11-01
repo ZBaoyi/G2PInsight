@@ -1698,7 +1698,7 @@ def filter_samples_by_phenotype(plink_prefix: str, pheno_df: pd.DataFrame, outpu
     output_prefix_abs = Path(output_prefix).absolute().as_posix()
     keep_file = f'{output_prefix_abs}_keep.txt'
     create_keep_file(pheno_df, keep_file)
-    filter_cmd = [PLINK_EXECUTABLE, '--bfile', Path(plink_prefix).absolute().as_posix(), '--keep', keep_file, '--make-bed', '--out', output_prefix_abs, '--allow-extra-chr', '--allow-no-sex']
+    filter_cmd = [PLINK_EXECUTABLE, '--bfile', Path(plink_prefix).absolute().as_posix(), '--keep', keep_file, '--make-bed', '--out', output_prefix_abs, '--allow-extra-chr', '--allow-no-sex', '--keep-allele-order']
     try:
         subprocess.run(filter_cmd, capture_output=True, text=True, check=True)
         delete_temp_files(output_prefix_abs, ['_keep.txt'])
@@ -1711,7 +1711,7 @@ def filter_samples_by_phenotype(plink_prefix: str, pheno_df: pd.DataFrame, outpu
 def filter_snps_by_quality(plink_prefix: str, output_prefix: str, maf: float=0.05, geno: float=0.2) -> str:
     output_prefix_abs = Path(output_prefix).absolute().as_posix()
     plink_prefix_abs = Path(plink_prefix).absolute().as_posix()
-    filter_cmd = [PLINK_EXECUTABLE, '--bfile', plink_prefix_abs, '--maf', str(maf), '--geno', str(geno), '--make-bed', '--out', output_prefix_abs, '--allow-extra-chr', '--allow-no-sex']
+    filter_cmd = [PLINK_EXECUTABLE, '--bfile', plink_prefix_abs, '--maf', str(maf), '--geno', str(geno), '--make-bed', '--out', output_prefix_abs, '--allow-extra-chr', '--allow-no-sex', '--keep-allele-order']
     try:
         result = subprocess.run(filter_cmd, capture_output=True, text=True, check=False)
         if result.returncode != 0:
@@ -1853,7 +1853,10 @@ def extract_snps_with_plink(plink_prefix: str, snp_list: List[str], output_prefi
     with open(snp_file, 'w') as f:
         for snp in snp_list:
             f.write(f'{snp}\n')
-    cmd = [PLINK_EXECUTABLE, '--bfile', plink_prefix_abs, '--extract', snp_file, '--make-bed', '--out', output_prefix_abs, '--allow-extra-chr', '--allow-no-sex']
+    # --keep-allele-order: required for predict on small/new cohorts. Without it,
+    # PLINK reassigns A1 by local allele frequency; a single-sample VCF then codes
+    # every site as dosage 0 under --recodeA / count_A1 and predictions look constant.
+    cmd = [PLINK_EXECUTABLE, '--bfile', plink_prefix_abs, '--extract', snp_file, '--make-bed', '--out', output_prefix_abs, '--allow-extra-chr', '--allow-no-sex', '--keep-allele-order']
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if result.returncode != 0:

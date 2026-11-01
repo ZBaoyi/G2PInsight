@@ -31,6 +31,13 @@ conda install -c zbaoyi -c conda-forge g2pinsight
 G2PInsight --version
 ```
 
+Already installed and want the latest from the personal channel:
+
+```bash
+conda update -c zbaoyi -c conda-forge g2pinsight
+G2PInsight --version
+```
+
 Then go to [Quick Start](#quick-start).
 
 **Compatibility notes:**
