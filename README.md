@@ -16,42 +16,42 @@ Supports **classification** and **regression**, optional **GWAS/LD** SNP filteri
 
 ## Install
 
-**Audience:** end users who want to run the pipeline (no coding). Developers: see [Other install options](#other-install-options).
-
 **Need:** Python 3.8–3.13, Linux (recommended) or macOS. PLINK and GEMMA ship with the package. Python 3.14+ is not supported yet: its pandas/numpy wheels need a newer glibc than many HPC systems provide, so `pip install` would fail for those users.
 
-**Get G2PInsight** (recommended — from [PyPI](https://pypi.org/p/G2PInsight)):
+`bed-reader` and `psutil` are included by default. If `bed-reader` is missing at runtime, preprocess falls back to slower PLINK `--recodeA`.
 
-```bash
-pip install G2PInsight
-G2PInsight --version
-```
+Source repository: [github.com/ZBaoyi/G2PInsight](https://github.com/ZBaoyi/G2PInsight).
 
-Then go to [Quick Start](#quick-start). Source repository: [github.com/ZBaoyi/G2PInsight](https://github.com/ZBaoyi/G2PInsight).
+### Method 1 — conda (recommended)
 
----
-
-## Other install options
-
-Use these only if the one-liner in [Install](#install) is not enough.
-
-### From a personal conda channel
-
-**Who this is for:** users who prefer conda over pip.
+Prefer conda over pip:
 
 ```bash
 conda install -c zbaoyi -c conda-forge g2pinsight
 G2PInsight --version
 ```
 
+Then go to [Quick Start](#quick-start).
+
 **Compatibility notes:**
 
-- This package is **noarch**, but conda-forge deps (e.g. `catboost`, `lightgbm`, recent Python builds) often need **glibc ≥ 2.28**. On **CentOS 7 (glibc 2.17)**, `conda install` may fail with `UnsatisfiableError` / `__glibc` — use **pip** ([Install](#install)) or a **git clone** instead.
-- Conda run pins match the **Python &lt; 3.13** ranges in `pyproject.toml` (e.g. `xgboost >=1.6,<2.1`). For **Python 3.13**, prefer **pip**.
+- This package is **noarch**, but conda-forge deps (e.g. `catboost`, `lightgbm`, recent Python builds) often need **glibc ≥ 2.28**. On **CentOS 7 (glibc 2.17)**, `conda install` may fail with `UnsatisfiableError` / `__glibc` — use **Method 2** or **Method 3** instead.
+- Conda run pins match the **Python &lt; 3.13** ranges in `pyproject.toml` (e.g. `xgboost >=1.6,<2.1`). For **Python 3.13**, prefer **Method 2**.
 
-### From a local clone (editable install)
+### Method 2 — pip
 
-**Who this is for:** people who already `git clone` the repo, want to read or change the source, need edits without reinstalling, **or** whose system is too old for the conda package above.
+From [PyPI](https://pypi.org/p/G2PInsight):
+
+```bash
+pip install G2PInsight
+G2PInsight --version
+```
+
+Then go to [Quick Start](#quick-start).
+
+### Method 3 — git clone (editable)
+
+For reading/changing source, editable installs, or systems too old for the conda package.
 
 **What `-e` means:** editable mode — Python imports the code from this folder. After you edit files under `G2PInsight/`, the `G2PInsight` command uses your changes immediately.
 
@@ -62,16 +62,16 @@ pip install -e .
 G2PInsight --version
 ```
 
-Only want to use the tool (no source edits) and pip works? Prefer `pip install G2PInsight` in [Install](#install) instead.
-
-`bed-reader` and `psutil` are included by default. If `bed-reader` is missing at runtime, preprocess falls back to slower PLINK `--recodeA`.
+Only want to use the tool (no source edits) and pip works? Prefer **Method 2**.
 
 ---
 
 ## Table of Contents
 
 - [Install](#install)
-- [Other install options](#other-install-options)
+  - [Method 1 — conda](#method-1--conda-recommended)
+  - [Method 2 — pip](#method-2--pip)
+  - [Method 3 — git clone](#method-3--git-clone-editable)
 - [What you get](#what-you-get)
 - [Quick Start](#quick-start)
 - [Pipeline](#pipeline)
@@ -110,12 +110,13 @@ Only want to use the tool (no source edits) and pip works? Prefer `pip install G
 
 ## Quick Start
 
-Example data is **not** shipped in the PyPI or conda package. Get the two files under `data/` first, then run the commands below from the directory that contains that folder.
+Example data is **not** shipped in the PyPI or conda package. Get the files under `data/` first, then run the commands below from the directory that contains that folder.
 
 | File | Content |
 |------|---------|
-| `data/genotype.vcf` | VCF genotypes (~33k SNPs, ~53 MB, 413 samples) |
+| `data/genotype.vcf` | VCF genotypes (~33k SNPs, ~53 MB, 413 samples) — for **preprocess / train** |
 | `data/pheno.txt` | Two columns: sample ID + binary trait `Leaf_pubescence` (0/1); optional header OK |
+| `data/test.vcf.gz` | Held-out-style VCF (~33k SNPs, 1 sample `A0001`, ~254 KB) — for **predict** |
 
 **Recommended — download from the mirror** (works for pip / conda / clone users):
 
@@ -123,6 +124,7 @@ Example data is **not** shipped in the PyPI or conda package. Get the two files 
 mkdir -p data
 wget -O data/genotype.vcf https://pr-nxy.ynu.edu.cn/G2PInsight/data/genotype.vcf
 wget -O data/pheno.txt https://pr-nxy.ynu.edu.cn/G2PInsight/data/pheno.txt
+wget -O data/test.vcf.gz https://pr-nxy.ynu.edu.cn/G2PInsight/data/test.vcf.gz
 ```
 
 Or pull the whole folder:
@@ -131,11 +133,38 @@ Or pull the whole folder:
 wget -r -np -nH --cut-dirs=1 -R "index.html*" https://pr-nxy.ynu.edu.cn/G2PInsight/data/
 ```
 
-**Alternative — `git clone`:** the same files are in the GitHub repo under `data/` (~53 MB VCF; clone may be slow on some networks).
+**Alternative — `git clone`:** the same files are in the GitHub repo under `data/` (~53 MB `genotype.vcf` plus `pheno.txt` / `test.vcf.gz`; clone may be slow on some networks).
+
+### Path A — train-all
+
+On this example with `-f 4`, the best model is **SVM**.
 
 ```bash
 # 1. Preprocess  →  test/preprocess/preprocess/preprocess_metadata.json
-G2PInsight preprocess --vcf data/genotype.vcf -p data/pheno.txt -o test/preprocess
+G2PInsight preprocess --vcf data/genotype.vcf -p data/pheno.txt -o test/preprocess -f 4
+```
+```bash
+# 2. Train-all  →  test/train/train/SVM/
+G2PInsight train-all -j test/preprocess/preprocess/preprocess_metadata.json -o test/train \
+  --parallel_models 1 --threads 4
+```
+```bash
+# 3. Visualize  →  test/plot/visualize/svm_*
+G2PInsight visualize \
+  -i test/train/train/SVM/SVM_shap_values.txt \
+  -I test/train/train/SVM/SVM_plotting_data.json \
+  -o test/plot/svm
+```
+```bash
+# 4. Predict (optional)  →  test/predict/predict/SVM_predictions.tsv
+G2PInsight predict -i data/test.vcf.gz -m test/train/train/SVM/SVM_model.pkl -o test/predict
+```
+
+### Path B — train (one model)
+
+```bash
+# 1. Preprocess  →  test/preprocess/preprocess/preprocess_metadata.json
+G2PInsight preprocess --vcf data/genotype.vcf -p data/pheno.txt -o test/preprocess -f 4
 ```
 ```bash
 # 2. Train  →  test/train/train/LightGBM/
@@ -148,13 +177,9 @@ G2PInsight visualize \
   -I test/train/train/LightGBM/LightGBM_plotting_data.json \
   -o test/plot/lightgbm
 ```
-
-**Larger SNP sets** — use preprocess feature selection (`-f 4`), then train conservatively:
-
 ```bash
-G2PInsight preprocess --vcf data/genotype.vcf -p data/pheno.txt -o test/preprocess -f 4
-G2PInsight train-all -j test/preprocess/preprocess/preprocess_metadata.json -o test/train \
-  --parallel_models 1 --threads 4
+# 4. Predict (optional)  →  test/predict/predict/LightGBM_predictions.tsv
+G2PInsight predict -i data/test.vcf.gz -m test/train/train/LightGBM/LightGBM_model.pkl -o test/predict
 ```
 
 ---
@@ -350,11 +375,23 @@ G2PInsight predict -i <input> -m <model.pkl> -o <output_dir> [--task_type <type>
 | PLINK binary prefix | `.bed/.bim/.fam` — **training SNPs extracted first** |
 | VCF `.vcf` / `.vcf.gz` | Converted internally; **training SNPs extracted first** |
 
+**Example** (bundled `data/test.vcf.gz` after Path A / Path B training):
+
 ```bash
-G2PInsight predict -i new_genotype -m results/train/LightGBM/LightGBM_model.pkl -o results/ --task_type regression
+# After Path A (best model SVM):
+G2PInsight predict -i data/test.vcf.gz -m test/train/train/SVM/SVM_model.pkl -o test/predict
+
+# After Path B (LightGBM):
+G2PInsight predict -i data/test.vcf.gz -m test/train/train/LightGBM/LightGBM_model.pkl -o test/predict
 ```
 
-Use the same genome build and SNP naming as training (`*_training_features.json`).
+Generic form:
+
+```bash
+G2PInsight predict -i new_genotype.vcf.gz -m results/train/LightGBM/LightGBM_model.pkl -o results/ --task_type regression
+```
+
+Use the same genome build and SNP naming as training (`*_training_features.json`). The example `data/test.vcf.gz` matches the Quick Start `genotype.vcf` SNP set (sample `A0001`).
 
 ---
 
@@ -493,6 +530,19 @@ Usually from an older preprocess with **`-f 3` / `-f 4`**: LD used train-only `-
 ### train-all / CatBoost: `DataFrame` has no attribute `iteritems`
 
 Old CatBoost + **pandas 2.x** (removed `iteritems`). Current G2PInsight passes numpy arrays into CatBoost. Temporary workaround: `pip install -U 'catboost>=1.2,<2'` or `pip install 'pandas>=1.3,<2'`.
+
+### pip install fails building `llvmlite` / `numba`
+
+**Cause:** On **CentOS 7 / glibc 2.17**, recent `numba` (0.68+) pulls `llvmlite>=0.50`, which only has **manylinux_2_28** wheels. pip falls back to a source build and fails without a system LLVM.
+
+**Fix (current package pins `numba<0.68`):** upgrade/reinstall G2PInsight, or in the same env:
+
+```bash
+pip install 'numba>=0.57,<0.68' 'llvmlite>=0.40,<0.50'
+pip install G2PInsight
+```
+
+Prefer **Python 3.10–3.12**. Avoid forcing the newest numba on old HPC glibc.
 
 ### train: XGBoost “Mismatched version … Python package … Shared object”
 

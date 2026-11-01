@@ -35,7 +35,8 @@ requirements:
     - joblib >=1.0
     - matplotlib-base >=3.5
     - pillow >=8,<12.3
-    - numba >=0.57
+    - numba >=0.57,<0.68
+    - llvmlite >=0.40,<0.50
     - lightgbm >=3.3,<4.0
     - xgboost >=1.6,<2.1
     - catboost >=1.2,<2.0

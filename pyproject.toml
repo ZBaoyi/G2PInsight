@@ -55,8 +55,12 @@ dependencies = [
     "matplotlib>=3.5",
     # Pillow 12.3+ drops manylinux2014.
     "Pillow>=8,<12.3",
-    "numba>=0.57; python_version < '3.13'",
-    "numba>=0.61; python_version >= '3.13'",
+    # Cap below 0.68: numba 0.68+ needs llvmlite>=0.50, which only ships
+    # manylinux_2_28 wheels (glibc ≥ 2.28). On CentOS 7 / glibc 2.17, pip
+    # then builds llvmlite from source and fails (no system LLVM).
+    "numba>=0.57,<0.68; python_version < '3.13'",
+    "numba>=0.61,<0.68; python_version >= '3.13'",
+    "llvmlite>=0.40,<0.50",
     "lightgbm>=3.3,<4.0.0; python_version < '3.13'",
     "lightgbm>=4.0; python_version >= '3.13'",
     "xgboost>=1.6,<2.1; python_version < '3.13'",

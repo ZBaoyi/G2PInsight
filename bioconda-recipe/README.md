@@ -8,11 +8,14 @@
 
 run 依赖版本与 `pyproject.toml` 中 **Python &lt; 3.13** 对齐（含 `xgboost >=1.6,<2.1` 等）。Python 3.13 请用 pip。
 
+Fork 分支（已推送）：`update-g2pinsight-1.1.4`  
+开 PR：https://github.com/bioconda/bioconda-recipes/compare/master...ZBaoyi:bioconda-recipes:update-g2pinsight-1.1.4?expand=1
+
 ---
 
 ## 第 0 步：前置检查
 
-- [ ] 已发布到 PyPI：`pip install G2PInsight==1.1.4`
+- [x] 已发布到 PyPI：`pip install G2PInsight==1.1.4`
 - [x] sdist 含 `LICENSE`
 - [x] 入口脚本：`G2PInsight`
 - [x] 本目录 `meta.yaml` 使用 `url` + `sha256`（非本地 `path`）
