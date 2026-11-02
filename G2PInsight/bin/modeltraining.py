@@ -2022,9 +2022,6 @@ def predict_with_model(input_path: str, model_path: str, output_dir: str, task_t
         X_pred = _features_for_estimator(model, X_aligned)
         y_pred = model.predict(X_pred)
         y_prob = model.predict_proba(X_pred) if resolved_task_type == 'classification' and hasattr(model, 'predict_proba') else None
-        unique_predictions = len(np.unique(y_pred))
-        if unique_predictions == 1:
-            logger.error(f"  ERROR: All predictions are the same value: {y_pred[0]}\n  This usually indicates one of the following issues:\n  1. chr_pos keys don't match between training and prediction data\n  2. All feature values are zero (check matched features: {matched_count})\n  3. Model is predicting a constant value for all samples\n  Please check the feature alignment logs above.")
         pred_output_dir = Path(output_dir)
         pred_output_dir.mkdir(parents=True, exist_ok=True)
         pred_file = pred_output_dir / f'{model_type}_predictions.tsv'

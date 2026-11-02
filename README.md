@@ -54,6 +54,13 @@ pip install G2PInsight
 G2PInsight --version
 ```
 
+Already installed and want the latest from PyPI:
+
+```bash
+pip install -U G2PInsight
+G2PInsight --version
+```
+
 Then go to [Quick Start](#quick-start).
 
 ### Method 3 — git clone (editable)
