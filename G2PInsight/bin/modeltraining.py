@@ -770,7 +770,7 @@ def _cleanup_train_all_temp_dirs(base_output_dir: Optional[Path], *, shared_matr
             except Exception:
                 pass
 ALL_MODEL_TYPES = ['LightGBM', 'RandomForest', 'XGBoost', 'SVM', 'CatBoost', 'Logistic']
-CLASSIFICATION_ONLY_MODELS = frozenset[str]({'Logistic'})
+CLASSIFICATION_ONLY_MODELS = frozenset({'Logistic'})  # plain frozenset: frozenset[str](...) needs Python >=3.9
 def get_supported_models(task_type: str) -> List[str]:
     if task_type == 'classification':
         return list(ALL_MODEL_TYPES)
