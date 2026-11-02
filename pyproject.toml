@@ -74,7 +74,10 @@ dependencies = [
     "kaleido>=0.2,<1",
     "seaborn>=0.11",
     # >=1.0: open_bed accepts fam_location/bim_location (0.2.x only had fam_filepath).
-    "bed-reader>=1.0",  # default fast PLINK .bed backend for preprocess
+    # 1.0.5+ dropped Linux cp38 wheels; pip then builds sdist and needs
+    # puccinialin (Requires-Python >=3.9), which fails on Python 3.8.
+    "bed-reader>=1.0,<1.0.5; python_version < '3.9'",
+    "bed-reader>=1.0; python_version >= '3.9'",
     "psutil>=5.0",
 ]
 
